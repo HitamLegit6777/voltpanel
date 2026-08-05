@@ -31,7 +31,7 @@ sudo voltd-manage upgrade
 sudo voltd-manage doctor
 ```
 
-Running workloads are tied to the daemon lifecycle. Plan a maintenance window or transfer workloads first.
+Running workloads are tied to the execution-agent lifecycle. Plan a maintenance window or transfer workloads first.
 
 ## Manual rollback
 
@@ -82,4 +82,4 @@ ip link show | grep '^.*vp'
 sudo nft list tables | grep '^table ip vp'
 ```
 
-Normal daemon cleanup removes these automatically.
+Normal agent cleanup removes these automatically.

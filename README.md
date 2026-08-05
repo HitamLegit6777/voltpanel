@@ -1,39 +1,38 @@
 # VoltPanel
 
-A free, self-hosted, Docker-free control plane for game servers and application workloads. VoltPanel is written in Rust and ships as two binaries:
+VoltPanel is a free, self-hosted Linux workload platform for games, websites, bots, and application services. It is designed around an original operational model rather than reproducing another hosting panel's screens or terminology.
 
-- `voltpanel` — web panel, API, scheduler, database, UI, placement and orchestration
-- `voltd` — execution agent for isolated workload execution, remote files, console, metrics, snapshots and transfers
+- `voltpanel` — control plane, Pulse UI, Flow engine, placement, identity, and state
+- `voltd` — execution agent for isolated workloads, storage, terminal streams, telemetry, Vault snapshots, and transfers
 
-VoltPanel uses SQLite for panel state and Linux-native isolation (`bubblewrap`, namespaces, unique UIDs, cgroup v2, veth and nftables) instead of Docker.
+The platform uses SQLite plus Linux-native isolation (`bubblewrap`, namespaces, unique UIDs, cgroup v2, veth, and nftables). Docker is not part of the runtime path.
 
-## VoltPanel product model
+## Native product model
 
-VoltPanel is designed as a Linux-native workload control plane, not a clone of an existing hosting panel. Its interface and architecture use a distinct operational model:
+VoltPanel's public language and workflows are its own:
 
-- **Fleet** — aggregate capacity, health, activity and workload telemetry
-- **Workspaces** — isolated game/application environments owned by users or teams
-- **Fabric** — the distributed set of `voltd` execution agents
-- **Blueprints** — reusable workload definitions, variables, runtime and installer logic
-- **Automations** — cross-workspace cron and event-driven operations
-- **Vault** — verified snapshots, restore points and transfers
-- **Signals** — security, lifecycle and operator activity events
+- **Pulse** — live operational posture, workload health, capacity pressure, and Signals
+- **Workspaces** — isolated environments owned by a person or team
+- **Fabric** — the mesh of local and remote `voltd` execution agents
+- **VoltSpec Blueprints** — portable launch plans, validated inputs, setup logic, and defaults
+- **Flows** — scheduled or event-driven lifecycle, command, and snapshot pipelines
+- **Vault** — verified snapshots, restore points, and workspace transfers
+- **Data Lab** — workspace-scoped SQLite exploration with an authorizer sandbox
+- **Observatory** — platform capacity, endpoint reservations, and security posture
 
-This model treats games, bots, websites and application processes as first-class workloads on the same secure fabric.
+Games are one workload type—not the shape of the product. Sites, bots, proxies, workers, and custom language runtimes use the same blueprint and fabric model.
 
 ## Highlights
 
-- Multi-node control plane with one-command enrollment
-- Capacity-aware node placement, tags, locations and maintenance mode
-- Fail-closed workload isolation
-- cgroup v2 memory, CPU and process limits
-- Per-server network namespace and node-scoped multi-port allocations
-- Remote console, files, power, stats, snapshots and node transfer
-- Workload blueprints, variables and sandboxed installers
-- Backups, schedules, per-server SQLite databases and audit history
-- Argon2id, TOTP 2FA, hashed sessions, bearer API keys and subuser permissions
-- Responsive custom UI with live telemetry and command palette
-- No PHP, Redis, MySQL, Docker or paid service required
+- Execution Fabric with one-command agent enrollment
+- Capacity-aware placement using agent tags, locations, health, and maintenance state
+- Fail-closed workload isolation with cgroup v2 and private Linux namespaces
+- Workspace-scoped endpoint reservations rather than generic server allocations
+- Unified Terminal, Storage, Data Lab, Vault, Flow, and Signals experiences
+- Portable VoltSpec blueprints with validated inputs and sandboxed setup plans
+- Argon2id, TOTP, hashed sessions, scoped API credentials, and team permissions
+- Original responsive Pulse UI, Blueprint Studio, agent mesh, and command palette
+- No PHP, Redis, MySQL, Docker, or paid service required
 
 ## Supported systems
 
@@ -158,7 +157,7 @@ Each workload runs with:
 ## Documentation
 
 - [Installation](docs/INSTALLATION.md)
-- [Multi-node operations](docs/MULTI_NODE.md)
+- [Execution Fabric operations](docs/MULTI_NODE.md)
 - [Security and isolation](docs/SECURITY.md)
 - [Operations and backups](docs/OPERATIONS.md)
 - [Upgrade and uninstall](docs/UPGRADE.md)
@@ -168,14 +167,14 @@ Each workload runs with:
 
 | Component | Path |
 |---|---|
-| Panel binary | `/usr/local/bin/voltpanel` |
-| Node binary | `/usr/local/bin/voltd` |
-| Panel config | `/etc/voltpanel/config.toml` |
-| Node config | `/etc/voltpanel-node/voltd.toml` |
-| Panel data | `/var/lib/voltpanel` |
-| Node data | `/var/lib/voltd` |
-| Panel service | `voltpanel.service` |
-| Node service | `voltd.service` |
+| Control-plane binary | `/usr/local/bin/voltpanel` |
+| Execution-agent binary | `/usr/local/bin/voltd` |
+| Control-plane config | `/etc/voltpanel/config.toml` |
+| Execution-agent config | `/etc/voltpanel-node/voltd.toml` |
+| Control-plane data | `/var/lib/voltpanel` |
+| Execution-agent data | `/var/lib/voltd` |
+| Control-plane service | `voltpanel.service` |
+| Execution-agent service | `voltd.service` |
 
 ## Contributing
 
@@ -186,9 +185,9 @@ Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), follow the [
 | Port | Purpose | Exposure |
 |---|---|---|
 | 80/443 | Caddy HTTP/HTTPS | Public when using a domain |
-| 8080 | Panel origin | Loopback behind Caddy; LAN only otherwise |
-| 8081 | Node API origin | Loopback behind Caddy; panel-only otherwise |
-| 20000–30000 | Suggested game allocation range | Per provider policy |
+| 8080 | Control-plane origin | Loopback behind Caddy; LAN only otherwise |
+| 8081 | Execution-agent API | Private control-plane reachability only |
+| 20000–30000 | Suggested workspace endpoint range | Per provider policy |
 
 ## Security policy
 

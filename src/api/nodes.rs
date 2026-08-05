@@ -1,4 +1,4 @@
-//! Multi-node administration, enrollment, heartbeat, placement and health APIs.
+//! Execution fabric administration, enrollment, heartbeat, placement, and health APIs.
 use super::{data, ok, AdminUser, ApiError, ApiResult, AppState};
 use crate::node_protocol::{self, NodeHeartbeat, SignedHeaders};
 use crate::nodes;
@@ -133,7 +133,7 @@ pub async fn update(
         id,
         "info",
         "updated",
-        "node configuration updated",
+        "execution agent configuration updated",
         &serde_json::json!({}),
     )?;
     Ok(Json(serde_json::to_value(n)?))
@@ -193,7 +193,7 @@ pub async fn enroll(
         n.id,
         "info",
         "enrolled",
-        "node daemon enrolled",
+        "execution agent enrolled",
         &serde_json::json!({
             "hostname": req.heartbeat.hostname,
             "version": req.heartbeat.daemon_version,
@@ -381,12 +381,12 @@ pub async fn transfer_server(
             return Err(e.into());
         }
     };
-    let egg = crate::models::get_egg(&state.db, server.egg_id)?;
+    let blueprint = crate::models::get_blueprint(&state.db, server.egg_id)?;
     let spec = crate::node_protocol::ServerSpec {
         uuid: server.uuid.clone(),
         name: server.name.clone(),
-        startup: crate::services::egg::resolve_startup(&state.db, &server)?,
-        stop_command: egg.stop_command,
+        startup: crate::services::blueprint::resolve_startup(&state.db, &server)?,
+        stop_command: blueprint.stop_command,
         memory_mb: server.memory_mb as u64,
         disk_mb: server.disk_mb as u64,
         cpu_percent: server.cpu_percent as u64,
@@ -395,7 +395,7 @@ pub async fn transfer_server(
             .into_iter()
             .filter_map(|p| u16::try_from(p).ok())
             .collect(),
-        env: crate::services::egg::env_for_server(&state.db, &server),
+        env: crate::services::blueprint::env_for_server(&state.db, &server),
         auto_restart: server.auto_restart,
     };
     if let Err(e) = state

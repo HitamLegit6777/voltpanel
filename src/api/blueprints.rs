@@ -1,6 +1,6 @@
-//! Egg endpoints: CRUD + import/export.
+//! Workload blueprint endpoints: CRUD + import/export.
 use super::{data, ok, AdminUser, ApiResult, AppState, AuthUser};
-use crate::models::{self, Egg, EggVariable};
+use crate::models::{self, Blueprint, BlueprintInput};
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -9,20 +9,20 @@ pub async fn list(
     State(state): State<AppState>,
     _u: AuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let eggs = models::list_eggs(&state.db)?;
-    Ok(data(serde_json::to_value(eggs)?))
+    let blueprints = models::list_blueprints(&state.db)?;
+    Ok(data(serde_json::to_value(blueprints)?))
 }
 
 pub async fn get(
     State(state): State<AppState>,
     _u: AuthUser,
     Path(id): Path<i64>,
-) -> ApiResult<Json<Egg>> {
-    Ok(Json(models::get_egg(&state.db, id)?))
+) -> ApiResult<Json<Blueprint>> {
+    Ok(Json(models::get_blueprint(&state.db, id)?))
 }
 
 #[derive(Deserialize)]
-pub struct CreateEggReq {
+pub struct CreateBlueprintReq {
     pub name: String,
     pub description: Option<String>,
     pub author: Option<String>,
@@ -31,17 +31,17 @@ pub struct CreateEggReq {
     pub startup: String,
     pub install_script: Option<String>,
     pub stop_command: Option<String>,
-    pub variables: Option<Vec<EggVariable>>,
+    pub variables: Option<Vec<BlueprintInput>>,
     pub default_config: Option<String>,
 }
 
 pub async fn create(
     State(state): State<AppState>,
     _a: AdminUser,
-    Json(req): Json<CreateEggReq>,
-) -> ApiResult<Json<Egg>> {
+    Json(req): Json<CreateBlueprintReq>,
+) -> ApiResult<Json<Blueprint>> {
     let uuid = uuid::Uuid::new_v4().to_string();
-    let id = models::create_egg(
+    let id = models::create_blueprint(
         &state.db,
         &uuid,
         &req.name,
@@ -56,11 +56,11 @@ pub async fn create(
         req.variables.as_deref().unwrap_or(&[]),
         req.stop_command.as_deref().unwrap_or("stop"),
     )?;
-    Ok(Json(models::get_egg(&state.db, id)?))
+    Ok(Json(models::get_blueprint(&state.db, id)?))
 }
 
 #[derive(Deserialize)]
-pub struct UpdateEggReq {
+pub struct UpdateBlueprintReq {
     pub name: Option<String>,
     pub description: Option<String>,
     pub author: Option<String>,
@@ -69,7 +69,7 @@ pub struct UpdateEggReq {
     pub startup: Option<String>,
     pub install_script: Option<String>,
     pub stop_command: Option<String>,
-    pub variables: Option<Vec<EggVariable>>,
+    pub variables: Option<Vec<BlueprintInput>>,
     pub default_config: Option<String>,
 }
 
@@ -77,9 +77,9 @@ pub async fn update(
     State(state): State<AppState>,
     _a: AdminUser,
     Path(id): Path<i64>,
-    Json(req): Json<UpdateEggReq>,
-) -> ApiResult<Json<Egg>> {
-    let mut e = models::get_egg(&state.db, id)?;
+    Json(req): Json<UpdateBlueprintReq>,
+) -> ApiResult<Json<Blueprint>> {
+    let mut e = models::get_blueprint(&state.db, id)?;
     if let Some(v) = req.name {
         e.name = v;
     }
@@ -110,7 +110,7 @@ pub async fn update(
     if let Some(v) = req.default_config {
         e.default_config = Some(v);
     }
-    models::update_egg(&state.db, &e)?;
+    models::update_blueprint(&state.db, &e)?;
     Ok(Json(e))
 }
 
@@ -119,7 +119,7 @@ pub async fn delete(
     _a: AdminUser,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    models::delete_egg(&state.db, id)?;
+    models::delete_blueprint(&state.db, id)?;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
 
@@ -132,10 +132,10 @@ pub async fn import(
     State(state): State<AppState>,
     _a: AdminUser,
     Json(req): Json<ImportReq>,
-) -> ApiResult<Json<Egg>> {
-    let parsed = crate::services::egg::parse_egg_json(&req.json)?;
+) -> ApiResult<Json<Blueprint>> {
+    let parsed = crate::services::blueprint::parse_blueprint_json(&req.json)?;
     let uuid = uuid::Uuid::new_v4().to_string();
-    let id = models::create_egg(
+    let id = models::create_blueprint(
         &state.db,
         &uuid,
         &parsed.name,
@@ -154,7 +154,7 @@ pub async fn import(
         &parsed.variables,
         &parsed.stop,
     )?;
-    Ok(Json(models::get_egg(&state.db, id)?))
+    Ok(Json(models::get_blueprint(&state.db, id)?))
 }
 
 #[derive(Serialize)]
@@ -167,7 +167,7 @@ pub async fn export(
     _u: AuthUser,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<ExportResp>> {
-    let e = models::get_egg(&state.db, id)?;
+    let e = models::get_blueprint(&state.db, id)?;
     let out = serde_json::to_string_pretty(&serde_json::json!({
         "name": e.name,
         "description": e.description,

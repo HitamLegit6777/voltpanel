@@ -2,7 +2,7 @@
 name = "voltpanel"
 version = "0.1.0"
 edition = "2021"
-description = "Lightweight, Docker-free game/server/web hosting panel written in Rust"
+description = "Linux-native workload control plane with VoltSpec blueprints and execution agents"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

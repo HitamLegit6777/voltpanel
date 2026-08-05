@@ -1,4 +1,4 @@
-# Multi-node architecture and operations
+# Execution Fabric architecture and operations
 
 ## Components
 
@@ -7,7 +7,7 @@ VoltPanel separates the control plane from workload execution:
 - `voltpanel`: users, UI, authorization, SQLite, placement, schedules, audit, API
 - `voltd`: isolated process execution, resources, network, files, console and snapshots
 
-Nodes can be in different locations as long as panel↔node HTTPS connectivity exists.
+Execution agents can be in different locations as long as panel↔node HTTPS connectivity exists.
 
 ## Enrollment
 
@@ -46,14 +46,14 @@ timedatectl status
 
 ## Placement
 
-Automatic placement filters nodes by:
+Automatic placement filters agents by:
 
 - Online/enrolled/enabled state
 - Maintenance and schedulable flags
 - Location
 - Required tags
 - Available memory and disk capacity
-- Node-scoped port availability
+- Agent-scoped endpoint availability
 
 Candidates are scored using CPU, memory utilization and running server count.
 
@@ -89,7 +89,7 @@ Each workload receives:
 
 The node host cannot be reached from a workload. Outbound public internet remains available for game authentication and downloads.
 
-## Transfer between nodes
+## Transfer between agents
 
 Transfers are offline and integrity-checked:
 
@@ -118,7 +118,7 @@ Before maintenance:
 
 ## Secret rotation
 
-Rotating a secret invalidates the daemon's current secret. For safe rotation:
+Rotating a secret invalidates the agent's current secret. For safe rotation:
 
 1. Stop new provisioning
 2. Generate a new enrollment token

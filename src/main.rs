@@ -210,15 +210,15 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/servers/:id/files/extract", post(files::extract))
         .route("/api/servers/:id/files/summary", get(files::summary))
         .route("/api/servers/:id/files/exists", get(files::exists_check))
-        // ------- eggs -------
-        .route("/api/eggs", get(eggs::list))
-        .route("/api/eggs/:id", get(eggs::get))
-        .route("/api/eggs", post(eggs::create))
-        .route("/api/eggs/:id", patch(eggs::update))
-        .route("/api/eggs/:id", delete(eggs::delete))
-        .route("/api/eggs/import", post(eggs::import))
-        .route("/api/eggs/:id/export", get(eggs::export))
-        .route("/api/eggs/categories", get(eggs::categories))
+        // ------- workload blueprints -------
+        .route("/api/blueprints", get(blueprints::list))
+        .route("/api/blueprints/:id", get(blueprints::get))
+        .route("/api/blueprints", post(blueprints::create))
+        .route("/api/blueprints/:id", patch(blueprints::update))
+        .route("/api/blueprints/:id", delete(blueprints::delete))
+        .route("/api/blueprints/import", post(blueprints::import))
+        .route("/api/blueprints/:id/export", get(blueprints::export))
+        .route("/api/blueprints/categories", get(blueprints::categories))
         // ------- schedules -------
         .route("/api/servers/:id/schedules", get(schedules::list))
         .route("/api/servers/:id/schedules", post(schedules::create))
@@ -367,15 +367,15 @@ fn seed(db: &db::Db, cfg: &config::Config) -> Result<()> {
         )?;
         tracing::warn!("FIRST-RUN ADMIN CREDENTIAL — username=admin password={password} — change it immediately");
     }
-    // eggs
-    if models::list_eggs(db)?.is_empty() {
-        seed_eggs(db)?;
+    // Built-in VoltSpec blueprints.
+    if models::list_blueprints(db)?.is_empty() {
+        seed_blueprints(db)?;
     }
     Ok(())
 }
 
-fn seed_eggs(db: &db::Db) -> Result<()> {
-    let eggs: Vec<(serde_json::Value, &str)> = vec![
+fn seed_blueprints(db: &db::Db) -> Result<()> {
+    let blueprints: Vec<(serde_json::Value, &str)> = vec![
         (
             serde_json::json!({
                 "name": "Node.js", "description": "Run any Node.js application", "author": "voltpanel",
@@ -448,19 +448,28 @@ fn seed_eggs(db: &db::Db) -> Result<()> {
             "redis",
         ),
     ];
-    for (egg, _slug) in eggs {
-        let name = egg["name"].as_str().unwrap().to_string();
-        let description = egg["description"].as_str().unwrap_or("").to_string();
-        let author = egg["author"].as_str().unwrap_or("voltpanel").to_string();
-        let category = egg["category"].as_str().unwrap_or("generic").to_string();
-        let image = egg["docker_image"].as_str().unwrap_or("alpine").to_string();
-        let startup = egg["startup"].as_str().unwrap_or("").to_string();
-        let stop = egg["stop"].as_str().unwrap_or("stop").to_string();
-        let vars: Vec<crate::models::EggVariable> = egg["variables"]
+    for (blueprint, _slug) in blueprints {
+        let name = blueprint["name"].as_str().unwrap().to_string();
+        let description = blueprint["description"].as_str().unwrap_or("").to_string();
+        let author = blueprint["author"]
+            .as_str()
+            .unwrap_or("voltpanel")
+            .to_string();
+        let category = blueprint["category"]
+            .as_str()
+            .unwrap_or("generic")
+            .to_string();
+        let image = blueprint["docker_image"]
+            .as_str()
+            .unwrap_or("linux-native")
+            .to_string();
+        let startup = blueprint["startup"].as_str().unwrap_or("").to_string();
+        let stop = blueprint["stop"].as_str().unwrap_or("stop").to_string();
+        let vars: Vec<crate::models::BlueprintInput> = blueprint["variables"]
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .map(|v| crate::models::EggVariable {
+                    .map(|v| crate::models::BlueprintInput {
                         name: v["name"].as_str().unwrap_or("").to_string(),
                         description: v["description"].as_str().unwrap_or("").to_string(),
                         env_var: v["env_var"].as_str().unwrap_or("").to_string(),
@@ -472,8 +481,10 @@ fn seed_eggs(db: &db::Db) -> Result<()> {
                     .collect()
             })
             .unwrap_or_default();
-        let install = egg["install"]["script"].as_str().map(|s| s.to_string());
-        models::create_egg(
+        let install = blueprint["install"]["script"]
+            .as_str()
+            .map(|s| s.to_string());
+        models::create_blueprint(
             db,
             &uuid::Uuid::new_v4().to_string(),
             &name,

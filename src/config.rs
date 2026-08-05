@@ -34,7 +34,8 @@ pub struct Web {
 pub struct Paths {
     pub servers_dir: PathBuf,
     pub backups_dir: PathBuf,
-    pub eggs_dir: PathBuf,
+    #[serde(alias = "eggs_dir")]
+    pub blueprints_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub website_dir: PathBuf,
 }
@@ -86,8 +87,8 @@ impl Config {
         if self.paths.backups_dir.is_relative() {
             self.paths.backups_dir = base.join(&self.paths.backups_dir);
         }
-        if self.paths.eggs_dir.is_relative() {
-            self.paths.eggs_dir = base.join(&self.paths.eggs_dir);
+        if self.paths.blueprints_dir.is_relative() {
+            self.paths.blueprints_dir = base.join(&self.paths.blueprints_dir);
         }
         if self.paths.logs_dir.is_relative() {
             self.paths.logs_dir = base.join(&self.paths.logs_dir);
@@ -102,7 +103,7 @@ impl Config {
             &self.general.data_dir,
             &self.paths.servers_dir,
             &self.paths.backups_dir,
-            &self.paths.eggs_dir,
+            &self.paths.blueprints_dir,
             &self.paths.logs_dir,
             &self.paths.website_dir,
         ] {
@@ -133,7 +134,7 @@ impl Default for Config {
             paths: Paths {
                 servers_dir: PathBuf::from("servers"),
                 backups_dir: PathBuf::from("backups"),
-                eggs_dir: PathBuf::from("eggs"),
+                blueprints_dir: PathBuf::from("blueprints"),
                 logs_dir: PathBuf::from("logs"),
                 website_dir: PathBuf::from("websites"),
             },

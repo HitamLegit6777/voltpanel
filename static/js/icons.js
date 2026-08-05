@@ -13,7 +13,7 @@ const ICONS = {
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/>',
   user: '<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/>',
   users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
-  egg: '<path d="M12 2a8 8 0 0 0-8 8c0 6 3.5 12 8 12s8-6 8-12a8 8 0 0 0-8-8z"/>',
+  blueprint: '<path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h5M8 16h8"/>',
   activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
   /* actions */
   power: '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><path d="M12 2v10"/>',

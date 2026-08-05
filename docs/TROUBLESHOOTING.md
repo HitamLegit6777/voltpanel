@@ -69,7 +69,7 @@ Inspect the error in the panel notification/audit feed and service logs.
 
 Ports are unique per node. A conflict returns a 400 error and does not create the server.
 
-Find allocations:
+Find endpoint reservations:
 
 ```bash
 sqlite3 /var/lib/voltpanel/voltpanel.db \
@@ -113,7 +113,7 @@ Restart panel. Node `max_upload_mb` is stored in `/etc/voltpanel-node/voltd.toml
 
 ## File operation says symlink traversal rejected
 
-Remote file APIs intentionally reject symlinks because the daemon runs with host privileges. Replace the symlink with a real file/directory inside the server root.
+Remote file APIs intentionally reject symlinks because the execution agent runs with host privileges. Replace the symlink with a real file/directory inside the server root.
 
 ## Lost admin password
 

@@ -1,4 +1,4 @@
-//! `voltd` — lightweight VoltPanel node daemon.
+//! `voltd` — lightweight VoltPanel execution agent.
 //! Commands:
 //! - `voltd join <panel-url> <token> [--public-url URL] [--listen ADDR]`
 //! - `voltd serve [--config PATH]`
@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
 }
 
 fn usage() {
-    println!("voltd — VoltPanel node daemon\n\n  voltd join <panel-url> <token> [--public-url URL] [--listen 0.0.0.0:8081] [--data DIR] [--config FILE] [--allow-http] [--no-start]\n  voltd serve [--config FILE]\n\njoin writes secure configuration automatically. Non-loopback HTTP enrollment requires --allow-http. --no-start enrolls without starting the server.");
+    println!("voltd — VoltPanel execution agent\n\n  voltd join <panel-url> <token> [--public-url URL] [--listen 0.0.0.0:8081] [--data DIR] [--config FILE] [--allow-http] [--no-start]\n  voltd serve [--config FILE]\n\njoin writes secure agent configuration automatically. Non-loopback HTTP enrollment requires --allow-http. --no-start enrolls without starting the agent.");
 }
 
 fn config_arg(args: &[String]) -> Result<PathBuf> {
@@ -200,7 +200,7 @@ async fn join(args: &[String]) -> Result<()> {
     if args.iter().any(|v| v == "--no-start") {
         return Ok(());
     }
-    println!("Starting daemon...");
+    println!("Starting execution agent...");
     serve(config_path).await
 }
 
@@ -208,7 +208,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
     let config = DaemonConfig::load(&config_path)
         .with_context(|| format!("run `voltd join` first or create {}", config_path.display()))?;
     if config.node_id.is_empty() || config.secret.is_empty() {
-        bail!("daemon is not enrolled; run `voltd join`");
+        bail!("execution agent is not enrolled; run `voltd join`");
     }
     let address: SocketAddr = config.listen.parse().context("invalid listen address")?;
     let max_body = config

@@ -53,7 +53,7 @@ fi
 
 install_packages
 install_binary voltpanel
-run install -d -m 0700 "$DATA_DIR" "$DATA_DIR/servers" "$DATA_DIR/backups" "$DATA_DIR/eggs" "$DATA_DIR/logs" "$DATA_DIR/websites"
+run install -d -m 0700 "$DATA_DIR" "$DATA_DIR/servers" "$DATA_DIR/backups" "$DATA_DIR/blueprints" "$DATA_DIR/logs" "$DATA_DIR/websites"
 run install -d -m 0700 "$CONFIG_DIR"
 
 ADMIN_PASSWORD=${VOLTPANEL_ADMIN_PASSWORD:-$(random_secret 24)}
@@ -76,7 +76,7 @@ max_body_mb = 256
 [paths]
 servers_dir = "servers"
 backups_dir = "backups"
-eggs_dir = "eggs"
+blueprints_dir = "blueprints"
 logs_dir = "logs"
 website_dir = "websites"
 

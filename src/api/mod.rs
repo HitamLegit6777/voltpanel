@@ -1,8 +1,8 @@
 //! API layer: shared state, error type, extractors.
 pub mod backups;
+pub mod blueprints;
 pub mod console;
 pub mod databases;
-pub mod eggs;
 pub mod files;
 pub mod keys;
 pub mod nodes;

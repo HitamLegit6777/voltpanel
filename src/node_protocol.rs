@@ -1,8 +1,8 @@
-//! Shared wire protocol between VoltPanel and the `voltd` node daemon.
+//! Shared wire protocol between VoltPanel and the `voltd` execution agent.
 //!
 //! Requests are authenticated with HMAC-SHA256 over:
 //! `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(BODY)`.
-//! The daemon rejects timestamps outside a 90-second window and re-used nonces.
+//! The agent rejects timestamps outside a 90-second window and re-used nonces.
 use anyhow::{anyhow, bail, Result};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};

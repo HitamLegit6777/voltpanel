@@ -100,16 +100,16 @@ A PR should include:
 
 Keep commits focused. Do not include runtime data, secrets, databases, logs or generated binaries.
 
-## Blueprint contributions
+## VoltSpec blueprint contributions
 
 Provide:
 
 - Upstream project URL and license
 - Supported versions
-- Startup command
+- Launch plan
 - Variables and validation rules
 - Sandboxed install script that does not modify the host OS
-- Stop command
+- Shutdown command
 - Minimum resources
 
 ## License

@@ -1,9 +1,9 @@
-//! Services layer: process management, console, eggs, files, scheduler,
-//! backups, databases, websites, notifications, resource monitoring.
+//! Services layer: workloads, blueprints, console, storage, flows,
+//! snapshots, data labs, web publishing, signals, and resource monitoring.
 pub mod backups;
+pub mod blueprint;
 pub mod console;
 pub mod databases;
-pub mod egg;
 pub mod files;
 pub mod node;
 pub mod proc;

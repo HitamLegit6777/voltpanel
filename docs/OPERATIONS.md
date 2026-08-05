@@ -67,7 +67,7 @@ Per-server console logs are under the configured log directory.
 ## Resource operations
 
 - Memory and CPU changes apply to the next workload start/restart
-- Port allocation is node-scoped and transactional
+- Endpoint reservation is agent-scoped and transactional
 - Transfers validate target capacity and port conflicts
 - Maintenance mode prevents placement
 - `schedulable=false` prevents automatic placement without disabling management

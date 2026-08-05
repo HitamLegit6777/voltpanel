@@ -1,5 +1,5 @@
 [Unit]
-Description=VoltPanel node daemon
+Description=VoltPanel execution agent
 Documentation=https://github.com/HitamLegit6777/voltpanel
 After=network-online.target
 Wants=network-online.target

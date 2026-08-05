@@ -9,7 +9,7 @@ doctor(){ local failures=0 cmd; for cmd in bwrap setpriv nft ip sqlite3; do if c
 case ${1:-help} in
   status) systemctl status voltpanel --no-pager || true; curl -fsS http://127.0.0.1:8080/api/system/health || true;;
   logs) journalctl -u voltpanel -f;;
-  backup) require_root; install -d -m700 "$BACKUP_DIR"; sqlite3 "$DATA_DIR/voltpanel.db" ".backup '$BACKUP_DIR/panel-$(date +%F-%H%M%S).db'"; tar -C "$DATA_DIR" -czf "$BACKUP_DIR/files-$(date +%F-%H%M%S).tar.gz" servers backups eggs websites; echo "Backup stored in $BACKUP_DIR";;
+  backup) require_root; install -d -m700 "$BACKUP_DIR"; sqlite3 "$DATA_DIR/voltpanel.db" ".backup '$BACKUP_DIR/panel-$(date +%F-%H%M%S).db'"; tar -C "$DATA_DIR" -czf "$BACKUP_DIR/files-$(date +%F-%H%M%S).tar.gz" servers backups blueprints websites; echo "Backup stored in $BACKUP_DIR";;
   upgrade) require_root; tmp=$(mktemp); sums=$(mktemp); trap 'rm -f "$tmp" "$sums"' EXIT; asset="voltpanel-$(arch)"; base="https://github.com/$REPO/releases/latest/download"; curl -fL "$base/$asset" -o "$tmp"; curl -fL "$base/SHA256SUMS" -o "$sums"; expected=$(awk -v a="$asset" '$2==a{print $1}' "$sums"); actual=$(sha256sum "$tmp"|awk '{print $1}'); [[ -n "$expected" && "$expected" == "$actual" ]] || { echo "checksum mismatch" >&2; exit 1; }; chmod +x "$tmp"; "$0" backup; systemctl stop voltpanel; install -m755 "$tmp" /usr/local/bin/voltpanel; systemctl start voltpanel; systemctl --no-pager --full status voltpanel;;
   doctor) doctor;;
   uninstall) require_root; [[ ${2:-} == --purge ]] || { echo "Use: $0 uninstall --purge"; exit 1; }; systemctl disable --now voltpanel || true; rm -f /etc/systemd/system/voltpanel.service /usr/local/bin/voltpanel /usr/local/sbin/voltpanel-manage; rm -rf /etc/voltpanel "$DATA_DIR"; systemctl daemon-reload;;

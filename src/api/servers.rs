@@ -1,7 +1,7 @@
-//! Server management endpoints: CRUD, power actions, variables, subusers.
+//! Workspace management endpoints: lifecycle, launch inputs, team access, and placement.
 use super::{data, ok, AdminUser, ApiError, ApiResult, AppState, AuthUser};
 use crate::models::{self, Server, User};
-use crate::services::{self, egg};
+use crate::services::{self, blueprint};
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -82,7 +82,7 @@ pub async fn admin_list_all(
 
 fn server_json(state: &AppState, s: &Server, u: &User) -> serde_json::Value {
     let info = state.procs.info(s);
-    let egg = models::get_egg(&state.db, s.egg_id).ok();
+    let blueprint = models::get_blueprint(&state.db, s.egg_id).ok();
     serde_json::json!({
         "id": s.id,
         "uuid": s.uuid,
@@ -95,8 +95,8 @@ fn server_json(state: &AppState, s: &Server, u: &User) -> serde_json::Value {
         "disk_mb": s.disk_mb,
         "user_id": s.user_id,
         "cpu_percent": s.cpu_percent,
-        "egg": egg.map(|e| e.name).unwrap_or_default(),
-        "egg_id": s.egg_id,
+        "blueprint": blueprint.map(|definition| definition.name).unwrap_or_default(),
+        "blueprint_id": s.egg_id,
         "suspended": s.suspended,
         "auto_restart": s.auto_restart,
         "restart_count": s.restart_count,
@@ -114,11 +114,11 @@ pub async fn get(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    let egg = models::get_egg(&state.db, s.egg_id)?;
+    let blueprint = models::get_blueprint(&state.db, s.egg_id)?;
     let can_view_secrets = u.root_admin
         || u.id == s.user_id
         || models::user_has_server_permission(&state.db, &u, s.id, "startup.secrets")?;
-    let vars: Vec<serde_json::Value> = egg::resolve_variables(&state.db, &s)?
+    let vars: Vec<serde_json::Value> = blueprint::resolve_variables(&state.db, &s)?
         .into_iter()
         .filter(|(v, _)| v.user_viewable || can_view_secrets)
         .map(|(v, val)| {
@@ -145,7 +145,7 @@ pub async fn get(
     let schedules = models::list_schedules(&state.db, s.id)?;
     Ok(Json(serde_json::json!({
         "server": server_json(&state, &s, &u),
-        "egg": egg,
+        "blueprint": blueprint,
         "variables": vars,
         "ports": allocated,
         "websites": websites,
@@ -154,9 +154,9 @@ pub async fn get(
             "id": su.id, "username": su.username, "email": su.email, "permissions": perms
         })).collect::<Vec<_>>(),
         "schedules": schedules,
-        "startup": s.startup,
-        "docker_image": s.docker_image,
-        "resolved_startup": egg::resolve_startup(&state.db, &s).unwrap_or_default(),
+        "launch_command": s.startup,
+        "runtime_hint": s.docker_image,
+        "resolved_launch": blueprint::resolve_startup(&state.db, &s).unwrap_or_default(),
     })))
 }
 
@@ -164,9 +164,11 @@ pub async fn get(
 pub struct CreateServerReq {
     pub name: String,
     pub user_id: i64,
-    pub egg_id: i64,
+    #[serde(alias = "egg_id")]
+    pub blueprint_id: i64,
     pub description: Option<String>,
-    pub docker_image: Option<String>,
+    #[serde(alias = "docker_image")]
+    pub runtime_hint: Option<String>,
     pub memory_mb: Option<i64>,
     pub disk_mb: Option<i64>,
     pub cpu_percent: Option<i64>,
@@ -185,7 +187,7 @@ pub async fn create(
     a: AdminUser,
     Json(req): Json<CreateServerReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let egg = models::get_egg(&state.db, req.egg_id)?;
+    let blueprint = models::get_blueprint(&state.db, req.blueprint_id)?;
     let default_mem = limit_override(
         &state.db,
         "limits.default_memory_mb",
@@ -198,7 +200,7 @@ pub async fn create(
     );
     let mem = req.memory_mb.unwrap_or(default_mem as i64);
     if mem > max_mem as i64 {
-        return Err(ApiError::bad_request("memory exceeds node max"));
+        return Err(ApiError::bad_request("memory exceeds fabric capacity"));
     }
     let disk = req.disk_mb.unwrap_or(limit_override(
         &state.db,
@@ -219,7 +221,7 @@ pub async fn create(
             state.cfg.limits.max_servers_per_user,
         );
         if n >= max_per_user as i64 {
-            return Err(ApiError::bad_request("user reached server limit"));
+            return Err(ApiError::bad_request("owner reached workspace limit"));
         }
     }
     let chosen_node = match req.node.as_deref() {
@@ -244,25 +246,28 @@ pub async fn create(
     if let Some(port) = req.port {
         if !crate::nodes::port_available_on_node(&state.db, target_node_name, port)? {
             return Err(ApiError::bad_request(format!(
-                "port {port} is already allocated on node {target_node_name}"
+                "port {port} is already reserved on agent {target_node_name}"
             )));
         }
     }
     let uuid = uuid::Uuid::new_v4().to_string();
-    let img = req.docker_image.clone().unwrap_or(egg.docker_image.clone());
-    let startup = if egg.startup.is_empty() {
+    let runtime_hint = req
+        .runtime_hint
+        .clone()
+        .unwrap_or(blueprint.docker_image.clone());
+    let launch_command = if blueprint.startup.is_empty() {
         String::new()
     } else {
-        egg.startup.clone()
+        blueprint.startup.clone()
     };
     let id = models::create_server(
         &state.db,
         &uuid,
         &req.name,
         owner.id,
-        egg.id,
-        &img,
-        &startup,
+        blueprint.id,
+        &runtime_hint,
+        &launch_command,
         mem,
         disk,
         cpu,
@@ -273,17 +278,22 @@ pub async fn create(
         id,
         committed: false,
     };
-    // variables
-    for (k, v) in req.variables.unwrap_or_default() {
-        models::set_server_var(&state.db, id, egg.id, &k, &v)?;
+    // Blueprint input overrides, then defaults for unspecified inputs.
+    for (key, value) in req.variables.unwrap_or_default() {
+        models::set_server_var(&state.db, id, blueprint.id, &key, &value)?;
     }
-    // default variables from egg
-    for var in &egg.variables {
+    for var in &blueprint.variables {
         if models::get_server_vars(&state.db, id)?
             .iter()
             .all(|(k, _)| k != &var.env_var)
         {
-            models::set_server_var(&state.db, id, egg.id, &var.env_var, &var.default_value)?;
+            models::set_server_var(
+                &state.db,
+                id,
+                blueprint.id,
+                &var.env_var,
+                &var.default_value,
+            )?;
         }
     }
     if let Some(port) = req.port {
@@ -294,13 +304,13 @@ pub async fn create(
             let _ = models::free_ports(&state.db, id);
             let _ = models::purge_server(&state.db, id);
             return Err(ApiError::bad_request(format!(
-                "node allocation conflict: {error}"
+                "agent reservation conflict: {error}"
             )));
         }
     }
     let srv = models::get_server(&state.db, id)?;
     if let Some(node) = &chosen_node {
-        let files = egg::build_default_config(&state.db, &srv)?
+        let files = blueprint::build_default_config(&state.db, &srv)?
             .map(|cfg| {
                 vec![crate::node_protocol::ProvisionFile {
                     path: "config.json".into(),
@@ -315,8 +325,8 @@ pub async fn create(
         let spec = crate::node_protocol::ServerSpec {
             uuid: srv.uuid.clone(),
             name: srv.name.clone(),
-            startup: egg::resolve_startup(&state.db, &srv)?,
-            stop_command: egg.stop_command.clone(),
+            startup: blueprint::resolve_startup(&state.db, &srv)?,
+            stop_command: blueprint.stop_command.clone(),
             memory_mb: mem as u64,
             disk_mb: disk as u64,
             cpu_percent: cpu as u64,
@@ -325,7 +335,7 @@ pub async fn create(
                 .into_iter()
                 .filter_map(|p| u16::try_from(p).ok())
                 .collect(),
-            env: egg::env_for_server(&state.db, &srv),
+            env: blueprint::env_for_server(&state.db, &srv),
             auto_restart: srv.auto_restart,
         };
         if let Err(e) = state
@@ -344,7 +354,7 @@ pub async fn create(
         }
     } else {
         std::fs::create_dir_all(services::proc::server_dir(&srv))?;
-        if let Ok(Some(cfg)) = egg::build_default_config(&state.db, &srv) {
+        if let Ok(Some(cfg)) = blueprint::build_default_config(&state.db, &srv) {
             let _ = services::files::write_file(
                 &state.cfg,
                 &srv,
@@ -377,8 +387,8 @@ pub async fn create(
                 .power(node, &srv.uuid, crate::node_protocol::PowerAction::Start)
                 .await?;
         } else {
-            let cmd = egg::resolve_startup(&state.db, &srv)?;
-            let env = egg::env_for_server(&state.db, &srv);
+            let cmd = blueprint::resolve_startup(&state.db, &srv)?;
+            let env = blueprint::env_for_server(&state.db, &srv);
             state
                 .procs
                 .start(&srv, &cmd, &env, state.notifier.clone())?;
@@ -395,8 +405,10 @@ pub async fn create(
 pub struct UpdateServerReq {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub docker_image: Option<String>,
-    pub startup: Option<String>,
+    #[serde(alias = "docker_image")]
+    pub runtime_hint: Option<String>,
+    #[serde(alias = "startup")]
+    pub launch_command: Option<String>,
     pub memory_mb: Option<i64>,
     pub disk_mb: Option<i64>,
     pub cpu_percent: Option<i64>,
@@ -419,11 +431,11 @@ pub async fn update(
     if let Some(desc) = req.description {
         s.description = desc;
     }
-    if let Some(img) = req.docker_image {
-        s.docker_image = img;
+    if let Some(runtime_hint) = req.runtime_hint {
+        s.docker_image = runtime_hint;
     }
-    if let Some(startup) = req.startup {
-        s.startup = startup;
+    if let Some(launch_command) = req.launch_command {
+        s.startup = launch_command;
     }
     if let Some(mem) = req.memory_mb {
         let max_mem = limit_override(
@@ -432,7 +444,7 @@ pub async fn update(
             state.cfg.limits.max_memory_mb,
         );
         if mem > max_mem as i64 {
-            return Err(ApiError::bad_request("memory exceeds node max"));
+            return Err(ApiError::bad_request("memory exceeds fabric capacity"));
         }
         s.memory_mb = mem;
     }
@@ -454,7 +466,7 @@ pub async fn update(
     models::update_server(&state.db, &s)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
-        let egg = models::get_egg(&state.db, s.egg_id)?;
+        let definition = models::get_blueprint(&state.db, s.egg_id)?;
         let ports = models::ports_for_server(&state.db, s.id)?
             .into_iter()
             .filter_map(|p| u16::try_from(p).ok())
@@ -462,14 +474,14 @@ pub async fn update(
         let spec = crate::node_protocol::ServerSpec {
             uuid: s.uuid.clone(),
             name: s.name.clone(),
-            startup: egg::resolve_startup(&state.db, &s)?,
-            stop_command: egg.stop_command,
+            startup: blueprint::resolve_startup(&state.db, &s)?,
+            stop_command: definition.stop_command,
             memory_mb: s.memory_mb as u64,
             disk_mb: s.disk_mb as u64,
             cpu_percent: s.cpu_percent as u64,
             port: s.port.and_then(|p| u16::try_from(p).ok()),
             ports,
-            env: egg::env_for_server(&state.db, &s),
+            env: blueprint::env_for_server(&state.db, &s),
             auto_restart: s.auto_restart,
         };
         if let Err(error) = state
@@ -486,7 +498,7 @@ pub async fn update(
             let _ = models::update_server(&state.db, &original);
             return Err(ApiError::new(
                 axum::http::StatusCode::BAD_GATEWAY,
-                format!("node rejected configuration: {error}"),
+                format!("agent rejected configuration: {error}"),
             ));
         }
     }
@@ -530,17 +542,17 @@ pub async fn update_vars(
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
     super::require_server_permission(&state, &u, id, "startup.update")?;
-    let egg = models::get_egg(&state.db, s.egg_id)?;
+    let definition = models::get_blueprint(&state.db, s.egg_id)?;
     let old_vars = models::get_server_vars(&state.db, s.id)?;
     for (k, v) in &req.variables {
-        let Some(var) = egg.variables.iter().find(|v| &v.env_var == k) else {
+        let Some(var) = definition.variables.iter().find(|v| &v.env_var == k) else {
             return Err(ApiError::bad_request(format!("unknown variable {k}")));
         };
         if !var.user_editable && !u.root_admin {
             return Err(ApiError::forbidden("variable not editable"));
         }
-        egg::validate_value(var, v)?;
-        models::set_server_var(&state.db, s.id, egg.id, k, v)?;
+        blueprint::validate_value(var, v)?;
+        models::set_server_var(&state.db, s.id, definition.id, k, v)?;
     }
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
@@ -551,14 +563,14 @@ pub async fn update_vars(
         let spec = crate::node_protocol::ServerSpec {
             uuid: s.uuid.clone(),
             name: s.name.clone(),
-            startup: egg::resolve_startup(&state.db, &s)?,
-            stop_command: egg.stop_command.clone(),
+            startup: blueprint::resolve_startup(&state.db, &s)?,
+            stop_command: definition.stop_command.clone(),
             memory_mb: s.memory_mb as u64,
             disk_mb: s.disk_mb as u64,
             cpu_percent: s.cpu_percent as u64,
             port: s.port.and_then(|p| u16::try_from(p).ok()),
             ports,
-            env: egg::env_for_server(&state.db, &s),
+            env: blueprint::env_for_server(&state.db, &s),
             auto_restart: s.auto_restart,
         };
         if let Err(error) = state
@@ -572,10 +584,10 @@ pub async fn update_vars(
             )
             .await
         {
-            let _ = models::replace_server_vars(&state.db, s.id, egg.id, &old_vars);
+            let _ = models::replace_server_vars(&state.db, s.id, definition.id, &old_vars);
             return Err(ApiError::new(
                 axum::http::StatusCode::BAD_GATEWAY,
-                format!("node rejected variables: {error}"),
+                format!("agent rejected blueprint inputs: {error}"),
             ));
         }
     }
@@ -703,8 +715,8 @@ pub async fn power(
     }
     match req.action.as_str() {
         "start" => {
-            let cmd = egg::resolve_startup(&state.db, &s)?;
-            let env = egg::env_for_server(&state.db, &s);
+            let cmd = blueprint::resolve_startup(&state.db, &s)?;
+            let env = blueprint::env_for_server(&state.db, &s);
             state.procs.start(&s, &cmd, &env, state.notifier.clone())?;
         }
         "stop" => state.procs.stop(s.id)?,
@@ -712,8 +724,8 @@ pub async fn power(
             state.procs.stop(s.id)?;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             let s = models::get_server(&state.db, s.id)?;
-            let cmd = egg::resolve_startup(&state.db, &s)?;
-            let env = egg::env_for_server(&state.db, &s);
+            let cmd = blueprint::resolve_startup(&state.db, &s)?;
+            let env = blueprint::env_for_server(&state.db, &s);
             state.procs.start(&s, &cmd, &env, state.notifier.clone())?;
         }
         "kill" => state.procs.kill(s.id)?,
@@ -735,7 +747,7 @@ pub struct InstallReq {
     pub script: Option<String>,
 }
 
-/// Run the egg's install script (re-install).
+/// Run the blueprint's isolated setup plan.
 pub async fn install(
     State(state): State<AppState>,
     AuthUser(u): AuthUser,
@@ -747,27 +759,28 @@ pub async fn install(
     if s.node != "local" {
         return Err(ApiError::new(
             axum::http::StatusCode::NOT_IMPLEMENTED,
-            "remote egg installation must run through the node installer",
+            "remote blueprint setup must run through the execution agent",
         ));
     }
-    let egg = models::get_egg(&state.db, s.egg_id)?;
-    let mut egg = egg;
+    let mut definition = models::get_blueprint(&state.db, s.egg_id)?;
     if let Some(script) = req.script {
         if !u.root_admin {
             return Err(ApiError::forbidden(
                 "custom install scripts require administrator access",
             ));
         }
-        egg.install_script = Some(script);
+        definition.install_script = Some(script);
     }
-    tokio::task::spawn_blocking(move || egg::run_install(&state.db, &s, &egg, &state.notifier))
-        .await
-        .map_err(|e| {
-            ApiError::new(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("install worker failed: {e}"),
-            )
-        })??;
+    tokio::task::spawn_blocking(move || {
+        blueprint::run_install(&state.db, &s, &definition, &state.notifier)
+    })
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("install worker failed: {e}"),
+        )
+    })??;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
 

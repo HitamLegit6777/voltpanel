@@ -149,10 +149,10 @@ pub fn delete_user(db: &Db, id: i64) -> Result<()> {
     Ok(())
 }
 
-// ---------------- Egg ----------------
+// ---------------- Blueprint ----------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EggVariable {
+pub struct BlueprintInput {
     pub name: String,
     pub description: String,
     pub env_var: String,
@@ -163,7 +163,7 @@ pub struct EggVariable {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Egg {
+pub struct Blueprint {
     pub id: i64,
     pub uuid: String,
     pub name: String,
@@ -175,14 +175,14 @@ pub struct Egg {
     pub default_config: Option<String>,
     pub config_files: Option<String>,
     pub install_script: Option<String>,
-    pub variables: Vec<EggVariable>,
+    pub variables: Vec<BlueprintInput>,
     pub stop_command: String,
     pub created_at: String,
     pub updated_at: String,
 }
 
-fn egg_from_row(r: &Row) -> rusqlite::Result<Egg> {
-    Ok(Egg {
+fn blueprint_from_row(r: &Row) -> rusqlite::Result<Blueprint> {
+    Ok(Blueprint {
         id: r.get(0)?,
         uuid: r.get(1)?,
         name: r.get(2)?,
@@ -201,22 +201,22 @@ fn egg_from_row(r: &Row) -> rusqlite::Result<Egg> {
     })
 }
 
-pub fn get_egg(db: &Db, id: i64) -> Result<Egg> {
+pub fn get_blueprint(db: &Db, id: i64) -> Result<Blueprint> {
     let conn = db.lock();
     conn.query_row(
         "SELECT id,uuid,name,description,author,category,docker_image,startup,default_config,config_files,install_script,variables,stop_command,created_at,updated_at FROM egss WHERE id=?1",
         [id],
-        egg_from_row,
+        blueprint_from_row,
     )
-    .context("egg not found")
+    .context("blueprint not found")
 }
 
-pub fn list_eggs(db: &Db) -> Result<Vec<Egg>> {
+pub fn list_blueprints(db: &Db) -> Result<Vec<Blueprint>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
         "SELECT id,uuid,name,description,author,category,docker_image,startup,default_config,config_files,install_script,variables,stop_command,created_at,updated_at FROM egss ORDER BY name",
     )?;
-    let rows = stmt.query_map([], egg_from_row)?;
+    let rows = stmt.query_map([], blueprint_from_row)?;
     let mut out = Vec::new();
     for e in rows {
         out.push(e?);
@@ -225,7 +225,7 @@ pub fn list_eggs(db: &Db) -> Result<Vec<Egg>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn create_egg(
+pub fn create_blueprint(
     db: &Db,
     uuid: &str,
     name: &str,
@@ -237,7 +237,7 @@ pub fn create_egg(
     default_config: Option<&str>,
     config_files: Option<&str>,
     install_script: Option<&str>,
-    variables: &[EggVariable],
+    variables: &[BlueprintInput],
     stop_command: &str,
 ) -> Result<i64> {
     let conn = db.lock();
@@ -263,30 +263,30 @@ pub fn create_egg(
     Ok(conn.last_insert_rowid())
 }
 
-pub fn update_egg(db: &Db, e: &Egg) -> Result<()> {
+pub fn update_blueprint(db: &Db, blueprint: &Blueprint) -> Result<()> {
     let conn = db.lock();
     conn.execute(
         "UPDATE egss SET name=?1, description=?2, author=?3, category=?4, docker_image=?5, startup=?6, default_config=?7, config_files=?8, install_script=?9, variables=?10, stop_command=?11, updated_at=?12 WHERE id=?13",
         params![
-            e.name,
-            e.description,
-            e.author,
-            e.category,
-            e.docker_image,
-            e.startup,
-            e.default_config,
-            e.config_files,
-            e.install_script,
-            serde_json::to_string(&e.variables)?,
-            e.stop_command,
+            blueprint.name,
+            blueprint.description,
+            blueprint.author,
+            blueprint.category,
+            blueprint.docker_image,
+            blueprint.startup,
+            blueprint.default_config,
+            blueprint.config_files,
+            blueprint.install_script,
+            serde_json::to_string(&blueprint.variables)?,
+            blueprint.stop_command,
             now(),
-            e.id
+            blueprint.id
         ],
     )?;
     Ok(())
 }
 
-pub fn delete_egg(db: &Db, id: i64) -> Result<()> {
+pub fn delete_blueprint(db: &Db, id: i64) -> Result<()> {
     let conn = db.lock();
     let used: i64 = conn.query_row(
         "SELECT COUNT(*) FROM servers WHERE egg_id=?1 AND deleted=0",
@@ -294,7 +294,7 @@ pub fn delete_egg(db: &Db, id: i64) -> Result<()> {
         |r| r.get(0),
     )?;
     if used > 0 {
-        bail!("egg is used by {used} server(s)");
+        bail!("blueprint is used by {used} workspace(s)");
     }
     conn.execute("DELETE FROM egss WHERE id=?1", [id])?;
     Ok(())

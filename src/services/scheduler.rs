@@ -233,8 +233,8 @@ impl Scheduler {
         }
         match task.action.as_str() {
             "start" => {
-                let cmd = crate::services::egg::resolve_startup(&self.db, &srv)?;
-                let env = crate::services::egg::env_for_server(&self.db, &srv);
+                let cmd = crate::services::blueprint::resolve_startup(&self.db, &srv)?;
+                let env = crate::services::blueprint::env_for_server(&self.db, &srv);
                 self.procs.start(&srv, &cmd, &env, self.notifier.clone())?;
             }
             "stop" => self.procs.stop(server_id)?,
@@ -242,8 +242,8 @@ impl Scheduler {
                 self.procs.stop(server_id)?;
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let srv = models::get_server(&self.db, server_id)?;
-                let cmd = crate::services::egg::resolve_startup(&self.db, &srv)?;
-                let env = crate::services::egg::env_for_server(&self.db, &srv);
+                let cmd = crate::services::blueprint::resolve_startup(&self.db, &srv)?;
+                let env = crate::services::blueprint::env_for_server(&self.db, &srv);
                 self.procs.start(&srv, &cmd, &env, self.notifier.clone())?;
             }
             "kill" => {

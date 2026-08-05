@@ -20,7 +20,7 @@ max_body_mb = 64
 [paths]
 servers_dir = "servers"
 backups_dir = "backups"
-eggs_dir = "eggs"
+blueprints_dir = "blueprints"
 logs_dir = "logs"
 website_dir = "websites"
 

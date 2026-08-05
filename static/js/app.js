@@ -4,7 +4,7 @@
 "use strict";
 
 const API = "/api";
-const state = { user: null, page: "boot", server: null, servers: [], eggs: [], pollers: [], consoleEs: null, lang: "en", charts: {}, filePath: "/", fileId: null };
+const state = { user: null, page: "boot", server: null, servers: [], blueprints: [], pollers: [], consoleEs: null, lang: "en", charts: {}, filePath: "/", fileId: null };
 
 /* ---------- i18n ---------- */
 const I18N = {
@@ -15,8 +15,8 @@ const I18N = {
     status: "Status", name: "Name", owner: "Owner", actions: "Actions", size: "Size", type: "Type", modified: "Modified",
     start: "Start", restart: "Restart", stop: "Stop", kill: "Kill", save: "Save", cancel: "Cancel", create: "Create",
     delete: "Delete", edit: "Edit", download: "Download", upload: "Upload", copy: "Copy", rename: "Rename",
-    console: "Terminal", files: "Storage", databases: "Data Lab", backups: "Vault", schedules: "Automations",
-    users: "Team", eggs: "Blueprints", system: "Operations", create_server: "New Workspace", create_user: "New Member",
+    console: "Terminal", files: "Storage", databases: "Data Lab", backups: "Vault", schedules: "Flows",
+    users: "Team", blueprints: "Blueprint Studio", system: "Observatory", create_server: "New Workspace", create_user: "New Member",
     suspend: "Suspend", unsuspend: "Unsuspend", reinstall: "Rebuild",
     login: "Sign in", username: "Username", password: "Password", remember: "Remember me",
     welcome: "Linux-native workload control plane", no_servers: "No workspaces yet",
@@ -32,8 +32,8 @@ const I18N = {
     status: "Status", name: "Nama", owner: "Pemilik", actions: "Aksi", size: "Ukuran", type: "Tipe", modified: "Diubah",
     start: "Mulai", restart: "Ulang", stop: "Hentikan", kill: "Paksa", save: "Simpan", cancel: "Batal", create: "Buat",
     delete: "Hapus", edit: "Ubah", download: "Unduh", upload: "Unggah", copy: "Salin", rename: "Ganti nama",
-    console: "Terminal", files: "Penyimpanan", databases: "Lab Data", backups: "Vault", schedules: "Otomasi",
-    users: "Tim", eggs: "Blueprint", system: "Operasi", create_server: "Workspace Baru", create_user: "Anggota Baru",
+    console: "Terminal", files: "Penyimpanan", databases: "Lab Data", backups: "Vault", schedules: "Flow",
+    users: "Tim", blueprints: "Studio Blueprint", system: "Observatorium", create_server: "Workspace Baru", create_user: "Anggota Baru",
     suspend: "Nonaktifkan", unsuspend: "Aktifkan", reinstall: "Bangun Ulang",
     login: "Masuk", username: "Nama pengguna", password: "Kata sandi", remember: "Ingat saya",
     welcome: "Control plane workload Linux-native", no_servers: "Belum ada workspace",
@@ -90,7 +90,7 @@ const vpPrompt = (title, value = "") => vpDialog({ title, input: value, confirmT
 window.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openCommandPalette(); } });
 
 function openCommandPalette(){
-  const actions=[{name:"Fleet",href:"#/",icon:"dashboard"},{name:"Workspaces",href:"#/admin/servers",icon:"server"},{name:"Automations",href:"#/automations",icon:"clock"},{name:"Fabric",href:"#/admin/nodes",icon:"globe"},{name:"Blueprints",href:"#/admin/eggs",icon:"box"},{name:"Operations",href:"#/admin/system",icon:"gauge"},{name:"Settings",href:"#/settings",icon:"settings"},{name:"Profile",href:"#/profile",icon:"profile"}].filter(a=>state.user?.root_admin||!["Workspaces","Fabric","Blueprints","Operations"].includes(a.name));
+  const actions=[{name:"Pulse",href:"#/",icon:"activity"},{name:"Workspaces",href:"#/admin/servers",icon:"server"},{name:"Flows",href:"#/automations",icon:"clock"},{name:"Fabric",href:"#/admin/nodes",icon:"globe"},{name:"Blueprint Studio",href:"#/admin/blueprints",icon:"box"},{name:"Observatory",href:"#/admin/system",icon:"gauge"},{name:"Settings",href:"#/settings",icon:"settings"},{name:"Profile",href:"#/profile",icon:"profile"}].filter(a=>state.user?.root_admin||!["Workspaces","Fabric","Blueprint Studio","Observatory"].includes(a.name));
   const modal=document.createElement("div");modal.className="modal palette-layer";modal.innerHTML=`<div class="command-palette"><div class="palette-search">${ic("search",17)}<input placeholder="Search commands and pages..." autocomplete="off"><kbd>ESC</kbd></div><div class="palette-results">${actions.map((a,i)=>`<a href="${a.href}" data-key="${a.name.toLowerCase()}">${ic(a.icon,16)}<span>${a.name}</span><kbd>${i+1}</kbd></a>`).join("")}</div></div>`;
   const input=modal.querySelector("input"),results=[...modal.querySelectorAll(".palette-results a")];const filter=()=>results.forEach(a=>a.hidden=!a.dataset.key.includes(input.value.toLowerCase()));input.addEventListener("input",filter);input.addEventListener("keydown",e=>{if(e.key==="Escape")modal.remove();if(e.key==="Enter"){results.find(a=>!a.hidden)?.click();modal.remove();}});results.forEach(a=>a.addEventListener("click",()=>modal.remove()));modal.addEventListener("click",e=>{if(e.target===modal)modal.remove();});document.body.appendChild(modal);input.focus();
 }
@@ -145,11 +145,11 @@ function shell(active, title, inner) {
       </div>
       <div class="nav-group-label">CONTROL</div>
       <nav>
-        <a href="#/" class="nav-item ${active === "fleet" ? "active" : ""}"><span class="nav-ico">${ic("dashboard")}</span><span>Fleet</span></a>
+        <a href="#/" class="nav-item ${active === "pulse" ? "active" : ""}"><span class="nav-ico">${ic("activity")}</span><span>Pulse</span></a>
         <a href="${u.root_admin?'#/admin/servers':'#/'}" class="nav-item ${active === "workspaces" ? "active" : ""}"><span class="nav-ico">${ic("server")}</span><span>Workspaces</span></a>
-        <a href="#/automations" class="nav-item ${active === "automations" ? "active" : ""}"><span class="nav-ico">${ic("clock")}</span><span>Automations</span></a>
+        <a href="#/automations" class="nav-item ${active === "flows" ? "active" : ""}"><span class="nav-ico">${ic("clock")}</span><span>Flows</span></a>
       </nav>
-      ${u.root_admin ? `<div class="nav-group-label">INFRASTRUCTURE</div><nav><a href="#/admin/nodes" class="nav-item ${active === "fabric" ? "active" : ""}"><span class="nav-ico">${ic("globe")}</span><span>Fabric</span></a><a href="#/admin/eggs" class="nav-item ${active === "blueprints" ? "active" : ""}"><span class="nav-ico">${ic("box")}</span><span>Blueprints</span></a><a href="#/admin/system" class="nav-item ${active === "operations" ? "active" : ""}"><span class="nav-ico">${ic("gauge")}</span><span>Operations</span></a></nav>` : ""}
+      ${u.root_admin ? `<div class="nav-group-label">PLATFORM</div><nav><a href="#/admin/nodes" class="nav-item ${active === "fabric" ? "active" : ""}"><span class="nav-ico">${ic("globe")}</span><span>Fabric</span></a><a href="#/admin/blueprints" class="nav-item ${active === "blueprints" ? "active" : ""}"><span class="nav-ico">${ic("box")}</span><span>Blueprint Studio</span></a><a href="#/admin/system" class="nav-item ${active === "observatory" ? "active" : ""}"><span class="nav-ico">${ic("gauge")}</span><span>Observatory</span></a></nav>` : ""}
       <div class="nav-group-label">ACCOUNT</div><nav><a href="#/settings" class="nav-item ${active === "settings" ? "active" : ""}"><span class="nav-ico">${ic("settings")}</span><span>${t("settings")}</span></a><a href="#/profile" class="nav-item ${active === "profile" ? "active" : ""}"><span class="nav-ico">${ic("profile")}</span><span>${t("profile")}</span></a></nav>
       <div class="side-foot">
         <div class="avatar">${esc(initial)}</div>
@@ -262,9 +262,9 @@ async function do2fa(e) {
    DASHBOARD
    ============================================================ */
 async function renderDashboard() {
-  document.getElementById("app").innerHTML = shell("fleet", "Fleet", `
+  document.getElementById("app").innerHTML = shell("pulse", "Pulse", `
     <section class="fleet-hero">
-      <div class="fleet-copy"><span class="eyebrow">INFRASTRUCTURE CONTROL PLANE</span><h2>Operate every workload from one place.</h2><p>Real-time orchestration across isolated local and remote nodes.</p><div class="fleet-actions"><a href="#/admin/nodes" class="btn primary">${ic("globe",14)}<span>Open fabric</span></a><button class="btn ghost" onclick="refreshServers()">${ic("refresh_ccw",14)}<span>Refresh fleet</span></button></div></div>
+      <div class="fleet-copy"><span class="eyebrow">LIVE WORKLOAD PULSE</span><h2>See the whole platform breathe.</h2><p>One operational signal across isolated workspaces and every execution agent.</p><div class="fleet-actions"><a href="#/admin/nodes" class="btn primary">${ic("globe",14)}<span>Open fabric</span></a><button class="btn ghost" onclick="refreshServers()">${ic("refresh_ccw",14)}<span>Refresh pulse</span></button></div></div>
       <div class="fleet-visual"><div class="orbit orbit-a"></div><div class="orbit orbit-b"></div><div class="fleet-core">${ic("server",28)}</div><span class="fleet-node n1"></span><span class="fleet-node n2"></span><span class="fleet-node n3"></span></div>
     </section>
     <div class="grid cols-4" id="d-stats">
@@ -279,7 +279,7 @@ async function renderDashboard() {
     </div>
     <div class="dashboard-lower">
       <section class="card quick-panel"><div class="card-head"><h3>${ic("zap",15)} Quick actions</h3></div><div class="quick-grid">
-        ${state.user.root_admin ? `<a href="#/admin/servers" class="quick-action">${ic("plus",18)}<span><b>Create workspace</b><small>Provision an isolated workload</small></span></a><a href="#/admin/nodes" class="quick-action">${ic("globe",18)}<span><b>Attach agent</b><small>Expand fleet capacity</small></span></a>` : ""}
+        ${state.user.root_admin ? `<a href="#/admin/servers" class="quick-action">${ic("plus",18)}<span><b>Compose workspace</b><small>Launch from a VoltSpec blueprint</small></span></a><a href="#/admin/nodes" class="quick-action">${ic("globe",18)}<span><b>Attach agent</b><small>Extend the execution fabric</small></span></a>` : ""}
         <a href="#/settings" class="quick-action">${ic("key",18)}<span><b>API access</b><small>Manage scoped credentials</small></span></a><a href="#/profile" class="quick-action">${ic("shield",18)}<span><b>Account security</b><small>Password and two-factor auth</small></span></a>
       </div></section>
       <section class="card activity-panel"><div class="card-head"><h3>${ic("activity",15)} Recent activity</h3></div><div id="d-activity" class="activity-list"><div class="skeleton" style="height:46px"></div><div class="skeleton" style="height:46px"></div></div></section>
@@ -312,7 +312,7 @@ function renderServerTable(servers) {
   box.innerHTML = `<div class="tbl-wrap"><table class="tbl">
     <thead><tr><th>${t("name")}</th><th>${t("status")}</th><th>${t("cpu")}</th><th>${t("ram")}</th><th>Disk</th><th>${t("uptime")}</th><th></th></tr></thead>
     <tbody>${servers.map((s) => `<tr>
-      <td><a href="#/server/${s.id}" class="link-strong">${esc(s.name)}</a><div class="tbl-sub">${esc(s.egg)}</div></td>
+      <td><a href="#/server/${s.id}" class="link-strong">${esc(s.name)}</a><div class="tbl-sub">${esc(s.blueprint)}</div></td>
       <td><span class="pill ${esc(s.status)}"><i></i>${esc(s.status)}</span></td>
 
       <td>${s.info ? Math.round(s.info.cpu_percent) + "%" : "—"}</td>
@@ -333,8 +333,8 @@ async function refreshServers() { try { const l = await api("/servers"); renderS
 
 /* ---------- automations ---------- */
 async function renderAutomations(){
-  document.getElementById("app").innerHTML=shell("automations","Automations",`<section class="nodes-header"><div><span class="eyebrow">EVENT-DRIVEN OPERATIONS</span><h2>Automation runway</h2><p>Review schedules across every workspace and jump directly into their execution history.</p></div></section><div id="automation-grid" class="node-grid"><div class="skeleton" style="height:180px"></div><div class="skeleton" style="height:180px"></div></div>`);
-  try{const servers=(await api("/servers")).data||[];const groups=await Promise.all(servers.map(async server=>({server,schedules:(await api(`/servers/${server.id}/schedules`)).data||[]})));const all=groups.flatMap(g=>g.schedules.map(schedule=>({schedule,server:g.server})));const box=$("#automation-grid");box.innerHTML=all.length?all.map(({schedule,server})=>`<article class="node-card"><div class="node-card-head"><div class="node-mark">${ic("clock",18)}</div><div><h3>${esc(schedule.name)}</h3><span>${esc(server.name)}</span></div><span class="pill ${schedule.enabled?'running':'offline'}"><i></i>${schedule.enabled?'active':'paused'}</span></div><div class="node-endpoint">${ic("terminal",13)}<code>${esc(schedule.cron_expr)}</code></div><div class="metric-line"><span>Next execution</span><b>${fmtDate(schedule.next_run_at)}</b></div><div class="node-card-foot"><span>${schedule.tasks?.length||0} tasks</span><a class="btn sm ghost" href="#/server/${server.id}/schedules">Open automation</a></div></article>`).join(""):`<div class="context-empty">${ic("clock",28)}<div><b>No automations configured</b><span>Create one inside a workspace to orchestrate power, commands and snapshots.</span></div></div>`;}catch(e){toast(e.message,"error")}
+  document.getElementById("app").innerHTML=shell("flows","Flows",`<section class="nodes-header"><div><span class="eyebrow">EVENT-DRIVEN CONTROL</span><h2>Flow runway</h2><p>Coordinate lifecycle commands, snapshots, and tasks across every workspace.</p></div></section><div id="automation-grid" class="node-grid"><div class="skeleton" style="height:180px"></div><div class="skeleton" style="height:180px"></div></div>`);
+  try{const servers=(await api("/servers")).data||[];const groups=await Promise.all(servers.map(async server=>({server,schedules:(await api(`/servers/${server.id}/schedules`)).data||[]})));const all=groups.flatMap(g=>g.schedules.map(schedule=>({schedule,server:g.server})));const box=$("#automation-grid");box.innerHTML=all.length?all.map(({schedule,server})=>`<article class="node-card"><div class="node-card-head"><div class="node-mark">${ic("clock",18)}</div><div><h3>${esc(schedule.name)}</h3><span>${esc(server.name)}</span></div><span class="pill ${schedule.enabled?'running':'offline'}"><i></i>${schedule.enabled?'active':'paused'}</span></div><div class="node-endpoint">${ic("terminal",13)}<code>${esc(schedule.cron_expr)}</code></div><div class="metric-line"><span>Next execution</span><b>${fmtDate(schedule.next_run_at)}</b></div><div class="node-card-foot"><span>${schedule.tasks?.length||0} steps</span><a class="btn sm ghost" href="#/server/${server.id}/schedules">Open flow</a></div></article>`).join(""):`<div class="context-empty">${ic("clock",28)}<div><b>No flows configured</b><span>Create one inside a workspace to orchestrate lifecycle, commands, and snapshots.</span></div></div>`;}catch(e){toast(e.message,"error")}
 }
 
 /* ============================================================
@@ -356,7 +356,7 @@ async function renderServerPage(id, tab) {
     <div class="server-head">
       <div>
         <div class="row"><h2 class="server-name">${esc(s.name)}</h2><span class="pill ${esc(s.status)}"><i></i>${esc(s.status)}</span></div>
-        <div class="server-meta"><span>${esc(s.egg)}</span><span>${esc(s.node)}</span><span>#${s.id}</span>${s.port ? `<button class="allocation-chip" onclick="navigator.clipboard.writeText(location.hostname+':${s.port}');toast('Address copied','success')">${ic("link",12)}${esc(location.hostname)}:${s.port}${ic("copy",11)}</button>` : `<span class="allocation-chip muted">No allocation</span>`}</div>
+        <div class="server-meta"><span>${esc(s.blueprint)}</span><span>agent ${esc(s.node)}</span><span>#${s.id}</span>${s.port ? `<button class="allocation-chip" onclick="navigator.clipboard.writeText(location.hostname+':${s.port}');toast('Endpoint copied','success')">${ic("link",12)}${esc(location.hostname)}:${s.port}${ic("copy",11)}</button>` : `<span class="allocation-chip muted">No endpoint</span>`}</div>
       </div>
       <div class="server-actions">
         <button class="btn success" aria-label="Start server" onclick="power('${id}','start')">${ic("play", 14)}<span>${t("start")}</span></button>
@@ -529,9 +529,9 @@ function renderServerSettings(id, data) {
   const subUsers = (data.subusers || []).map((su) => `<div class="file-row"><span class="avatar mini">${esc(su.username[0] || "?").toUpperCase()}</span><b>${esc(su.username)}</b><span class="f-meta">${(su.permissions || []).join(", ") || "all"}</span><span class="f-actions"><button class="icon-btn sm danger" onclick="subDel('${id}',${su.id})">${ic("trash", 15)}</button></span></div>`).join("");
   $("#tab-body").innerHTML = `
     <div class="grid cols-2">
-      <div class="card"><h3>${ic("terminal", 15)} Startup Command</h3><div class="code-block">${esc(data.resolved_startup)}</div>
-        <div class="field" style="margin-top:12px"><label>Image</label><div class="field-input">${ic("box", 14)}<input id="s-img" value="${esc(s.docker_image)}" ${state.user.root_admin ? "" : "disabled"}></div></div>
-        <div class="row"><button class="btn sm" onclick="saveImage('${id}')">${ic("save", 13)}<span>${t("save")}</span></button></div>
+      <div class="card"><h3>${ic("terminal", 15)} Launch Plan</h3><div class="code-block">${esc(data.resolved_launch)}</div>
+        <div class="field" style="margin-top:12px"><label>Runtime hint</label><div class="field-input">${ic("box", 14)}<input id="s-runtime" value="${esc(data.runtime_hint)}" ${state.user.root_admin ? "" : "disabled"}></div></div>
+        <div class="row"><button class="btn sm" onclick="saveRuntime('${id}')">${ic("save", 13)}<span>${t("save")}</span></button></div>
       </div>
       <div class="card"><h3>${ic("settings", 15)} ${t("settings")}</h3>
         <div class="metric-line"><span>Auto-restart on crash</span><label class="switch"><input type="checkbox" id="s-autorestart" ${s.auto_restart ? "checked" : ""} onchange="saveToggle('${id}','auto_restart',this.checked)"><i></i></label></div>
@@ -557,7 +557,7 @@ function renderServerSettings(id, data) {
     </div>`;
 }
 
-async function saveImage(id) { const docker_image = $("#s-img").value; try { await api(`/servers/${id}`, { method: "PATCH", body: JSON.stringify({ docker_image }) }); toast(t("saved"), "success"); } catch (e) { toast(e.message, "error"); } }
+async function saveRuntime(id) { const runtime_hint = $("#s-runtime").value; try { await api(`/servers/${id}`, { method: "PATCH", body: JSON.stringify({ runtime_hint }) }); toast(t("saved"), "success"); } catch (e) { toast(e.message, "error"); } }
 async function saveToggle(id, field, val) { try { await api(`/servers/${id}`, { method: "PATCH", body: JSON.stringify({ [field]: val }) }); toast(t("saved"), "success"); } catch (e) { toast(e.message, "error"); } }
 async function saveVars(id) {
   const variables = {};
@@ -782,15 +782,15 @@ async function notifLoad() {
    ============================================================ */
 function renderAdmin(tab) {
   if (!state.user?.root_admin) { toast("Control Center only", "error"); renderDashboard(); return; }
-  const active=tab==="nodes"?"fabric":tab==="eggs"?"blueprints":tab==="system"?"operations":"workspaces";
+  const active=tab==="nodes"?"fabric":tab==="blueprints"?"blueprints":tab==="system"?"observatory":"workspaces";
   document.getElementById("app").innerHTML = shell(active, "Control Center", `<div class="tabs">
-    <a href="#/admin/servers" class="${tab === "servers" ? "active" : ""}">${ic("server", 14)} ${t("servers")}</a>
-    <a href="#/admin/users" class="${tab === "users" ? "active" : ""}">${ic("users", 14)} ${t("users")}</a>
-    <a href="#/admin/eggs" class="${tab === "eggs" ? "active" : ""}">${ic("egg", 14)} ${t("eggs")}</a>
+    <a href="#/admin/servers" class="${tab === "servers" ? "active" : ""}">${ic("server", 14)} Workspaces</a>
+    <a href="#/admin/users" class="${tab === "users" ? "active" : ""}">${ic("users", 14)} Team</a>
+    <a href="#/admin/blueprints" class="${tab === "blueprints" ? "active" : ""}">${ic("box", 14)} Blueprint Studio</a>
     <a href="#/admin/nodes" class="${tab === "nodes" ? "active" : ""}">${ic("globe", 14)} Fabric</a>
-    <a href="#/admin/system" class="${tab === "system" ? "active" : ""}">${ic("gauge", 14)} ${t("system")}</a>
+    <a href="#/admin/system" class="${tab === "system" ? "active" : ""}">${ic("gauge", 14)} Observatory</a>
   </div><div id="admin-body"><div class="empty">${ic("shield", 40)}<p>${t("loading")}</p></div></div>`);
-  const render = { servers: adminServers, users: adminUsers, eggs: adminEggs, nodes: adminNodes, system: adminSystem };
+  const render = { servers: adminServers, users: adminUsers, blueprints: adminBlueprints, nodes: adminNodes, system: adminSystem };
   (render[tab] || adminServers)();
 }
 
@@ -812,15 +812,15 @@ async function adminToggleSuspend(id, on) { try { await api(`/servers/${id}/${on
 async function adminDelServer(id) { if (!await vpConfirm(`${t("confirm_delete")} ${id}?`)) return; try { await fetch(`/api/servers/${id}`, { method: "DELETE" }); adminServers(); toast(t("deleted"), "success"); } catch (e) { toast(e.message, "error"); } }
 async function adminNewServer() {
   try {
-    const [usersRes, eggsRes] = await Promise.all([api("/admin/users"), api("/eggs")]);
+    const [usersRes, blueprintsRes] = await Promise.all([api("/admin/users"), api("/blueprints")]);
     const users = usersRes.data || usersRes;
-    const eggs = eggsRes.data || eggsRes;
+    const blueprints = blueprintsRes.data || blueprintsRes;
     const modal = document.createElement("div"); modal.className = "modal";
     modal.innerHTML = `<div class="modal-card">
       <div class="modal-head"><b>${ic("server", 15)} ${t("create_server")}</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
       <div class="field"><label>${t("name")}</label><input id="ns-name" placeholder="my-workspace"></div>
       <div class="field"><label>${t("owner")}</label><select id="ns-user">${users.map((u) => `<option value="${u.id}">${esc(u.username)} (#${u.id})</option>`).join("")}</select></div>
-      <div class="field"><label>Blueprint</label><select id="ns-egg">${eggs.map((e) => `<option value="${e.id}">${esc(e.name)} — ${esc(e.category)}</option>`).join("")}</select></div>
+      <div class="field"><label>Blueprint</label><select id="ns-blueprint">${blueprints.map((definition) => `<option value="${definition.id}">${esc(definition.name)} — ${esc(definition.category)}</option>`).join("")}</select></div>
       <div class="grid cols-3">
         <div class="field"><label>RAM (MB)</label><input id="ns-mem" type="number" value="1024"></div>
         <div class="field"><label>Disk (MB)</label><input id="ns-disk" type="number" value="8192"></div>
@@ -833,7 +833,7 @@ async function adminNewServer() {
 }
 async function adminCreateServer() {
   try {
-    await api("/servers", { method: "POST", body: JSON.stringify({ name: $("#ns-name").value, user_id: +$("#ns-user").value, egg_id: +$("#ns-egg").value, memory_mb: +$("#ns-mem").value, disk_mb: +$("#ns-disk").value, cpu_percent: +$("#ns-cpu").value, start_on_create: false }) });
+    await api("/servers", { method: "POST", body: JSON.stringify({ name: $("#ns-name").value, user_id: +$("#ns-user").value, blueprint_id: +$("#ns-blueprint").value, memory_mb: +$("#ns-mem").value, disk_mb: +$("#ns-disk").value, cpu_percent: +$("#ns-cpu").value, start_on_create: false }) });
     $(".modal")?.remove(); adminServers(); toast(t("created"), "success");
   } catch (e) { toast(e.message, "error"); }
 }
@@ -873,39 +873,20 @@ async function adminCreateUser() {
   catch (e) { toast(e.message, "error"); }
 }
 
-async function adminEggs() {
-  $("#admin-body").innerHTML = `<div class="card"><div class="card-head"><h3>${t("eggs")}</h3><button class="btn primary sm" onclick="adminNewEgg()">${ic("plus", 14)}<span>${t("create")}</span></button></div><div id="a-eggs"></div></div>`;
+async function adminBlueprints() {
+  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">VOLT SPECIFICATION</span><h2>Blueprint Studio</h2><p>Compose portable launch plans for games, sites, bots, and long-running services.</p></div><button class="btn primary sm" onclick="adminNewBlueprint()">${ic("plus",14)}<span>New blueprint</span></button></section><div id="a-blueprints" class="blueprint-grid"></div>`;
   try {
-    const res = await api("/eggs");
-    const eggs = res.data || res;
-    $("#a-eggs").innerHTML = `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>ID</th><th>${t("name")}</th><th>Category</th><th>Runtime</th><th>Startup</th><th>Vars</th><th></th></tr></thead><tbody>` +
-      eggs.map((e) => `<tr>
-        <td>${e.id}</td><td><b>${esc(e.name)}</b></td><td><span class="badge">${esc(e.category)}</span></td><td><code>${esc(e.docker_image)}</code></td><td><code style="font-size:11px">${esc(e.startup)}</code></td><td>${e.variables?.length || 0}</td>
-        <td><div class="actions"><button class="icon-btn sm" onclick="adminEggExport(${e.id})">${ic("download", 15)}</button><button class="icon-btn sm danger" onclick="adminDelEgg(${e.id})">${ic("trash", 15)}</button></div></td>
-      </tr>`).join("") + `</tbody></table></div>`;
-  } catch (e) { toast(e.message, "error"); }
+    const res = await api("/blueprints"); const blueprints = res.data || res;
+    $("#a-blueprints").innerHTML = blueprints.length ? blueprints.map((definition) => {const count=definition.variables?.length||0;const kind=String(definition.category||"").toLowerCase();const symbol=kind==="database"?"database":kind==="web"?"globe":kind==="game"?"zap":kind==="generic"?"terminal":"blueprint";return `<article class="blueprint-card"><div class="blueprint-card-head"><span class="blueprint-symbol">${ic(symbol,20)}</span><div><h3>${esc(definition.name)}</h3><span>${esc(definition.category)} · VoltSpec</span></div></div><p>${esc(definition.description || "Reusable isolated workload plan")}</p><div class="blueprint-command"><span>Launch</span><code title="${esc(definition.startup || "operator-defined")}">${esc(definition.startup || "operator-defined")}</code></div><div class="blueprint-card-foot"><span>${count} ${count===1?'input':'inputs'}</span><div class="actions"><button class="icon-btn sm" title="Export VoltSpec" onclick="adminBlueprintExport(${definition.id})">${ic("download",15)}</button><button class="icon-btn sm danger" title="Delete blueprint" onclick="adminDeleteBlueprint(${definition.id})">${ic("trash",15)}</button></div></div></article>`}).join("") : `<div class="context-empty">${ic("blueprint",28)}<div><b>No blueprints yet</b><span>Create the first portable VoltSpec launch plan.</span></div></div>`;
+  } catch (e) { toast(e.message,"error"); }
 }
-async function adminEggExport(id) { try { const r = await api(`/eggs/${id}/export`); navigator.clipboard?.writeText(r.json); toast("JSON copied", "success"); } catch (e) { toast(e.message, "error"); } }
-async function adminDelEgg(id) { if (!await vpConfirm(`${t("confirm_delete")} ${id}?`)) return; try { await fetch(`/api/eggs/${id}`, { method: "DELETE" }); adminEggs(); } catch (e) { toast(e.message, "error"); } }
-function adminNewEgg() {
-  const modal = document.createElement("div"); modal.className = "modal";
-  modal.innerHTML = `<div class="modal-card">
-    <div class="modal-head"><b>${ic("box", 15)} ${t("create")} Blueprint</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
-    <div class="field"><label>${t("name")}</label><input id="ne-name"></div>
-    <div class="field"><label>Category</label><input id="ne-cat" value="generic"></div>
-    <div class="field"><label>Runtime hint</label><input id="ne-img" value="linux-native"></div>
-    <div class="field"><label>Startup</label><input id="ne-startup" placeholder="python3 main.py"></div>
-    <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">${t("cancel")}</button><button class="btn primary" onclick="adminCreateEgg()">${ic("plus", 14)}<span>${t("create")}</span></button></div>
-  </div>`;
-  document.body.appendChild(modal);
-}
-async function adminCreateEgg() {
-  try { await api("/eggs", { method: "POST", body: JSON.stringify({ name: $("#ne-name").value, category: $("#ne-cat").value, docker_image: $("#ne-img").value, startup: $("#ne-startup").value }) }); $(".modal")?.remove(); adminEggs(); toast(t("created"), "success"); }
-  catch (e) { toast(e.message, "error"); }
-}
+async function adminBlueprintExport(id){try{const r=await api(`/blueprints/${id}/export`);await navigator.clipboard?.writeText(r.json);toast("VoltSpec copied","success")}catch(e){toast(e.message,"error")}}
+async function adminDeleteBlueprint(id){if(!await vpConfirm(`Delete blueprint ${id}?`))return;try{await api(`/blueprints/${id}`,{method:"DELETE"});adminBlueprints()}catch(e){toast(e.message,"error")}}
+function adminNewBlueprint(){const modal=document.createElement("div");modal.className="modal";modal.innerHTML=`<div class="modal-card"><div class="modal-head"><b>${ic("box",15)} New VoltSpec blueprint</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x",16)}</button></div><div class="field"><label>Name</label><input id="nb-name" placeholder="Velocity Proxy"></div><div class="field"><label>Category</label><input id="nb-category" value="application"></div><div class="field"><label>Runtime hint</label><input id="nb-runtime" value="linux-native"></div><div class="field"><label>Launch plan</label><input id="nb-launch" placeholder="java -jar app.jar"></div><div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">Cancel</button><button class="btn primary" onclick="adminCreateBlueprint()">${ic("plus",14)}<span>Create blueprint</span></button></div></div>`;document.body.appendChild(modal)}
+async function adminCreateBlueprint(){try{await api("/blueprints",{method:"POST",body:JSON.stringify({name:$("#nb-name").value,category:$("#nb-category").value,docker_image:$("#nb-runtime").value,startup:$("#nb-launch").value})});$(".modal")?.remove();adminBlueprints();toast("Blueprint created","success")}catch(e){toast(e.message,"error")}}
 
 async function adminNodes() {
-  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">DISTRIBUTED INFRASTRUCTURE</span><h2>Execution fabric</h2><p>Capacity, isolation and scheduling health across every machine.</p></div><button class="btn primary" onclick="adminNewNode()">${ic("plus",14)}<span>Attach agent</span></button></section><div id="a-nodes" class="node-grid"></div>`;
+  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">EXECUTION FABRIC</span><h2>Agent mesh</h2><p>Capacity, isolation, placement, and health across every execution host.</p></div><button class="btn primary" onclick="adminNewNode()">${ic("plus",14)}<span>Attach agent</span></button></section><div id="a-nodes" class="node-grid"></div>`;
   try {
     const res = await api("/nodes"); const values = res.data || [];
     $("#a-nodes").innerHTML = values.length ? values.map(n => { const cpu=Math.round(n.capacity?.cpu_percent||0), mem=n.capacity?.memory_total?Math.round(n.capacity.memory_used/n.capacity.memory_total*100):0; return `<article class="node-card ${n.online?'online':'offline'}">

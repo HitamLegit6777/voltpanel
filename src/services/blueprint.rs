@@ -1,18 +1,18 @@
-//! Egg engine: variable resolution, startup command building, install runner.
+//! Blueprint engine: input resolution, launch plans, and sandboxed setup.
 use crate::db::Db;
-use crate::models::{self, Egg, EggVariable, Server};
+use crate::models::{self, Blueprint, BlueprintInput, Server};
 use anyhow::{anyhow, bail, Result};
 use regex::Regex;
 use std::collections::HashMap;
 
-/// Resolve all egg variables for a server, applying user overrides.
-pub fn resolve_variables(db: &Db, server: &Server) -> Result<Vec<(EggVariable, String)>> {
-    let egg = models::get_egg(db, server.egg_id)?;
+/// Resolve blueprint inputs for a workspace, applying owner overrides.
+pub fn resolve_variables(db: &Db, server: &Server) -> Result<Vec<(BlueprintInput, String)>> {
+    let blueprint = models::get_blueprint(db, server.egg_id)?;
     let overrides: HashMap<String, String> = models::get_server_vars(db, server.id)?
         .into_iter()
         .collect();
     let mut out = Vec::new();
-    for var in &egg.variables {
+    for var in &blueprint.variables {
         let value = overrides
             .get(&var.env_var)
             .cloned()
@@ -22,11 +22,11 @@ pub fn resolve_variables(db: &Db, server: &Server) -> Result<Vec<(EggVariable, S
     Ok(out)
 }
 
-/// Build the final startup command by interpolating {{VAR}} and {{SERVER_*}} placeholders.
+/// Build the final launch command by interpolating blueprint and workspace placeholders.
 pub fn resolve_startup(db: &Db, server: &Server) -> Result<String> {
-    let egg = models::get_egg(db, server.egg_id)?;
+    let blueprint = models::get_blueprint(db, server.egg_id)?;
     let template = if server.startup.is_empty() {
-        egg.startup.clone()
+        blueprint.startup.clone()
     } else {
         server.startup.clone()
     };
@@ -50,7 +50,7 @@ pub fn resolve_startup(db: &Db, server: &Server) -> Result<String> {
     Ok(out.to_string())
 }
 
-/// Environment variables passed to the process (everything the egg declares + panel vars).
+/// Environment passed to the process from blueprint inputs and workspace metadata.
 pub fn env_for_server(db: &Db, server: &Server) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
     if let Ok(vars) = resolve_variables(db, server) {
@@ -84,8 +84,8 @@ pub fn env_for_server(db: &Db, server: &Server) -> Vec<(String, String)> {
     env
 }
 
-/// Validate a variable value against egg rules (min/max/required/regex).
-pub fn validate_value(var: &EggVariable, value: &str) -> Result<()> {
+/// Validate an input value against blueprint constraints.
+pub fn validate_value(var: &BlueprintInput, value: &str) -> Result<()> {
     let rules: Vec<&str> = var.rules.split('|').map(|r| r.trim()).collect();
     let mut numeric = false;
     let mut min: Option<f64> = None;
@@ -161,13 +161,13 @@ pub fn validate_value(var: &EggVariable, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Parse an egg JSON string into an Egg struct (used by egg import).
-pub fn parse_egg_json(json: &str) -> Result<EggImport> {
-    serde_json::from_str(json).map_err(|e| anyhow!("invalid egg json: {e}"))
+/// Parse a VoltPanel blueprint JSON document.
+pub fn parse_blueprint_json(json: &str) -> Result<BlueprintImport> {
+    serde_json::from_str(json).map_err(|e| anyhow!("invalid blueprint json: {e}"))
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct EggImport {
+pub struct BlueprintImport {
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -184,7 +184,7 @@ pub struct EggImport {
     #[serde(default)]
     pub install: Option<InstallScript>,
     #[serde(default)]
-    pub variables: Vec<EggVariable>,
+    pub variables: Vec<BlueprintInput>,
     #[serde(default = "default_stop")]
     pub stop: String,
 }
@@ -202,14 +202,14 @@ pub struct InstallScript {
     pub script: String,
 }
 
-/// Run the egg install script inside a server dir. Blocks until done.
+/// Run blueprint setup inside an isolated workspace. Blocks until done.
 pub fn run_install(
     db: &Db,
     server: &Server,
-    egg: &Egg,
+    blueprint: &Blueprint,
     notifier: &crate::services::proc::Notifier,
 ) -> Result<()> {
-    let Some(script) = &egg.install_script else {
+    let Some(script) = &blueprint.install_script else {
         return Ok(());
     };
     if script.trim().is_empty() {
@@ -271,10 +271,10 @@ pub fn run_install(
     Ok(())
 }
 
-/// Build the default config JSON for an egg (substitutes variables).
+/// Build the default workspace configuration declared by a blueprint.
 pub fn build_default_config(db: &Db, server: &Server) -> Result<Option<serde_json::Value>> {
-    let egg = models::get_egg(db, server.egg_id)?;
-    let Some(cfg) = &egg.default_config else {
+    let blueprint = models::get_blueprint(db, server.egg_id)?;
+    let Some(cfg) = &blueprint.default_config else {
         return Ok(None);
     };
     let mut env = HashMap::new();

@@ -430,8 +430,8 @@ impl ProcManager {
             return;
         }
         let _ = models::bump_restart_count(&self.db, srv.id);
-        let cmd = crate::services::egg::resolve_startup(&self.db, &srv);
-        let env = crate::services::egg::env_for_server(&self.db, &srv);
+        let cmd = crate::services::blueprint::resolve_startup(&self.db, &srv);
+        let env = crate::services::blueprint::env_for_server(&self.db, &srv);
         match cmd {
             Ok(cmd) => {
                 notifier.notify(

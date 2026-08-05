@@ -28,12 +28,12 @@ while (($#)); do
     --version) VOLTPANEL_VERSION=${2:?}; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     --help|-h) cat <<'EOF'
-VoltPanel node installer
+VoltPanel execution agent installer
 
 Usage: sudo ./install-node.sh --panel URL --token TOKEN [options]
-  --domain node.example.com   HTTPS node endpoint through Caddy
-  --public-url URL            Explicit URL stored in the panel
-  --listen ADDRESS            Daemon listen address
+  --domain agent.example.com  HTTPS agent endpoint through Caddy
+  --public-url URL            Explicit agent URL stored in the control plane
+  --listen ADDRESS            Agent listen address
   --allow-http                Permit plain HTTP enrollment on trusted LAN
   --no-caddy                  Do not configure Caddy
   --data-dir PATH             Node data directory (default /var/lib/voltd)
@@ -78,7 +78,7 @@ if [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] /usr/local/bin/voltd ${JOIN_ARGS[*
 
 write_file /etc/systemd/system/voltd.service 0644 <<EOF
 [Unit]
-Description=VoltPanel node daemon
+Description=VoltPanel execution agent
 After=network-online.target
 Wants=network-online.target
 

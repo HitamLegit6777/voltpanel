@@ -19,7 +19,7 @@ This guide covers production panel and node installation. The scripts support De
 - `bubblewrap`, `setpriv`, `iproute2`, `nftables`
 - Kernel namespaces enabled
 - Enough CPU/RAM/disk for workloads
-- One node API domain or a private panel-reachable address
+- One execution-agent domain or a private panel-reachable address
 
 Check cgroup v2:
 
@@ -99,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scrip
 
 `--allow-http` must only be used on a trusted private network. HMAC protects integrity and authenticity, but only TLS protects console/file/snapshot confidentiality.
 
-### Node installer options
+### Execution-agent installer options
 
 ```text
 --panel URL           Panel URL (required)

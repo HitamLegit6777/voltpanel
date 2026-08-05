@@ -1,4 +1,4 @@
-//! Linux workload isolation shared by the panel and node daemon.
+//! Linux workload isolation shared by the control plane and execution agent.
 //!
 //! Security invariants:
 //! - fail closed when bubblewrap/cgroup v2 is unavailable;

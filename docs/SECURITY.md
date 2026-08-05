@@ -74,7 +74,7 @@ Plain HTTP enrollment is allowed only with explicit `--allow-http`; use it solel
 
 - Passwords: Argon2id
 - Sessions/API keys: hashed before storage
-- TOTP/node secrets: protected by 0600 SQLite/config files
+- TOTP/execution-agent secrets: protected by 0600 SQLite/config files
 - Data/config directories: 0700
 - Process/service umask: 0077
 - Enrollment token: one-time use
@@ -114,4 +114,4 @@ Do not publish a working escape before maintainers have released a fix.
 
 - Hard disk byte quotas require filesystem project-quota integration and are not yet enforced per server. Disk capacity is used for placement and monitored.
 - SFTP is not yet embedded.
-- Node traffic must be protected with TLS/reverse proxy; the daemon does not terminate TLS directly.
+- Execution-agent traffic must be protected with TLS/reverse proxy; the agent does not terminate TLS directly.

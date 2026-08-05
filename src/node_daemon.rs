@@ -1,4 +1,4 @@
-//! Runtime used by the standalone `voltd` node daemon.
+//! Runtime used by the standalone `voltd` execution agent.
 use crate::node_protocol::{
     NodeCapacity, ProvisionRequest, RemoteFileEntry, RemoteServerStats, ServerSpec,
 };
