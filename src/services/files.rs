@@ -3,10 +3,10 @@
 use crate::config::Config;
 use crate::models::Server;
 use anyhow::{bail, Context, Result};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -61,18 +61,27 @@ pub fn safe_join(dest: &Path, name: &str) -> Result<PathBuf> {
     let mut out = dest.to_path_buf();
     for comp in Path::new(name).components() {
         match comp {
-            Component::Normal(c) => out.push(c),
+            Component::Normal(c) => {
+                out.push(c);
+                if let Ok(meta) = fs::symlink_metadata(&out) {
+                    if meta.file_type().is_symlink() {
+                        bail!("archive path contains symlink")
+                    }
+                }
+            }
             Component::CurDir => {}
             Component::ParentDir => {
                 if !out.pop() {
-                    bail!("archive entry escapes destination");
+                    bail!("archive entry escapes destination")
                 }
             }
-            Component::RootDir | Component::Prefix(_) => bail!("archive entry uses an absolute path"),
+            Component::RootDir | Component::Prefix(_) => {
+                bail!("archive entry uses an absolute path")
+            }
         }
     }
     if !out.starts_with(dest) {
-        bail!("archive entry escapes destination");
+        bail!("archive entry escapes destination")
     }
     Ok(out)
 }
@@ -90,24 +99,42 @@ pub fn list_dir(cfg: &Config, server: &Server, rel: &str) -> Result<Vec<FileEntr
             .unwrap_or(&p)
             .to_string_lossy()
             .replace('\\', "/");
-        let mime = mime_guess::from_path(&name).first_or_octet_stream().to_string();
-        let ext = Path::new(&name).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        let mime = mime_guess::from_path(&name)
+            .first_or_octet_stream()
+            .to_string();
+        let ext = Path::new(&name)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default();
         out.push(FileEntry {
             name,
             path: format!("/{}", rel_path),
             size: if meta.is_dir() { 0 } else { meta.len() },
             modified: meta
                 .modified()
-                .map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string())
+                .map(|m| {
+                    m.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                        .to_string()
+                })
                 .unwrap_or_default(),
             is_dir: meta.is_dir(),
             is_symlink: meta.file_type().is_symlink(),
             mode: file_mode(&p),
-            mime: if meta.is_dir() { "inode/directory".into() } else { mime },
+            mime: if meta.is_dir() {
+                "inode/directory".into()
+            } else {
+                mime
+            },
             extension: ext,
         });
     }
-    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     Ok(out)
 }
 
@@ -116,7 +143,12 @@ fn file_mode(p: &Path) -> u32 {
     p.metadata().map(|m| m.permissions().mode()).unwrap_or(0)
 }
 
-pub fn read_file(cfg: &Config, server: &Server, rel: &str, max_bytes: usize) -> Result<(Vec<u8>, String)> {
+pub fn read_file(
+    cfg: &Config,
+    server: &Server,
+    rel: &str,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, String)> {
     let path = resolve(cfg, server, rel)?;
     if path.is_dir() {
         bail!("is a directory");
@@ -126,7 +158,9 @@ pub fn read_file(cfg: &Config, server: &Server, rel: &str, max_bytes: usize) -> 
         bail!("file too large to view inline");
     }
     let bytes = fs::read(&path)?;
-    let mime = mime_guess::from_path(&path).first_or_octet_stream().to_string();
+    let mime = mime_guess::from_path(&path)
+        .first_or_octet_stream()
+        .to_string();
     Ok((bytes, mime))
 }
 
@@ -141,14 +175,20 @@ pub fn write_file(cfg: &Config, server: &Server, rel: &str, data: &[u8]) -> Resu
 
 pub fn append_file(cfg: &Config, server: &Server, rel: &str, data: &[u8]) -> Result<()> {
     let path = resolve(cfg, server, rel)?;
-    let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
     f.write_all(data)?;
     Ok(())
 }
 
 pub fn create_file(cfg: &Config, server: &Server, rel: &str) -> Result<()> {
     let path = resolve(cfg, server, rel)?;
-    fs::OpenOptions::new().create_new(true).write(true).open(&path)?;
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)?;
     Ok(())
 }
 
@@ -224,7 +264,9 @@ pub fn chmod(cfg: &Config, server: &Server, rel: &str, mode: u32) -> Result<()> 
 }
 
 pub fn exists(cfg: &Config, server: &Server, rel: &str) -> bool {
-    resolve(cfg, server, rel).map(|p| p.exists()).unwrap_or(false)
+    resolve(cfg, server, rel)
+        .map(|p| p.exists())
+        .unwrap_or(false)
 }
 
 // ---------------- Archive ----------------
@@ -233,7 +275,8 @@ pub fn zip_dir(cfg: &Config, server: &Server, rel: &str, out_abs: &Path) -> Resu
     let src = resolve(cfg, server, rel)?;
     let file = fs::File::create(out_abs)?;
     let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let base = src.clone();
     let mut total: u64 = 0;
     add_dir_to_zip(&mut zip, &src, &base, &options, &mut total)?;
@@ -251,17 +294,23 @@ fn add_dir_to_zip(
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let name = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
-        if path.is_dir() {
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let name = path
+            .strip_prefix(base)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if meta.is_dir() {
             zip.add_directory(format!("{name}/"), *options)?;
             add_dir_to_zip(zip, &path, base, options, total)?;
-        } else {
+        } else if meta.is_file() {
             zip.start_file(name, *options)?;
-            let mut f = fs::File::open(&path)?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
-            *total += buf.len() as u64;
-            zip.write_all(&buf)?;
+            let mut file = fs::File::open(&path)?;
+            *total = total.saturating_add(meta.len());
+            std::io::copy(&mut file, zip)?;
         }
     }
     Ok(())
@@ -301,7 +350,12 @@ pub fn tar_gz_dir(cfg: &Config, server: &Server, rel: &str, out_abs: &Path) -> R
     Ok(size)
 }
 
-pub fn extract_tar_gz_into(cfg: &Config, server: &Server, archive_rel: &str, dest_rel: &str) -> Result<()> {
+pub fn extract_tar_gz_into(
+    cfg: &Config,
+    server: &Server,
+    archive_rel: &str,
+    dest_rel: &str,
+) -> Result<()> {
     let archive = resolve(cfg, server, archive_rel)?;
     let dest = resolve(cfg, server, dest_rel)?;
     fs::create_dir_all(&dest)?;
@@ -311,6 +365,10 @@ pub fn extract_tar_gz_into(cfg: &Config, server: &Server, archive_rel: &str, des
     tar.set_unpack_xattrs(false);
     for entry in tar.entries()? {
         let mut entry = entry?;
+        let kind = entry.header().entry_type();
+        if kind.is_symlink() || kind.is_hard_link() {
+            bail!("archive link entries are forbidden")
+        }
         let rel = entry.path()?.to_string_lossy().to_string();
         let path = safe_join(&dest, &rel)?;
         entry.unpack(&path)?;
@@ -321,7 +379,10 @@ pub fn extract_tar_gz_into(cfg: &Config, server: &Server, archive_rel: &str, des
 pub fn download_bytes(cfg: &Config, server: &Server, rel: &str) -> Result<(String, Vec<u8>)> {
     let path = resolve(cfg, server, rel)?;
     let bytes = fs::read(&path)?;
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     Ok((name, bytes))
 }
 
@@ -337,11 +398,30 @@ mod tests {
     #[test]
     fn safe_join_normalizes_and_blocks_escape() {
         let dest = Path::new("/srv");
-        assert_eq!(safe_join(dest, "a/b.txt").unwrap(), PathBuf::from("/srv/a/b.txt"));
-        assert_eq!(safe_join(dest, "a/./b.txt").unwrap(), PathBuf::from("/srv/a/b.txt"));
-        assert_eq!(safe_join(dest, "a/../b.txt").unwrap(), PathBuf::from("/srv/b.txt"));
+        assert_eq!(
+            safe_join(dest, "a/b.txt").unwrap(),
+            PathBuf::from("/srv/a/b.txt")
+        );
+        assert_eq!(
+            safe_join(dest, "a/./b.txt").unwrap(),
+            PathBuf::from("/srv/a/b.txt")
+        );
+        assert_eq!(
+            safe_join(dest, "a/../b.txt").unwrap(),
+            PathBuf::from("/srv/b.txt")
+        );
         assert!(safe_join(dest, "../evil.txt").is_err());
         assert!(safe_join(dest, "/abs.txt").is_err());
         assert!(safe_join(dest, "a/../../evil.txt").is_err());
+    }
+
+    #[test]
+    fn safe_join_rejects_existing_symlink_parent() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        symlink("/etc", dest.join("escape")).unwrap();
+        assert!(safe_join(&dest, "escape/passwd").is_err());
     }
 }

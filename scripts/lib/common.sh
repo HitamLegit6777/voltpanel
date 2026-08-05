@@ -64,15 +64,22 @@ release_url() {
   printf '%s/releases/%s/%s-%s' "$VOLTPANEL_GITHUB" "$version_path" "$binary" "$arch"
 }
 
+release_base_url() {
+  local version_path
+  if [[ "$VOLTPANEL_VERSION" == "latest" ]]; then version_path=latest/download; else version_path="download/${VOLTPANEL_VERSION}"; fi
+  printf '%s/releases/%s' "$VOLTPANEL_GITHUB" "$version_path"
+}
+
 install_binary() {
-  local binary=$1 target="/usr/local/bin/$1" url temp
-  url=$(release_url "$binary")
-  temp=$(mktemp)
+  local binary=$1 target="/usr/local/bin/$1" url temp checksums asset expected actual
+  url=$(release_url "$binary"); asset="${binary}-$(arch_asset)"; temp=$(mktemp); checksums=$(mktemp)
   log "Downloading $binary from $url"
-  if [[ "$DRY_RUN" == "1" ]]; then log "[dry-run] install $binary -> $target"; rm -f "$temp"; return; fi
+  if [[ "$DRY_RUN" == "1" ]]; then log "[dry-run] verify SHA256SUMS and install $binary -> $target"; rm -f "$temp" "$checksums"; return; fi
   curl --fail --location --retry 3 --connect-timeout 15 "$url" -o "$temp" || die "Binary download failed. Check the release and architecture."
-  install -m 0755 "$temp" "$target"
-  rm -f "$temp"
+  curl --fail --location --retry 3 --connect-timeout 15 "$(release_base_url)/SHA256SUMS" -o "$checksums" || die "Checksum download failed."
+  expected=$(awk -v asset="$asset" '$2==asset{print $1}' "$checksums"); [[ -n "$expected" ]] || die "No checksum published for $asset"
+  actual=$(sha256sum "$temp" | awk '{print $1}'); [[ "$actual" == "$expected" ]] || die "Checksum mismatch for $asset"
+  install -m 0755 "$temp" "$target"; rm -f "$temp" "$checksums"
 }
 random_secret() { openssl rand -base64 "${1:-36}" | tr -d '\n'; }
 validate_domain() { [[ $1 =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]] || die "Invalid domain: $1"; }

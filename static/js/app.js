@@ -9,36 +9,36 @@ const state = { user: null, page: "boot", server: null, servers: [], eggs: [], p
 /* ---------- i18n ---------- */
 const I18N = {
   en: {
-    dashboard: "Dashboard", servers: "Servers", profile: "Profile", settings: "Settings",
-    admin: "Admin", logout: "Logout", loading: "Loading…", none: "None",
-    node: "Node", ram: "RAM", disk: "Disk", cpu: "CPU", load: "Load", uptime: "Uptime", processes: "Processes",
+    dashboard: "Fleet", servers: "Workspaces", profile: "Profile", settings: "Settings",
+    admin: "Control Center", logout: "Logout", loading: "Loading…", none: "None",
+    node: "Fabric", ram: "RAM", disk: "Disk", cpu: "CPU", load: "Load", uptime: "Uptime", processes: "Processes",
     status: "Status", name: "Name", owner: "Owner", actions: "Actions", size: "Size", type: "Type", modified: "Modified",
     start: "Start", restart: "Restart", stop: "Stop", kill: "Kill", save: "Save", cancel: "Cancel", create: "Create",
     delete: "Delete", edit: "Edit", download: "Download", upload: "Upload", copy: "Copy", rename: "Rename",
-    console: "Console", files: "Files", databases: "Databases", backups: "Backups", schedules: "Schedules",
-    users: "Users", eggs: "Eggs", system: "System", create_server: "New Server", create_user: "New User",
-    suspend: "Suspend", unsuspend: "Unsuspend", reinstall: "Re-install",
+    console: "Terminal", files: "Storage", databases: "Data Lab", backups: "Vault", schedules: "Automations",
+    users: "Team", eggs: "Blueprints", system: "Operations", create_server: "New Workspace", create_user: "New Member",
+    suspend: "Suspend", unsuspend: "Unsuspend", reinstall: "Rebuild",
     login: "Sign in", username: "Username", password: "Password", remember: "Remember me",
-    welcome: "Game, web & script hosting panel", no_servers: "No servers yet",
-    all_servers: "All Servers", notifications: "Notifications", api_keys: "API Keys",
-    confirm_delete: "Delete?", confirm_restore: "Restore backup? Server will be stopped.",
+    welcome: "Linux-native workload control plane", no_servers: "No workspaces yet",
+    all_servers: "Workspace Fleet", notifications: "Signals", api_keys: "Access Tokens",
+    confirm_delete: "Delete?", confirm_restore: "Restore snapshot? Workspace will be stopped.",
     saved: "Saved", created: "Created", deleted: "Deleted", uploaded: "Uploaded",
     twofa: "Two-Factor Auth", enable_2fa: "Enable 2FA", verify: "Verify",
   },
   id: {
-    dashboard: "Dasbor", servers: "Server", profile: "Profil", settings: "Pengaturan",
-    admin: "Admin", logout: "Keluar", loading: "Memuat…", none: "Tidak ada",
-    node: "Node", ram: "RAM", disk: "Disk", cpu: "CPU", load: "Beban", uptime: "Aktif", processes: "Proses",
+    dashboard: "Fleet", servers: "Workspace", profile: "Profil", settings: "Pengaturan",
+    admin: "Pusat Kontrol", logout: "Keluar", loading: "Memuat…", none: "Tidak ada",
+    node: "Fabric", ram: "RAM", disk: "Disk", cpu: "CPU", load: "Beban", uptime: "Aktif", processes: "Proses",
     status: "Status", name: "Nama", owner: "Pemilik", actions: "Aksi", size: "Ukuran", type: "Tipe", modified: "Diubah",
     start: "Mulai", restart: "Ulang", stop: "Hentikan", kill: "Paksa", save: "Simpan", cancel: "Batal", create: "Buat",
     delete: "Hapus", edit: "Ubah", download: "Unduh", upload: "Unggah", copy: "Salin", rename: "Ganti nama",
-    console: "Konsol", files: "File", databases: "Database", backups: "Cadangan", schedules: "Jadwal",
-    users: "Pengguna", eggs: "Egg", system: "Sistem", create_server: "Server Baru", create_user: "Pengguna Baru",
-    suspend: "Nonaktifkan", unsuspend: "Aktifkan", reinstall: "Pasang Ulang",
+    console: "Terminal", files: "Penyimpanan", databases: "Lab Data", backups: "Vault", schedules: "Otomasi",
+    users: "Tim", eggs: "Blueprint", system: "Operasi", create_server: "Workspace Baru", create_user: "Anggota Baru",
+    suspend: "Nonaktifkan", unsuspend: "Aktifkan", reinstall: "Bangun Ulang",
     login: "Masuk", username: "Nama pengguna", password: "Kata sandi", remember: "Ingat saya",
-    welcome: "Panel hosting game, web & skrip", no_servers: "Belum ada server",
-    all_servers: "Semua Server", notifications: "Notifikasi", api_keys: "Kunci API",
-    confirm_delete: "Hapus?", confirm_restore: "Pulihkan cadangan? Server akan dihentikan.",
+    welcome: "Control plane workload Linux-native", no_servers: "Belum ada workspace",
+    all_servers: "Fleet Workspace", notifications: "Sinyal", api_keys: "Token Akses",
+    confirm_delete: "Hapus?", confirm_restore: "Pulihkan snapshot? Workspace akan dihentikan.",
     saved: "Tersimpan", created: "Dibuat", deleted: "Dihapus", uploaded: "Terunggah",
     twofa: "Autentikasi Dua Faktor", enable_2fa: "Aktifkan 2FA", verify: "Verifikasi",
   },
@@ -89,10 +89,10 @@ const vpPrompt = (title, value = "") => vpDialog({ title, input: value, confirmT
 /* ---------- router + command palette ---------- */
 window.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openCommandPalette(); } });
 
-function openCommandPalette() {
-  const actions = [{name:"Dashboard",href:"#/",icon:"dashboard"},{name:"Servers",href:"#/admin/servers",icon:"server"},{name:"Nodes",href:"#/admin/nodes",icon:"globe"},{name:"System",href:"#/admin/system",icon:"gauge"},{name:"Settings",href:"#/settings",icon:"settings"},{name:"Profile",href:"#/profile",icon:"profile"}].filter(a=>state.user?.root_admin||!["Servers","Nodes","System"].includes(a.name));
-  const modal=document.createElement("div"); modal.className="modal palette-layer"; modal.innerHTML=`<div class="command-palette"><div class="palette-search">${ic("search",17)}<input placeholder="Search commands and pages..." autocomplete="off"><kbd>ESC</kbd></div><div class="palette-results">${actions.map((a,i)=>`<a href="${a.href}" data-key="${a.name.toLowerCase()}">${ic(a.icon,16)}<span>${a.name}</span><kbd>${i+1}</kbd></a>`).join("")}</div></div>`;
-  const input=modal.querySelector("input"), results=[...modal.querySelectorAll(".palette-results a")]; const filter=()=>results.forEach(a=>a.hidden=!a.dataset.key.includes(input.value.toLowerCase())); input.addEventListener("input",filter); input.addEventListener("keydown",e=>{if(e.key==="Escape")modal.remove();if(e.key==="Enter"){results.find(a=>!a.hidden)?.click();modal.remove();}}); results.forEach(a=>a.addEventListener("click",()=>modal.remove())); modal.addEventListener("click",e=>{if(e.target===modal)modal.remove()}); document.body.appendChild(modal); input.focus();
+function openCommandPalette(){
+  const actions=[{name:"Fleet",href:"#/",icon:"dashboard"},{name:"Workspaces",href:"#/admin/servers",icon:"server"},{name:"Automations",href:"#/automations",icon:"clock"},{name:"Fabric",href:"#/admin/nodes",icon:"globe"},{name:"Blueprints",href:"#/admin/eggs",icon:"box"},{name:"Operations",href:"#/admin/system",icon:"gauge"},{name:"Settings",href:"#/settings",icon:"settings"},{name:"Profile",href:"#/profile",icon:"profile"}].filter(a=>state.user?.root_admin||!["Workspaces","Fabric","Blueprints","Operations"].includes(a.name));
+  const modal=document.createElement("div");modal.className="modal palette-layer";modal.innerHTML=`<div class="command-palette"><div class="palette-search">${ic("search",17)}<input placeholder="Search commands and pages..." autocomplete="off"><kbd>ESC</kbd></div><div class="palette-results">${actions.map((a,i)=>`<a href="${a.href}" data-key="${a.name.toLowerCase()}">${ic(a.icon,16)}<span>${a.name}</span><kbd>${i+1}</kbd></a>`).join("")}</div></div>`;
+  const input=modal.querySelector("input"),results=[...modal.querySelectorAll(".palette-results a")];const filter=()=>results.forEach(a=>a.hidden=!a.dataset.key.includes(input.value.toLowerCase()));input.addEventListener("input",filter);input.addEventListener("keydown",e=>{if(e.key==="Escape")modal.remove();if(e.key==="Enter"){results.find(a=>!a.hidden)?.click();modal.remove();}});results.forEach(a=>a.addEventListener("click",()=>modal.remove()));modal.addEventListener("click",e=>{if(e.target===modal)modal.remove();});document.body.appendChild(modal);input.focus();
 }
 
 function route() {
@@ -102,6 +102,7 @@ function route() {
   if (parts[0] === "server" && parts[1]) return renderServerPage(parts[1].replace(/\D/g, ""), parts[2] || "console");
   if (parts[0] === "admin") return renderAdmin(parts[1] || "servers");
   if (parts[0] === "profile") return renderProfile();
+  if (parts[0] === "automations") return renderAutomations();
   if (parts[0] === "settings") return renderSettings();
   return renderDashboard();
 }
@@ -142,16 +143,14 @@ function shell(active, title, inner) {
         <div class="brand-mark">${ic("server", 22, 2)}</div>
         <span class="brand-name">Volt<span class="brand-accent">Panel</span></span>
       </div>
-      <div class="nav-group-label">${t("node")}</div>
+      <div class="nav-group-label">CONTROL</div>
       <nav>
-        <a href="#/" class="nav-item ${active === "dash" ? "active" : ""}"><span class="nav-ico">${ic("dashboard")}</span><span>${t("dashboard")}</span></a>
-        <a href="#/settings" class="nav-item ${active === "settings" ? "active" : ""}"><span class="nav-ico">${ic("settings")}</span><span>${t("settings")}</span></a>
-        <a href="#/profile" class="nav-item ${active === "profile" ? "active" : ""}"><span class="nav-ico">${ic("profile")}</span><span>${t("profile")}</span></a>
+        <a href="#/" class="nav-item ${active === "fleet" ? "active" : ""}"><span class="nav-ico">${ic("dashboard")}</span><span>Fleet</span></a>
+        <a href="${u.root_admin?'#/admin/servers':'#/'}" class="nav-item ${active === "workspaces" ? "active" : ""}"><span class="nav-ico">${ic("server")}</span><span>Workspaces</span></a>
+        <a href="#/automations" class="nav-item ${active === "automations" ? "active" : ""}"><span class="nav-ico">${ic("clock")}</span><span>Automations</span></a>
       </nav>
-      ${u.root_admin ? `<div class="nav-group-label">${t("admin")}</div>
-      <nav>
-        <a href="#/admin/servers" class="nav-item ${active === "admin" ? "active" : ""}"><span class="nav-ico">${ic("shield")}</span><span>${t("admin")}</span></a>
-      </nav>` : ""}
+      ${u.root_admin ? `<div class="nav-group-label">INFRASTRUCTURE</div><nav><a href="#/admin/nodes" class="nav-item ${active === "fabric" ? "active" : ""}"><span class="nav-ico">${ic("globe")}</span><span>Fabric</span></a><a href="#/admin/eggs" class="nav-item ${active === "blueprints" ? "active" : ""}"><span class="nav-ico">${ic("box")}</span><span>Blueprints</span></a><a href="#/admin/system" class="nav-item ${active === "operations" ? "active" : ""}"><span class="nav-ico">${ic("gauge")}</span><span>Operations</span></a></nav>` : ""}
+      <div class="nav-group-label">ACCOUNT</div><nav><a href="#/settings" class="nav-item ${active === "settings" ? "active" : ""}"><span class="nav-ico">${ic("settings")}</span><span>${t("settings")}</span></a><a href="#/profile" class="nav-item ${active === "profile" ? "active" : ""}"><span class="nav-ico">${ic("profile")}</span><span>${t("profile")}</span></a></nav>
       <div class="side-foot">
         <div class="avatar">${esc(initial)}</div>
         <div class="side-user"><div class="name">${esc(u.username)}</div><div class="role">${u.root_admin ? "Administrator" : "Member"}</div></div>
@@ -263,9 +262,9 @@ async function do2fa(e) {
    DASHBOARD
    ============================================================ */
 async function renderDashboard() {
-  document.getElementById("app").innerHTML = shell("dash", t("dashboard"), `
+  document.getElementById("app").innerHTML = shell("fleet", "Fleet", `
     <section class="fleet-hero">
-      <div class="fleet-copy"><span class="eyebrow">INFRASTRUCTURE CONTROL PLANE</span><h2>Operate every workload from one place.</h2><p>Real-time orchestration across isolated local and remote nodes.</p><div class="fleet-actions"><a href="#/admin/nodes" class="btn primary">${ic("globe",14)}<span>Manage nodes</span></a><button class="btn ghost" onclick="refreshServers()">${ic("refresh_ccw",14)}<span>Refresh fleet</span></button></div></div>
+      <div class="fleet-copy"><span class="eyebrow">INFRASTRUCTURE CONTROL PLANE</span><h2>Operate every workload from one place.</h2><p>Real-time orchestration across isolated local and remote nodes.</p><div class="fleet-actions"><a href="#/admin/nodes" class="btn primary">${ic("globe",14)}<span>Open fabric</span></a><button class="btn ghost" onclick="refreshServers()">${ic("refresh_ccw",14)}<span>Refresh fleet</span></button></div></div>
       <div class="fleet-visual"><div class="orbit orbit-a"></div><div class="orbit orbit-b"></div><div class="fleet-core">${ic("server",28)}</div><span class="fleet-node n1"></span><span class="fleet-node n2"></span><span class="fleet-node n3"></span></div>
     </section>
     <div class="grid cols-4" id="d-stats">
@@ -280,7 +279,7 @@ async function renderDashboard() {
     </div>
     <div class="dashboard-lower">
       <section class="card quick-panel"><div class="card-head"><h3>${ic("zap",15)} Quick actions</h3></div><div class="quick-grid">
-        ${state.user.root_admin ? `<a href="#/admin/servers" class="quick-action">${ic("plus",18)}<span><b>Create server</b><small>Provision an isolated workload</small></span></a><a href="#/admin/nodes" class="quick-action">${ic("globe",18)}<span><b>Add node</b><small>Expand fleet capacity</small></span></a>` : ""}
+        ${state.user.root_admin ? `<a href="#/admin/servers" class="quick-action">${ic("plus",18)}<span><b>Create workspace</b><small>Provision an isolated workload</small></span></a><a href="#/admin/nodes" class="quick-action">${ic("globe",18)}<span><b>Attach agent</b><small>Expand fleet capacity</small></span></a>` : ""}
         <a href="#/settings" class="quick-action">${ic("key",18)}<span><b>API access</b><small>Manage scoped credentials</small></span></a><a href="#/profile" class="quick-action">${ic("shield",18)}<span><b>Account security</b><small>Password and two-factor auth</small></span></a>
       </div></section>
       <section class="card activity-panel"><div class="card-head"><h3>${ic("activity",15)} Recent activity</h3></div><div id="d-activity" class="activity-list"><div class="skeleton" style="height:46px"></div><div class="skeleton" style="height:46px"></div></div></section>
@@ -332,11 +331,17 @@ function renderActivity(items) {
 
 async function refreshServers() { try { const l = await api("/servers"); renderServerTable(l.data || []); } catch (e) { toast(e.message, "error"); } }
 
+/* ---------- automations ---------- */
+async function renderAutomations(){
+  document.getElementById("app").innerHTML=shell("automations","Automations",`<section class="nodes-header"><div><span class="eyebrow">EVENT-DRIVEN OPERATIONS</span><h2>Automation runway</h2><p>Review schedules across every workspace and jump directly into their execution history.</p></div></section><div id="automation-grid" class="node-grid"><div class="skeleton" style="height:180px"></div><div class="skeleton" style="height:180px"></div></div>`);
+  try{const servers=(await api("/servers")).data||[];const groups=await Promise.all(servers.map(async server=>({server,schedules:(await api(`/servers/${server.id}/schedules`)).data||[]})));const all=groups.flatMap(g=>g.schedules.map(schedule=>({schedule,server:g.server})));const box=$("#automation-grid");box.innerHTML=all.length?all.map(({schedule,server})=>`<article class="node-card"><div class="node-card-head"><div class="node-mark">${ic("clock",18)}</div><div><h3>${esc(schedule.name)}</h3><span>${esc(server.name)}</span></div><span class="pill ${schedule.enabled?'running':'offline'}"><i></i>${schedule.enabled?'active':'paused'}</span></div><div class="node-endpoint">${ic("terminal",13)}<code>${esc(schedule.cron_expr)}</code></div><div class="metric-line"><span>Next execution</span><b>${fmtDate(schedule.next_run_at)}</b></div><div class="node-card-foot"><span>${schedule.tasks?.length||0} tasks</span><a class="btn sm ghost" href="#/server/${server.id}/schedules">Open automation</a></div></article>`).join(""):`<div class="context-empty">${ic("clock",28)}<div><b>No automations configured</b><span>Create one inside a workspace to orchestrate power, commands and snapshots.</span></div></div>`;}catch(e){toast(e.message,"error")}
+}
+
 /* ============================================================
-   SERVER PAGE
+   SERVER WORKSPACE
    ============================================================ */
 async function renderServerPage(id, tab) {
-  document.getElementById("app").innerHTML = shell("dash", t("servers"), `<div class="empty">${ic("server", 40)}<p>${t("loading")}</p></div>`);
+  document.getElementById("app").innerHTML = shell("workspaces", "Workspace", `<div class="empty">${ic("server", 40)}<p>${t("loading")}</p></div>`);
   let data;
   try { data = await api(`/servers/${id}`); } catch (e) { document.querySelector(".content").innerHTML = `<div class="toast error">${ic("xcircle", 16)}<span>${esc(e.message)}</span></div>`; return; }
   const s = data.server;
@@ -534,7 +539,7 @@ function renderServerSettings(id, data) {
         <div class="metric-line"><span>Disk</span><b>${s.disk_mb} MB</b></div>
         <div class="metric-line"><span>CPU limit</span><b>${s.cpu_percent}%</b></div>
         <div class="metric-line"><span>Restart count</span><b>${s.restart_count}</b></div>
-        <div class="metric-line"><span>Node</span><b>${esc(s.node)}</b></div>
+        <div class="metric-line"><span>Execution agent</span><b>${esc(s.node)}</b></div>
       </div>
     </div>
     <div class="card"><h3>${ic("sliders", 15)} Variables</h3>${vars || `<div class="muted">${t("none")}</div>`}<button class="btn primary" onclick="saveVars('${id}')">${ic("save", 14)}<span>${t("save")} Variables</span></button></div>
@@ -776,12 +781,13 @@ async function notifLoad() {
    ADMIN
    ============================================================ */
 function renderAdmin(tab) {
-  if (!state.user?.root_admin) { toast("Admin only", "error"); renderDashboard(); return; }
-  document.getElementById("app").innerHTML = shell("admin", t("admin"), `<div class="tabs">
+  if (!state.user?.root_admin) { toast("Control Center only", "error"); renderDashboard(); return; }
+  const active=tab==="nodes"?"fabric":tab==="eggs"?"blueprints":tab==="system"?"operations":"workspaces";
+  document.getElementById("app").innerHTML = shell(active, "Control Center", `<div class="tabs">
     <a href="#/admin/servers" class="${tab === "servers" ? "active" : ""}">${ic("server", 14)} ${t("servers")}</a>
     <a href="#/admin/users" class="${tab === "users" ? "active" : ""}">${ic("users", 14)} ${t("users")}</a>
     <a href="#/admin/eggs" class="${tab === "eggs" ? "active" : ""}">${ic("egg", 14)} ${t("eggs")}</a>
-    <a href="#/admin/nodes" class="${tab === "nodes" ? "active" : ""}">${ic("globe", 14)} Nodes</a>
+    <a href="#/admin/nodes" class="${tab === "nodes" ? "active" : ""}">${ic("globe", 14)} Fabric</a>
     <a href="#/admin/system" class="${tab === "system" ? "active" : ""}">${ic("gauge", 14)} ${t("system")}</a>
   </div><div id="admin-body"><div class="empty">${ic("shield", 40)}<p>${t("loading")}</p></div></div>`);
   const render = { servers: adminServers, users: adminUsers, eggs: adminEggs, nodes: adminNodes, system: adminSystem };
@@ -812,9 +818,9 @@ async function adminNewServer() {
     const modal = document.createElement("div"); modal.className = "modal";
     modal.innerHTML = `<div class="modal-card">
       <div class="modal-head"><b>${ic("server", 15)} ${t("create_server")}</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
-      <div class="field"><label>${t("name")}</label><input id="ns-name" placeholder="my-server"></div>
+      <div class="field"><label>${t("name")}</label><input id="ns-name" placeholder="my-workspace"></div>
       <div class="field"><label>${t("owner")}</label><select id="ns-user">${users.map((u) => `<option value="${u.id}">${esc(u.username)} (#${u.id})</option>`).join("")}</select></div>
-      <div class="field"><label>Egg</label><select id="ns-egg">${eggs.map((e) => `<option value="${e.id}">${esc(e.name)} — ${esc(e.category)}</option>`).join("")}</select></div>
+      <div class="field"><label>Blueprint</label><select id="ns-egg">${eggs.map((e) => `<option value="${e.id}">${esc(e.name)} — ${esc(e.category)}</option>`).join("")}</select></div>
       <div class="grid cols-3">
         <div class="field"><label>RAM (MB)</label><input id="ns-mem" type="number" value="1024"></div>
         <div class="field"><label>Disk (MB)</label><input id="ns-disk" type="number" value="8192"></div>
@@ -872,7 +878,7 @@ async function adminEggs() {
   try {
     const res = await api("/eggs");
     const eggs = res.data || res;
-    $("#a-eggs").innerHTML = `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>ID</th><th>${t("name")}</th><th>Category</th><th>Image</th><th>Startup</th><th>Vars</th><th></th></tr></thead><tbody>` +
+    $("#a-eggs").innerHTML = `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>ID</th><th>${t("name")}</th><th>Category</th><th>Runtime</th><th>Startup</th><th>Vars</th><th></th></tr></thead><tbody>` +
       eggs.map((e) => `<tr>
         <td>${e.id}</td><td><b>${esc(e.name)}</b></td><td><span class="badge">${esc(e.category)}</span></td><td><code>${esc(e.docker_image)}</code></td><td><code style="font-size:11px">${esc(e.startup)}</code></td><td>${e.variables?.length || 0}</td>
         <td><div class="actions"><button class="icon-btn sm" onclick="adminEggExport(${e.id})">${ic("download", 15)}</button><button class="icon-btn sm danger" onclick="adminDelEgg(${e.id})">${ic("trash", 15)}</button></div></td>
@@ -884,10 +890,10 @@ async function adminDelEgg(id) { if (!await vpConfirm(`${t("confirm_delete")} ${
 function adminNewEgg() {
   const modal = document.createElement("div"); modal.className = "modal";
   modal.innerHTML = `<div class="modal-card">
-    <div class="modal-head"><b>${ic("egg", 15)} ${t("create")} Egg</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
+    <div class="modal-head"><b>${ic("box", 15)} ${t("create")} Blueprint</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
     <div class="field"><label>${t("name")}</label><input id="ne-name"></div>
     <div class="field"><label>Category</label><input id="ne-cat" value="generic"></div>
-    <div class="field"><label>Image</label><input id="ne-img" value="alpine:latest"></div>
+    <div class="field"><label>Runtime hint</label><input id="ne-img" value="linux-native"></div>
     <div class="field"><label>Startup</label><input id="ne-startup" placeholder="python3 main.py"></div>
     <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">${t("cancel")}</button><button class="btn primary" onclick="adminCreateEgg()">${ic("plus", 14)}<span>${t("create")}</span></button></div>
   </div>`;
@@ -899,7 +905,7 @@ async function adminCreateEgg() {
 }
 
 async function adminNodes() {
-  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">DISTRIBUTED INFRASTRUCTURE</span><h2>Node fabric</h2><p>Capacity, isolation and scheduling health across every machine.</p></div><button class="btn primary" onclick="adminNewNode()">${ic("plus",14)}<span>Add node</span></button></section><div id="a-nodes" class="node-grid"></div>`;
+  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">DISTRIBUTED INFRASTRUCTURE</span><h2>Execution fabric</h2><p>Capacity, isolation and scheduling health across every machine.</p></div><button class="btn primary" onclick="adminNewNode()">${ic("plus",14)}<span>Attach agent</span></button></section><div id="a-nodes" class="node-grid"></div>`;
   try {
     const res = await api("/nodes"); const values = res.data || [];
     $("#a-nodes").innerHTML = values.length ? values.map(n => { const cpu=Math.round(n.capacity?.cpu_percent||0), mem=n.capacity?.memory_total?Math.round(n.capacity.memory_used/n.capacity.memory_total*100):0; return `<article class="node-card ${n.online?'online':'offline'}">
@@ -907,25 +913,25 @@ async function adminNodes() {
       <div class="node-endpoint">${ic('link',13)}<code>${esc(n.public_url)}</code></div>
       <div class="node-metrics"><div><span>CPU</span><b>${cpu}%</b><div class="progress"><div style="width:${cpu}%"></div></div></div><div><span>Memory</span><b>${mem}%</b><div class="progress"><div style="width:${mem}%;background:var(--purple)"></div></div></div></div>
       <div class="node-security">${ic('shield',15)}<span>Namespace + cgroup isolation</span><b>${n.online?'verified':'pending'}</b></div>
-      <div class="node-card-foot"><span>${n.capacity?.servers_running||0} running / ${n.capacity?.servers_total||0} total</span><div class="actions"><button class="icon-btn" title="test" onclick="nodeTest(${n.id})">${ic('activity',15)}</button><button class="icon-btn" title="re-enroll" onclick="nodeReenroll(${n.id})">${ic('key',15)}</button><button class="icon-btn danger" title="delete" onclick="nodeDelete(${n.id})">${ic('trash',15)}</button></div></div></article>`; }).join('') : `<div class="empty">${ic('globe',40)}<p>No nodes. Local isolated mode remains available.</p></div>`;
+      <div class="node-card-foot"><span>${n.capacity?.servers_running||0} running / ${n.capacity?.servers_total||0} total</span><div class="actions"><button class="icon-btn" title="test" onclick="nodeTest(${n.id})">${ic('activity',15)}</button><button class="icon-btn" title="re-enroll" onclick="nodeReenroll(${n.id})">${ic('key',15)}</button><button class="icon-btn danger" title="delete" onclick="nodeDelete(${n.id})">${ic('trash',15)}</button></div></div></article>`; }).join('') : `<div class="empty">${ic('globe',40)}<p>No agents attached. Local isolated execution remains available.</p></div>`;
   } catch(e) { toast(e.message,'error'); }
 }
 
 function adminNewNode() {
-  const modal=document.createElement('div'); modal.className='modal'; modal.innerHTML=`<div class="modal-card"><div class="modal-head"><b>${ic('globe',15)} Add node</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic('x',16)}</button></div>
-    <div class="field"><label>Name</label><input id="nn-name" placeholder="node-eu-1"></div><div class="field"><label>Daemon URL</label><input id="nn-url" value="http://127.0.0.1:8081"></div><div class="field"><label>Location</label><input id="nn-location" placeholder="id-jakarta"></div>
+  const modal=document.createElement('div'); modal.className='modal'; modal.innerHTML=`<div class="modal-card"><div class="modal-head"><b>${ic('globe',15)} Attach agent</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic('x',16)}</button></div>
+    <div class="field"><label>Name</label><input id="nn-name" placeholder="agent-eu-1"></div><div class="field"><label>Agent endpoint</label><input id="nn-url" value="http://127.0.0.1:8081"></div><div class="field"><label>Location</label><input id="nn-location" placeholder="id-jakarta"></div>
     <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">Cancel</button><button class="btn primary" onclick="nodeCreate()">${ic('plus',14)}<span>Create</span></button></div></div>`; document.body.appendChild(modal);
 }
 async function nodeCreate(){try{const r=await api('/nodes',{method:'POST',body:JSON.stringify({name:$('#nn-name').value,public_url:$('#nn-url').value,location:$('#nn-location').value,tags:[]})}); $('.modal')?.remove(); const cmd = `./voltd join ${location.origin} ${r.enrollment_token} --public-url ${r.node.public_url}${location.protocol === "http:" ? " --allow-http" : ""}`; const m=document.createElement('div');m.className='modal';m.innerHTML=`<div class="modal-card"><div class="modal-head"><b>One-command setup</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic('x',16)}</button></div><div style="padding:18px"><p class="muted">Run this on the node machine:</p><div class="code-block" style="margin-top:10px">${esc(cmd)}</div></div><div class="modal-foot"><button class="btn primary" onclick="navigator.clipboard.writeText('${esc(cmd)}');toast('Copied','success')">Copy command</button></div></div>`;document.body.appendChild(m);adminNodes();}catch(e){toast(e.message,'error')}}
-async function nodeTest(id){try{const r=await api(`/nodes/${id}/test`,{method:'POST'});toast(`Node online · ${r.latency_ms}ms`,'success')}catch(e){toast(e.message,'error')}}
+async function nodeTest(id){try{const r=await api(`/nodes/${id}/test`,{method:'POST'});toast(`Agent online · ${r.latency_ms}ms`,'success')}catch(e){toast(e.message,'error')}}
 async function nodeReenroll(id){try{const r=await api(`/nodes/${id}/enrollment`,{method:'POST'});await vpPrompt('Enrollment token', r.enrollment_token);adminNodes()}catch(e){toast(e.message,'error')}}
-async function nodeDelete(id){if(!await vpConfirm('Delete node?'))return;try{await fetch(`/api/nodes/${id}`,{method:'DELETE'});adminNodes()}catch(e){toast(e.message,'error')}}
+async function nodeDelete(id){if(!await vpConfirm('Detach agent?'))return;try{await fetch(`/api/nodes/${id}`,{method:'DELETE'});adminNodes()}catch(e){toast(e.message,'error')}}
 
 async function adminSystem() {
   $("#admin-body").innerHTML = `<div class="grid cols-4" id="a-node-grid"></div>
     <div class="grid cols-2">
       <div class="card"><h3>${ic("link", 15)} Allocations</h3><div id="a-alloc"><div class="empty">${ic("link", 40)}<p>${t("loading")}</p></div></div></div>
-      <div class="card"><h3>${ic("gauge", 15)} Node Resources</h3><div id="a-res"></div></div>
+      <div class="card"><h3>${ic("gauge", 15)} Host resources</h3><div id="a-res"></div></div>
     </div>`;
   try {
     const s = await api("/system/stats");

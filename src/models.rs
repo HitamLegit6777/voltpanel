@@ -369,17 +369,26 @@ pub fn get_server(db: &Db, id: i64) -> Result<Server> {
 pub fn set_server_node(db: &Db, id: i64, node: &str) -> Result<()> {
     let mut conn = db.lock();
     let tx = conn.transaction()?;
-    tx.execute("UPDATE allocations SET node=?1 WHERE server_id=?2", params![node,id])?;
-    tx.execute("UPDATE servers SET node=?1,updated_at=?2 WHERE id=?3", params![node,now(),id])?;
+    tx.execute(
+        "UPDATE allocations SET node=?1 WHERE server_id=?2",
+        params![node, id],
+    )?;
+    tx.execute(
+        "UPDATE servers SET node=?1,updated_at=?2 WHERE id=?3",
+        params![node, now(), id],
+    )?;
     tx.commit()?;
     Ok(())
 }
 
 pub fn servers_on_node(db: &Db, node: &str) -> Result<Vec<Server>> {
     let conn = db.lock();
-    let mut stmt = conn.prepare(&format!("SELECT {SERVER_COLS} FROM servers WHERE node=?1 AND deleted=0 ORDER BY name"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SERVER_COLS} FROM servers WHERE node=?1 AND deleted=0 ORDER BY name"
+    ))?;
     let rows = stmt.query_map([node], server_from_row)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 pub fn get_server_by_uuid(db: &Db, uuid: &str) -> Result<Server> {
     let conn = db.lock();
@@ -397,14 +406,22 @@ pub fn list_servers(db: &Db, user_id: Option<i64>, include_deleted: bool) -> Res
         Some(uid) => (
             format!(
                 "SELECT {SERVER_COLS} FROM servers WHERE user_id=?1{} ORDER BY name",
-                if include_deleted { "" } else { " AND deleted=0" }
+                if include_deleted {
+                    ""
+                } else {
+                    " AND deleted=0"
+                }
             ),
             vec![uid.to_string()],
         ),
         None => (
             format!(
                 "SELECT {SERVER_COLS} FROM servers{} ORDER BY name",
-                if include_deleted { "" } else { " WHERE deleted=0" }
+                if include_deleted {
+                    ""
+                } else {
+                    " WHERE deleted=0"
+                }
             ),
             vec![],
         ),
@@ -420,7 +437,11 @@ pub fn list_servers(db: &Db, user_id: Option<i64>, include_deleted: bool) -> Res
 
 pub fn count_servers(db: &Db) -> Result<i64> {
     let conn = db.lock();
-    Ok(conn.query_row("SELECT COUNT(*) FROM servers WHERE deleted=0", [], |r| r.get(0))?)
+    Ok(
+        conn.query_row("SELECT COUNT(*) FROM servers WHERE deleted=0", [], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 pub fn count_servers_by_user(db: &Db, user_id: i64) -> Result<i64> {
@@ -505,10 +526,15 @@ pub fn bump_restart_count(db: &Db, id: i64) -> Result<()> {
 }
 
 pub fn delete_server(db: &Db, id: i64) -> Result<()> {
-    let mut conn=db.lock(); let tx=conn.transaction()?;
-    tx.execute("DELETE FROM allocations WHERE server_id=?1",[id])?;
-    tx.execute("UPDATE servers SET deleted=1,port=NULL,updated_at=?1 WHERE id=?2",params![now(),id])?;
-    tx.commit()?; Ok(())
+    let mut conn = db.lock();
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM allocations WHERE server_id=?1", [id])?;
+    tx.execute(
+        "UPDATE servers SET deleted=1,port=NULL,updated_at=?1 WHERE id=?2",
+        params![now(), id],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn purge_server(db: &Db, id: i64) -> Result<()> {
@@ -522,7 +548,9 @@ pub fn purge_server(db: &Db, id: i64) -> Result<()> {
 pub fn get_server_vars(db: &Db, server_id: i64) -> Result<Vec<(String, String)>> {
     let conn = db.lock();
     let mut stmt = conn.prepare("SELECT key,value FROM server_variables WHERE server_id=?1")?;
-    let rows = stmt.query_map([server_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map([server_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     let mut out = Vec::new();
     for v in rows {
         out.push(v?);
@@ -541,11 +569,35 @@ pub fn set_server_var(db: &Db, server_id: i64, egg_id: i64, key: &str, value: &s
 
 pub fn delete_server_vars(db: &Db, server_id: i64) -> Result<()> {
     let conn = db.lock();
-    conn.execute("DELETE FROM server_variables WHERE server_id=?1", [server_id])?;
+    conn.execute(
+        "DELETE FROM server_variables WHERE server_id=?1",
+        [server_id],
+    )?;
     Ok(())
 }
 
 // ---------------- Subusers ----------------
+pub fn replace_server_vars(
+    db: &Db,
+    server_id: i64,
+    egg_id: i64,
+    vars: &[(String, String)],
+) -> Result<()> {
+    let mut conn = db.lock();
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM server_variables WHERE server_id=?1",
+        [server_id],
+    )?;
+    for (key, value) in vars {
+        tx.execute(
+            "INSERT INTO server_variables(server_id,egg_id,key,value) VALUES(?1,?2,?3,?4)",
+            params![server_id, egg_id, key, value],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
 
 pub fn list_subusers(db: &Db, server_id: i64) -> Result<Vec<(User, Vec<String>)>> {
     let conn = db.lock();
@@ -574,7 +626,10 @@ pub fn add_subuser(db: &Db, server_id: i64, user_id: i64, perms: &[String]) -> R
 
 pub fn remove_subuser(db: &Db, server_id: i64, user_id: i64) -> Result<()> {
     let conn = db.lock();
-    conn.execute("DELETE FROM subusers WHERE server_id=?1 AND user_id=?2", params![server_id, user_id])?;
+    conn.execute(
+        "DELETE FROM subusers WHERE server_id=?1 AND user_id=?2",
+        params![server_id, user_id],
+    )?;
     Ok(())
 }
 
@@ -599,18 +654,50 @@ pub fn user_has_server_access(db: &Db, user: &User, server_id: i64) -> Result<bo
     Ok(sub > 0)
 }
 
-pub fn user_has_server_permission(db: &Db, user: &User, server_id: i64, permission: &str) -> Result<bool> {
-    if user.root_admin { return Ok(true); }
+pub fn user_has_server_permission(
+    db: &Db,
+    user: &User,
+    server_id: i64,
+    permission: &str,
+) -> Result<bool> {
+    if user.root_admin {
+        return Ok(true);
+    }
     let conn = db.lock();
-    let owner: i64 = conn.query_row("SELECT COUNT(*) FROM servers WHERE id=?1 AND user_id=?2 AND deleted=0", params![server_id,user.id], |r|r.get(0))?;
-    if owner > 0 { return Ok(true); }
-    let raw: Option<String> = conn.query_row("SELECT permissions FROM subusers WHERE server_id=?1 AND user_id=?2",params![server_id,user.id],|r|r.get(0)).optional()?;
-    let Some(raw)=raw else{return Ok(false)};
-    let perms:Vec<String>=serde_json::from_str(&raw).unwrap_or_default();
-    let category=permission.split('.').next().unwrap_or(permission);
-    Ok(perms.iter().any(|p| p=="*"||p==permission||p==category||
-        (permission.starts_with("control.")&&matches!(p.as_str(),"start"|"stop"|"restart"|"power"))||
-        (permission.starts_with("console.")&&p=="console")||(permission.starts_with("files.")&&p=="files")))
+    let owner: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM servers WHERE id=?1 AND user_id=?2 AND deleted=0",
+        params![server_id, user.id],
+        |r| r.get(0),
+    )?;
+    if owner > 0 {
+        return Ok(true);
+    }
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT permissions FROM subusers WHERE server_id=?1 AND user_id=?2",
+            params![server_id, user.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else { return Ok(false) };
+    let perms: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+    let category = permission.split('.').next().unwrap_or(permission);
+    let legacy_control = match permission {
+        "control.start" => Some("start"),
+        "control.stop" => Some("stop"),
+        "control.restart" => Some("restart"),
+        "control.kill" => Some("kill"),
+        _ => None,
+    };
+    Ok(perms.iter().any(|p| {
+        p == "*"
+            || p == permission
+            || p == category
+            || legacy_control == Some(p.as_str())
+            || (permission.starts_with("control.") && p == "power")
+            || (permission.starts_with("console.") && p == "console")
+            || (permission.starts_with("files.") && p == "files")
+    }))
 }
 
 // ---------------- Backup ----------------
@@ -663,7 +750,16 @@ pub fn get_backup(db: &Db, id: i64) -> Result<Backup> {
     .context("backup not found")
 }
 
-pub fn create_backup(db: &Db, uuid: &str, server_id: i64, name: &str, path: &str, size_bytes: i64, checksum: &str, format: &str) -> Result<i64> {
+pub fn create_backup(
+    db: &Db,
+    uuid: &str,
+    server_id: i64,
+    name: &str,
+    path: &str,
+    size_bytes: i64,
+    checksum: &str,
+    format: &str,
+) -> Result<i64> {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO backups(uuid,server_id,name,path,size_bytes,checksum,format,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -722,7 +818,18 @@ pub fn list_databases(db: &Db, server_id: i64) -> Result<Vec<Database>> {
     Ok(out)
 }
 
-pub fn create_database(db: &Db, server_id: i64, name: &str, db_type: &str, host: &str, port: i64, db_name: &str, username: &str, password: &str, max_conns: i64) -> Result<i64> {
+pub fn create_database(
+    db: &Db,
+    server_id: i64,
+    name: &str,
+    db_type: &str,
+    host: &str,
+    port: i64,
+    db_name: &str,
+    username: &str,
+    password: &str,
+    max_conns: i64,
+) -> Result<i64> {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO databases(server_id,name,db_type,host,port,db_name,username,password,max_conns,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -802,7 +909,10 @@ pub fn get_schedule(db: &Db, id: i64) -> Result<Schedule> {
     Ok(s)
 }
 
-fn list_schedule_tasks_conn(conn: &rusqlite::Connection, schedule_id: i64) -> Result<Vec<ScheduleTask>> {
+fn list_schedule_tasks_conn(
+    conn: &rusqlite::Connection,
+    schedule_id: i64,
+) -> Result<Vec<ScheduleTask>> {
     let mut stmt = conn.prepare("SELECT id,schedule_id,action,payload,sequence FROM schedule_tasks WHERE schedule_id=?1 ORDER BY sequence")?;
     let rows = stmt.query_map([schedule_id], |r| {
         Ok(ScheduleTask {
@@ -820,7 +930,13 @@ fn list_schedule_tasks_conn(conn: &rusqlite::Connection, schedule_id: i64) -> Re
     Ok(out)
 }
 
-pub fn create_schedule(db: &Db, server_id: i64, name: &str, cron_expr: &str, enabled: bool) -> Result<i64> {
+pub fn create_schedule(
+    db: &Db,
+    server_id: i64,
+    name: &str,
+    cron_expr: &str,
+    enabled: bool,
+) -> Result<i64> {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO schedules(server_id,name,cron_expr,enabled,created_at) VALUES(?1,?2,?3,?4,?5)",
@@ -840,13 +956,19 @@ pub fn update_schedule(db: &Db, s: &Schedule) -> Result<()> {
 
 pub fn set_schedule_next(db: &Db, id: i64, next: Option<&str>) -> Result<()> {
     let conn = db.lock();
-    conn.execute("UPDATE schedules SET next_run_at=?1 WHERE id=?2", params![next, id])?;
+    conn.execute(
+        "UPDATE schedules SET next_run_at=?1 WHERE id=?2",
+        params![next, id],
+    )?;
     Ok(())
 }
 
 pub fn set_schedule_last(db: &Db, id: i64, last: Option<&str>) -> Result<()> {
     let conn = db.lock();
-    conn.execute("UPDATE schedules SET last_run_at=?1 WHERE id=?2", params![last, id])?;
+    conn.execute(
+        "UPDATE schedules SET last_run_at=?1 WHERE id=?2",
+        params![last, id],
+    )?;
     Ok(())
 }
 
@@ -856,7 +978,13 @@ pub fn delete_schedule(db: &Db, id: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn add_schedule_task(db: &Db, schedule_id: i64, action: &str, payload: &str, sequence: i64) -> Result<i64> {
+pub fn add_schedule_task(
+    db: &Db,
+    schedule_id: i64,
+    action: &str,
+    payload: &str,
+    sequence: i64,
+) -> Result<i64> {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO schedule_tasks(schedule_id,action,payload,sequence) VALUES(?1,?2,?3,?4)",
@@ -918,13 +1046,22 @@ pub fn create_api_key(db: &Db, user_id: i64, token: &str, name: &str, scopes: &s
 
 pub fn touch_api_key(db: &Db, id: i64) -> Result<()> {
     let conn = db.lock();
-    conn.execute("UPDATE api_keys SET last_used=?1 WHERE id=?2", params![now(), id])?;
+    conn.execute(
+        "UPDATE api_keys SET last_used=?1 WHERE id=?2",
+        params![now(), id],
+    )?;
     Ok(())
 }
 
 pub fn get_api_key_by_token(db: &Db, token_hash: &str) -> Result<Option<ApiKey>> {
-    let conn=db.lock();
-    conn.query_row("SELECT id,user_id,token,name,created_at,last_used,scopes FROM api_keys WHERE token=?1",[token_hash],apikey_from_row).optional().map_err(Into::into)
+    let conn = db.lock();
+    conn.query_row(
+        "SELECT id,user_id,token,name,created_at,last_used,scopes FROM api_keys WHERE token=?1",
+        [token_hash],
+        apikey_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn delete_api_key(db: &Db, id: i64) -> Result<()> {
@@ -973,7 +1110,14 @@ pub fn list_websites(db: &Db, server_id: i64) -> Result<Vec<Website>> {
     Ok(out)
 }
 
-pub fn create_website(db: &Db, server_id: i64, domain: &str, root_dir: &str, proxy_type: &str, ssl: bool) -> Result<i64> {
+pub fn create_website(
+    db: &Db,
+    server_id: i64,
+    domain: &str,
+    root_dir: &str,
+    proxy_type: &str,
+    ssl: bool,
+) -> Result<i64> {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO websites(server_id,domain,root_dir,proxy_type,ssl,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
@@ -1031,7 +1175,14 @@ pub fn list_audit_logs(db: &Db, limit: i64) -> Result<Vec<AuditLog>> {
     Ok(out)
 }
 
-pub fn audit(db: &Db, user_id: Option<i64>, action: &str, target: &str, ip: &str, details: &str) -> Result<()> {
+pub fn audit(
+    db: &Db,
+    user_id: Option<i64>,
+    action: &str,
+    target: &str,
+    ip: &str,
+    details: &str,
+) -> Result<()> {
     let conn = db.lock();
     conn.execute(
         "INSERT INTO audit_logs(user_id,action,target,ip,details,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
@@ -1045,7 +1196,9 @@ pub fn audit(db: &Db, user_id: Option<i64>, action: &str, target: &str, ip: &str
 pub fn get_setting(db: &Db, key: &str) -> Result<Option<String>> {
     let conn = db.lock();
     let v = conn
-        .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get::<_, String>(0))
+        .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()?;
     Ok(v)
 }
@@ -1075,9 +1228,17 @@ pub fn all_settings(db: &Db) -> Result<Vec<(String, String)>> {
 pub fn allocate_port(db: &Db, server_id: i64, port: i64) -> Result<()> {
     let mut conn = db.lock();
     let tx = conn.transaction()?;
-    let node: String = tx.query_row("SELECT node FROM servers WHERE id=?1", [server_id], |r| r.get(0))?;
-    tx.execute("UPDATE servers SET port=?1,updated_at=?2 WHERE id=?3", params![port, now(), server_id])?;
-    tx.execute("INSERT INTO allocations(server_id,port,assigned_at,node) VALUES(?1,?2,?3,?4)", params![server_id, port, now(), node])?;
+    let node: String = tx.query_row("SELECT node FROM servers WHERE id=?1", [server_id], |r| {
+        r.get(0)
+    })?;
+    tx.execute(
+        "UPDATE servers SET port=?1,updated_at=?2 WHERE id=?3",
+        params![port, now(), server_id],
+    )?;
+    tx.execute(
+        "INSERT INTO allocations(server_id,port,assigned_at,node) VALUES(?1,?2,?3,?4)",
+        params![server_id, port, now(), node],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -1086,7 +1247,10 @@ pub fn free_ports(db: &Db, server_id: i64) -> Result<()> {
     let mut conn = db.lock();
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM allocations WHERE server_id=?1", [server_id])?;
-    tx.execute("UPDATE servers SET port=NULL,updated_at=?1 WHERE id=?2", params![now(), server_id])?;
+    tx.execute(
+        "UPDATE servers SET port=NULL,updated_at=?1 WHERE id=?2",
+        params![now(), server_id],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -1110,7 +1274,9 @@ pub fn bump_rate_limit(db: &Db, key: &str, window_start: i64) -> Result<i64> {
         "INSERT INTO rate_limits(key,window_start,count) VALUES(?1,?2,1) ON CONFLICT(key) DO UPDATE SET count=CASE WHEN rate_limits.window_start=?2 THEN count+1 ELSE 1 END, window_start=?2",
         params![key, window_start],
     )?;
-    let c: i64 = conn.query_row("SELECT count FROM rate_limits WHERE key=?1", [key], |r| r.get(0))?;
+    let c: i64 = conn.query_row("SELECT count FROM rate_limits WHERE key=?1", [key], |r| {
+        r.get(0)
+    })?;
     Ok(c)
 }
 

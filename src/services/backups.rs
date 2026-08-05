@@ -9,7 +9,12 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Create a zip backup of the server dir. Returns (backup_id, size, checksum).
-pub async fn create(db: &Db, cfg: &Config, server_id: i64, name: &str) -> Result<(i64, u64, String)> {
+pub async fn create(
+    db: &Db,
+    cfg: &Config,
+    server_id: i64,
+    name: &str,
+) -> Result<(i64, u64, String)> {
     let server = models::get_server(db, server_id)?;
     let uuid = uuid::Uuid::new_v4().to_string();
     let fname = format!("{uuid}.zip");
@@ -17,7 +22,16 @@ pub async fn create(db: &Db, cfg: &Config, server_id: i64, name: &str) -> Result
     fs::create_dir_all(&cfg.paths.backups_dir)?;
     let size = crate::services::files::zip_dir(cfg, &server, ".", &out)?;
     let checksum = checksum_file(&out)?;
-    let id = models::create_backup(db, &uuid, server_id, name, &out.to_string_lossy(), size as i64, &checksum, "zip")?;
+    let id = models::create_backup(
+        db,
+        &uuid,
+        server_id,
+        name,
+        &out.to_string_lossy(),
+        size as i64,
+        &checksum,
+        "zip",
+    )?;
     Ok((id, size, checksum))
 }
 
@@ -26,31 +40,49 @@ pub async fn restore(db: &Db, cfg: &Config, backup_id: i64) -> Result<()> {
     let backup = models::get_backup(db, backup_id)?;
     let server = models::get_server(db, backup.server_id)?;
     let dir = cfg.paths.servers_dir.join(&server.uuid);
-    // wipe current contents (except install)
-    if dir.exists() {
-        fs::remove_dir_all(&dir)?;
-    }
-    fs::create_dir_all(&dir)?;
     let archive = PathBuf::from(&backup.path);
-    if backup.format == "zip" {
-        // extract zip into dir (safe_join blocks zip-slip entries)
+    if backup.format != "zip" {
+        return Err(anyhow::anyhow!("unsupported backup format"));
+    }
+    let parent = dir.parent().context("server dir has no parent")?;
+    let staging = parent.join(format!(".restore-{}", uuid::Uuid::new_v4().simple()));
+    let previous = parent.join(format!(".previous-{}", uuid::Uuid::new_v4().simple()));
+    fs::create_dir_all(&staging)?;
+    let result = (|| -> Result<()> {
         let f = fs::File::open(&archive)?;
         let mut zip = zip::ZipArchive::new(f)?;
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i)?;
-            let out_path = crate::services::files::safe_join(&dir, &entry.name())?;
+            let out = crate::services::files::safe_join(&staging, &entry.name())?;
             if entry.is_dir() {
-                fs::create_dir_all(&out_path)?;
+                fs::create_dir_all(&out)?;
                 continue;
             }
-            if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent)?;
+            if let Some(p) = out.parent() {
+                fs::create_dir_all(p)?;
             }
-            let mut f = fs::File::create(&out_path)?;
-            std::io::copy(&mut entry, &mut f)?;
+            let mut file = fs::File::create(&out)?;
+            std::io::copy(&mut entry, &mut file)?;
         }
-    } else {
-        return Err(anyhow::anyhow!("unsupported backup format"));
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    crate::isolation::prepare_root(&staging, &server.uuid)?;
+    crate::isolation::own_tree(&staging, &server.uuid)?;
+    if dir.exists() {
+        fs::rename(&dir, &previous)?;
+    }
+    if let Err(error) = fs::rename(&staging, &dir) {
+        if previous.exists() {
+            let _ = fs::rename(&previous, &dir);
+        }
+        return Err(error.into());
+    }
+    if previous.exists() {
+        let _ = fs::remove_dir_all(previous);
     }
     Ok(())
 }

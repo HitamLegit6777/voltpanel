@@ -3,8 +3,8 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::models::{self, User};
 use anyhow::{anyhow, bail, Result};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::{rand_core::OsRng, SaltString};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use base64::Engine;
 use chrono::Utc;
 use rand::Rng;
@@ -52,7 +52,14 @@ pub fn hash_token(token: &str) -> String {
 
 // ---------------- Sessions ----------------
 
-pub fn create_session(db: &Db, cfg: &Config, user_id: i64, user_agent: &str, ip: &str, remember: bool) -> Result<(String, String)> {
+pub fn create_session(
+    db: &Db,
+    cfg: &Config,
+    user_id: i64,
+    user_agent: &str,
+    ip: &str,
+    remember: bool,
+) -> Result<(String, String)> {
     let raw = random_token(32);
     let token = hash_token(&raw);
     let ttl = if remember {
@@ -86,7 +93,13 @@ pub fn user_from_session(db: &Db, raw: &str) -> Result<User> {
         .query_row(
             "SELECT user_id,expires_at,revoked FROM sessions WHERE token=?1",
             [&token],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()?
         .ok_or_else(|| anyhow!("session not found"))?;
@@ -134,7 +147,15 @@ pub fn generate_totp_secret() -> Result<String> {
     let mut buf = [0u8; 20];
     rand::Rng::fill(&mut rand::thread_rng(), &mut buf);
     let b32 = base32_encode(&buf);
-    let _totp = TOTP::new(totp_rs::Algorithm::SHA1, 6, 1, 30, buf.to_vec(), Some(TOTP_ISSUER.into()), "voltpanel".into())?;
+    let _totp = TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        buf.to_vec(),
+        Some(TOTP_ISSUER.into()),
+        "voltpanel".into(),
+    )?;
     Ok(b32)
 }
 
@@ -163,7 +184,10 @@ fn base32_decode(s: &str) -> Result<Vec<u8>> {
     let mut buffer: u32 = 0;
     let mut out = Vec::new();
     for c in s.chars() {
-        let v = ALPHABET.iter().position(|&a| a == c.to_ascii_uppercase() as u8).ok_or_else(|| anyhow!("invalid base32 char"))? as u32;
+        let v = ALPHABET
+            .iter()
+            .position(|&a| a == c.to_ascii_uppercase() as u8)
+            .ok_or_else(|| anyhow!("invalid base32 char"))? as u32;
         buffer = (buffer << 5) | v;
         bits += 5;
         if bits >= 8 {
@@ -177,7 +201,15 @@ fn base32_decode(s: &str) -> Result<Vec<u8>> {
 pub fn totp_from_secret(b64: &str) -> Result<totp_rs::TOTP> {
     use totp_rs::TOTP;
     let raw = base32_decode(b64.trim())?;
-    Ok(TOTP::new(totp_rs::Algorithm::SHA1, 6, 1, 30, raw, Some(TOTP_ISSUER.into()), "voltpanel".into())?)
+    Ok(TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        raw,
+        Some(TOTP_ISSUER.into()),
+        "voltpanel".into(),
+    )?)
 }
 
 pub fn verify_totp(secret_b64: &str, code: &str) -> bool {
@@ -192,7 +224,11 @@ pub fn totp_uri(secret_b64: &str, username: &str) -> Result<String> {
     let url = totp.get_url();
     // inject issuer + account into the generated URL
     let sep = if url.contains('?') { '&' } else { '?' };
-    Ok(format!("{url}{sep}issuer={}&label={}", percent_encode(TOTP_ISSUER), percent_encode(username)))
+    Ok(format!(
+        "{url}{sep}issuer={}&label={}",
+        percent_encode(TOTP_ISSUER),
+        percent_encode(username)
+    ))
 }
 
 fn percent_encode(s: &str) -> String {
@@ -217,7 +253,10 @@ pub fn rate_limit(db: &Db, cfg: &Config, key: &str) -> Result<()> {
     // prune stale windows once per minute boundary
     if WINDOW.swap(window as u64, Ordering::Relaxed) != window as u64 {
         let conn = db.lock();
-        let _ = conn.execute("DELETE FROM rate_limits WHERE window_start < ?1", [window - 2]);
+        let _ = conn.execute(
+            "DELETE FROM rate_limits WHERE window_start < ?1",
+            [window - 2],
+        );
     }
     let count = models::bump_rate_limit(db, key, window)?;
     if count > cfg.security.rate_limit_per_min as i64 {

@@ -12,16 +12,27 @@ pub async fn index(State(_state): State<AppState>) -> impl IntoResponse {
     let html = include_str!("../../templates/index.html");
     (
         [
-            (axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "no-cache, no-store, must-revalidate",
+            ),
             (axum::http::header::PRAGMA, "no-cache"),
         ],
         Html(html),
     )
 }
 
-
 /// SPA fallback: serve index.html for any non-API path.
-pub async fn spa_fallback(State(state): State<AppState>) -> impl IntoResponse {
-    index(State(state)).await
+pub async fn spa_fallback(
+    State(state): State<AppState>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    if uri.path().starts_with("/api/") {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"error":"API route not found","status":404})),
+        )
+            .into_response();
+    }
+    index(State(state)).await.into_response()
 }
-

@@ -9,9 +9,12 @@ pub type Db = Arc<Mutex<Connection>>;
 pub fn open(path: &str) -> Result<Db> {
     let conn = Connection::open(path)?;
     use std::os::unix::fs::PermissionsExt;
-    if let Some(parent)=std::path::Path::new(path).parent(){std::fs::create_dir_all(parent)?;std::fs::set_permissions(parent,std::fs::Permissions::from_mode(0o700))?;}
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
     migrate(&conn)?;
-    std::fs::set_permissions(path,std::fs::Permissions::from_mode(0o600))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(Arc::new(Mutex::new(conn)))
 }
 

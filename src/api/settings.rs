@@ -1,5 +1,5 @@
 //! Panel settings endpoints + audit logs.
-use super::{data, ok, ApiResult, AdminUser, AppState, AuthUser};
+use super::{data, ok, AdminUser, ApiResult, AppState, AuthUser};
 use crate::config::Config;
 use crate::models;
 use axum::extract::State;
@@ -8,7 +8,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 /// Public panel settings (no secrets).
-pub async fn public(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn public(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({
         "instance_name": state.cfg.general.instance_name,
         "locale": state.cfg.general.locale,
@@ -28,7 +31,10 @@ pub async fn public(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Js
 }
 
 /// Read-only settings exposed to any logged-in user.
-pub async fn get(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn get(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let settings = models::all_settings(&state.db)?;
     Ok(data(json!(settings)))
 }
@@ -39,7 +45,11 @@ pub struct SetReq {
     pub value: String,
 }
 
-pub async fn set(State(state): State<AppState>, _a: AdminUser, Json(req): Json<SetReq>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn set(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Json(req): Json<SetReq>,
+) -> ApiResult<Json<serde_json::Value>> {
     models::set_setting(&state.db, &req.key, &req.value)?;
     Ok(ok(json!({ "ok": true })))
 }
@@ -58,7 +68,11 @@ pub struct LimitsReq {
 }
 
 /// Update node-wide resource limits at runtime (persisted in settings table).
-pub async fn update_limits(State(state): State<AppState>, _a: AdminUser, Json(req): Json<LimitsReq>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn update_limits(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Json(req): Json<LimitsReq>,
+) -> ApiResult<Json<serde_json::Value>> {
     if let Some(v) = req.default_memory_mb {
         models::set_setting(&state.db, "limits.default_memory_mb", &v.to_string())?;
     }
@@ -79,18 +93,27 @@ pub async fn update_limits(State(state): State<AppState>, _a: AdminUser, Json(re
 
 // ---------------- Audit logs ----------------
 
-pub async fn audit_logs(State(state): State<AppState>, _a: AdminUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn audit_logs(
+    State(state): State<AppState>,
+    _a: AdminUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let logs = models::list_audit_logs(&state.db, 500)?;
     Ok(data(serde_json::to_value(logs)?))
 }
 
 // ---------------- Notifications ----------------
 
-pub async fn notifications(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn notifications(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     Ok(data(json!(state.notifier.history())))
 }
 
-pub async fn notifications_clear(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn notifications_clear(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     state.notifier.clear();
     Ok(ok(json!({ "ok": true })))
 }

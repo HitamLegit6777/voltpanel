@@ -39,11 +39,18 @@ pub fn canonical(method: &str, path: &str, timestamp: i64, nonce: &str, body: &[
     )
 }
 
-pub fn sign(secret: &str, method: &str, path: &str, body: &[u8], node_id: &str) -> Result<SignedHeaders> {
+pub fn sign(
+    secret: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    node_id: &str,
+) -> Result<SignedHeaders> {
     let timestamp = chrono::Utc::now().timestamp();
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let payload = canonical(method, path, timestamp, &nonce, body);
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| anyhow!("invalid HMAC key"))?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| anyhow!("invalid HMAC key"))?;
     mac.update(payload.as_bytes());
     Ok(SignedHeaders {
         node_id: node_id.to_string(),
@@ -65,10 +72,13 @@ pub fn verify(
         bail!("signed request expired");
     }
     let payload = canonical(method, path, headers.timestamp, &headers.nonce, body);
-    let signature = hex::decode(&headers.signature).map_err(|_| anyhow!("invalid signature encoding"))?;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| anyhow!("invalid HMAC key"))?;
+    let signature =
+        hex::decode(&headers.signature).map_err(|_| anyhow!("invalid signature encoding"))?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| anyhow!("invalid HMAC key"))?;
     mac.update(payload.as_bytes());
-    mac.verify_slice(&signature).map_err(|_| anyhow!("signature mismatch"))
+    mac.verify_slice(&signature)
+        .map_err(|_| anyhow!("signature mismatch"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -222,11 +232,19 @@ pub struct NodeApiResponse<T> {
 
 impl<T> NodeApiResponse<T> {
     pub fn success(data: T) -> Self {
-        Self { ok: true, data: Some(data), error: None }
+        Self {
+            ok: true,
+            data: Some(data),
+            error: None,
+        }
     }
 
     pub fn failure(error: impl Into<String>) -> Self {
-        Self { ok: false, data: None, error: Some(error.into()) }
+        Self {
+            ok: false,
+            data: None,
+            error: Some(error.into()),
+        }
     }
 }
 
@@ -238,8 +256,32 @@ mod tests {
     fn signature_round_trip_and_tamper_detection() {
         let body = br#"{"action":"start"}"#;
         let signed = sign("secret", "POST", "/v1/servers/a/power", body, "node-a").unwrap();
-        verify("secret", "POST", "/v1/servers/a/power", body, &signed, signed.timestamp).unwrap();
-        assert!(verify("secret", "POST", "/v1/servers/a/power", b"tampered", &signed, signed.timestamp).is_err());
-        assert!(verify("secret", "POST", "/v1/servers/a/power", body, &signed, signed.timestamp + 91).is_err());
+        verify(
+            "secret",
+            "POST",
+            "/v1/servers/a/power",
+            body,
+            &signed,
+            signed.timestamp,
+        )
+        .unwrap();
+        assert!(verify(
+            "secret",
+            "POST",
+            "/v1/servers/a/power",
+            b"tampered",
+            &signed,
+            signed.timestamp
+        )
+        .is_err());
+        assert!(verify(
+            "secret",
+            "POST",
+            "/v1/servers/a/power",
+            body,
+            &signed,
+            signed.timestamp + 91
+        )
+        .is_err());
     }
 }

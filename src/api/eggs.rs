@@ -1,16 +1,23 @@
 //! Egg endpoints: CRUD + import/export.
-use super::{data, ok, ApiResult, AdminUser, AppState, AuthUser};
+use super::{data, ok, AdminUser, ApiResult, AppState, AuthUser};
 use crate::models::{self, Egg, EggVariable};
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-pub async fn list(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn list(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let eggs = models::list_eggs(&state.db)?;
     Ok(data(serde_json::to_value(eggs)?))
 }
 
-pub async fn get(State(state): State<AppState>, _u: AuthUser, Path(id): Path<i64>) -> ApiResult<Json<Egg>> {
+pub async fn get(
+    State(state): State<AppState>,
+    _u: AuthUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Egg>> {
     Ok(Json(models::get_egg(&state.db, id)?))
 }
 
@@ -28,7 +35,11 @@ pub struct CreateEggReq {
     pub default_config: Option<String>,
 }
 
-pub async fn create(State(state): State<AppState>, _a: AdminUser, Json(req): Json<CreateEggReq>) -> ApiResult<Json<Egg>> {
+pub async fn create(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Json(req): Json<CreateEggReq>,
+) -> ApiResult<Json<Egg>> {
     let uuid = uuid::Uuid::new_v4().to_string();
     let id = models::create_egg(
         &state.db,
@@ -62,7 +73,12 @@ pub struct UpdateEggReq {
     pub default_config: Option<String>,
 }
 
-pub async fn update(State(state): State<AppState>, _a: AdminUser, Path(id): Path<i64>, Json(req): Json<UpdateEggReq>) -> ApiResult<Json<Egg>> {
+pub async fn update(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateEggReq>,
+) -> ApiResult<Json<Egg>> {
     let mut e = models::get_egg(&state.db, id)?;
     if let Some(v) = req.name {
         e.name = v;
@@ -98,7 +114,11 @@ pub async fn update(State(state): State<AppState>, _a: AdminUser, Path(id): Path
     Ok(Json(e))
 }
 
-pub async fn delete(State(state): State<AppState>, _a: AdminUser, Path(id): Path<i64>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn delete(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
     models::delete_egg(&state.db, id)?;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
@@ -108,7 +128,11 @@ pub struct ImportReq {
     pub json: String,
 }
 
-pub async fn import(State(state): State<AppState>, _a: AdminUser, Json(req): Json<ImportReq>) -> ApiResult<Json<Egg>> {
+pub async fn import(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Json(req): Json<ImportReq>,
+) -> ApiResult<Json<Egg>> {
     let parsed = crate::services::egg::parse_egg_json(&req.json)?;
     let uuid = uuid::Uuid::new_v4().to_string();
     let id = models::create_egg(
@@ -120,7 +144,11 @@ pub async fn import(State(state): State<AppState>, _a: AdminUser, Json(req): Jso
         &parsed.category,
         &parsed.docker_image,
         &parsed.startup,
-        parsed.config.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default()).as_deref(),
+        parsed
+            .config
+            .as_ref()
+            .map(|c| serde_json::to_string(c).unwrap_or_default())
+            .as_deref(),
         None,
         parsed.install.as_ref().map(|i| i.script.clone()).as_deref(),
         &parsed.variables,
@@ -134,7 +162,11 @@ pub struct ExportResp {
     pub json: String,
 }
 
-pub async fn export(State(state): State<AppState>, _u: AuthUser, Path(id): Path<i64>) -> ApiResult<Json<ExportResp>> {
+pub async fn export(
+    State(state): State<AppState>,
+    _u: AuthUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<ExportResp>> {
     let e = models::get_egg(&state.db, id)?;
     let out = serde_json::to_string_pretty(&serde_json::json!({
         "name": e.name,
@@ -150,7 +182,10 @@ pub async fn export(State(state): State<AppState>, _u: AuthUser, Path(id): Path<
     Ok(Json(ExportResp { json: out }))
 }
 
-pub async fn categories(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn categories(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock();
     let mut stmt = conn.prepare("SELECT DISTINCT category FROM egss ORDER BY category")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;

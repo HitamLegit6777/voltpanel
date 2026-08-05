@@ -98,6 +98,7 @@ pub struct ProcessState {
     pub stop_issued: AtomicBool,
     pub read_total: AtomicU64,
     pub write_total: AtomicU64,
+    pub operation: AtomicBool,
     pub last_cpu_read: AtomicU64,
     pub last_cpu_time: AtomicU64,
 }
@@ -148,6 +149,9 @@ impl ProcManager {
         if let Some((_, p)) = self.procs.remove(&server_id) {
             *p.stdin.lock() = None;
             let pid = *p.pid.lock();
+            if let Some(cgroup) = p.cgroup.lock().as_ref() {
+                let _ = cgroup.kill_all();
+            }
             if let Some(pid) = pid {
                 unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
                 unsafe { libc::kill(pid as i32, libc::SIGKILL) };
@@ -158,7 +162,10 @@ impl ProcManager {
 
     /// Snapshot of all live process entries.
     pub fn all(&self) -> Vec<(i64, Arc<ProcessState>)> {
-        self.procs.iter().map(|e| (*e.key(), e.value().clone())).collect()
+        self.procs
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect()
     }
 
     pub fn state(&self, server_id: i64) -> Option<Arc<ProcessState>> {
@@ -202,7 +209,11 @@ impl ProcManager {
         let tx = ps.write_total.load(Ordering::Relaxed);
         let uptime_secs = started_at
             .as_deref()
-            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok().map(|d| d.with_timezone(&Utc)))
+            .and_then(|t| {
+                chrono::DateTime::parse_from_rfc3339(t)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            })
             .map(|t| (Utc::now() - t).num_seconds().max(0) as u64)
             .unwrap_or(0);
         ProcessInfo {
@@ -236,7 +247,11 @@ impl ProcManager {
         let now = now_ticks();
         let dt = now.saturating_sub(prev_read).max(1);
         let dtime = total_time.saturating_sub(prev_time);
-        let cpu = if dt > 0 { (dtime as f64 / dt as f64) * 100.0 } else { 0.0 };
+        let cpu = if dt > 0 {
+            (dtime as f64 / dt as f64) * 100.0
+        } else {
+            0.0
+        };
         (if cpu.is_finite() { cpu } else { 0.0 }, total_mem)
     }
 
@@ -250,44 +265,67 @@ impl ProcManager {
         notifier: Arc<Notifier>,
     ) -> Result<()> {
         if self.stopped.load(Ordering::Relaxed) {
-            bail!("panel shutting down");
+            bail!("panel shutting down")
         }
-        if let Some(ps) = self.state(server.id) {
-            if ps.pid.lock().is_some() {
-                bail!("server already running");
-            }
-        }
-        let dir = server_dir(server);
-        crate::isolation::prepare_root(&dir, &server.uuid)?;
-        crate::isolation::own_tree(&dir, &server.uuid)?;
-        let isolation = crate::isolation::IsolationConfig::default();
-        let limits = crate::isolation::Limits { memory_bytes: server.memory_mb as u64 * 1_048_576, cpu_percent: server.cpu_percent as u64, pids_max: crate::isolation::DEFAULT_PIDS_MAX };
-        let cgroup = crate::isolation::Cgroup::create(&isolation, &server.uuid, &limits)?;
-        let mut cmd = crate::isolation::sandbox_command(&isolation, &dir, &server.uuid, startup_cmd, &limits)?;
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-        for (k, v) in env { cmd.env(k, v); }
-        let mut child = cmd.spawn().context("failed to spawn isolated process")?;
-        let pid = child.id();
-        if let Err(error) = cgroup.attach(pid) { let _ = child.kill(); return Err(error); }
-        let stdout = child.stdout.take().context("no stdout")?;
-        let ports = crate::models::ports_for_server(&self.db, server.id)?.into_iter().filter_map(|p|u16::try_from(p).ok()).collect::<Vec<_>>();
-        let network = match crate::isolation::NetworkLease::configure(pid, &server.uuid, &ports) {
-            Ok(value) => value,
-            Err(error) => { let _ = child.kill(); return Err(error); }
-        };
-        let stderr = child.stderr.take().context("no stderr")?;
-        let stdin = child.stdin.take();
-
         let ps = self
             .procs
             .entry(server.id)
             .or_insert_with(|| Arc::new(ProcessState::default()))
             .clone();
+        let _operation = crate::isolation::AtomicFlagGuard::acquire(&ps.operation)?;
+        if ps.pid.lock().is_some() {
+            bail!("server already running")
+        }
+        let dir = server_dir(server);
+        crate::isolation::prepare_root(&dir, &server.uuid)?;
+        crate::isolation::own_tree(&dir, &server.uuid)?;
+        let isolation = crate::isolation::IsolationConfig::default();
+        let limits = crate::isolation::Limits {
+            memory_bytes: server.memory_mb as u64 * 1_048_576,
+            cpu_percent: server.cpu_percent as u64,
+            pids_max: crate::isolation::DEFAULT_PIDS_MAX,
+        };
+        let cgroup = crate::isolation::Cgroup::create(&isolation, &server.uuid, &limits)?;
+        let mut cmd = crate::isolation::sandbox_command(
+            &isolation,
+            &dir,
+            &server.uuid,
+            startup_cmd,
+            &limits,
+        )?;
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().context("failed to spawn isolated process")?;
+        let pid = child.id();
+        if let Err(error) = cgroup.attach(pid) {
+            let _ = cgroup.kill_all();
+            let _ = child.kill();
+            return Err(error);
+        }
+        let stdout = child.stdout.take().context("no stdout")?;
+        let stderr = child.stderr.take().context("no stderr")?;
+        let stdin = child.stdin.take();
+        let ports = crate::models::ports_for_server(&self.db, server.id)?
+            .into_iter()
+            .filter_map(|p| u16::try_from(p).ok())
+            .collect::<Vec<_>>();
+        let network = match crate::isolation::NetworkLease::configure(pid, &server.uuid, &ports) {
+            Ok(v) => v,
+            Err(error) => {
+                let _ = cgroup.kill_all();
+                let _ = child.kill();
+                return Err(error);
+            }
+        };
         *ps.cgroup.lock() = Some(cgroup);
-        *ps.status.lock() = "running".into();
         *ps.network.lock() = Some(network);
+        *ps.status.lock() = "running".into();
         *ps.started_at.lock() = Some(Utc::now().to_rfc3339());
         *ps.exit_code.lock() = None;
         ps.stop_issued.store(false, Ordering::Relaxed);
@@ -350,7 +388,11 @@ impl ProcManager {
             *st.pid.lock() = None;
             *st.exit_code.lock() = Some(code.unwrap_or(-1));
             if !st.stop_issued.load(Ordering::Relaxed) {
-                *st.status.lock() = if code == Some(0) { "stopped".into() } else { "crashed".into() };
+                *st.status.lock() = if code == Some(0) {
+                    "stopped".into()
+                } else {
+                    "crashed".into()
+                };
                 let _ = models::set_server_status(&m.db, sid, &st.status.lock());
                 m.restart_if_needed(&srv, not, code).await;
             }
@@ -362,12 +404,24 @@ impl ProcManager {
         if !server.auto_restart {
             if let Some(code) = code {
                 if code != 0 {
-                    notifier.notify("error", &format!("Server '{}' crashed", server.name), &format!("Exit code {code}"), Some(server.id));
+                    notifier.notify(
+                        "error",
+                        &format!("Server '{}' crashed", server.name),
+                        &format!("Exit code {code}"),
+                        Some(server.id),
+                    );
                 }
             }
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if self
+            .state(server.id)
+            .map(|s| s.stop_issued.load(Ordering::Relaxed))
+            .unwrap_or(true)
+        {
+            return;
+        }
         let srv = match models::get_server(&self.db, server.id) {
             Ok(s) => s,
             Err(_) => return,
@@ -380,7 +434,12 @@ impl ProcManager {
         let env = crate::services::egg::env_for_server(&self.db, &srv);
         match cmd {
             Ok(cmd) => {
-                notifier.notify("info", &format!("Restarting '{}'", srv.name), "Auto-restart triggered after exit", Some(srv.id));
+                notifier.notify(
+                    "info",
+                    &format!("Restarting '{}'", srv.name),
+                    "Auto-restart triggered after exit",
+                    Some(srv.id),
+                );
                 let _ = self.start(&srv, &cmd, &env, notifier.clone());
             }
             Err(e) => notifier.notify("error", "Restart failed", &e.to_string(), Some(srv.id)),
@@ -393,6 +452,7 @@ impl ProcManager {
         let Some(ps) = self.state(server_id) else {
             return Ok(());
         };
+        let _operation = crate::isolation::AtomicFlagGuard::acquire(&ps.operation)?;
         if ps.stop_issued.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
@@ -412,6 +472,9 @@ impl ProcManager {
                 }
                 if t0.elapsed().as_secs() > 10 {
                     unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    if let Some(cgroup) = ps.cgroup.lock().as_ref() {
+                        let _ = cgroup.kill_all();
+                    }
                     unsafe { libc::kill(pid as i32, libc::SIGKILL) };
                     break;
                 }
@@ -431,9 +494,13 @@ impl ProcManager {
         let Some(ps) = self.state(server_id) else {
             return Ok(());
         };
+        let _operation = crate::isolation::AtomicFlagGuard::acquire(&ps.operation)?;
         *ps.stdin.lock() = None;
         let pid = *ps.pid.lock();
         if let Some(pid) = pid {
+            if let Some(cgroup) = ps.cgroup.lock().as_ref() {
+                let _ = cgroup.kill_all();
+            }
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
             *ps.pid.lock() = None;
@@ -520,7 +587,10 @@ fn walk_children(pid: u32, mem: &mut u64, cpu_time: &mut u64, count: &mut u64) {
 fn read_proc_stat(pid: u32) -> Option<(u64, u64)> {
     let path = format!("/proc/{pid}/stat");
     let mut s = String::new();
-    std::fs::File::open(&path).ok()?.read_to_string(&mut s).ok()?;
+    std::fs::File::open(&path)
+        .ok()?
+        .read_to_string(&mut s)
+        .ok()?;
     let rest = s.splitn(3, ')').nth(1)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     if fields.len() < 22 {
@@ -536,6 +606,7 @@ fn read_proc_stat(pid: u32) -> Option<(u64, u64)> {
 fn read_proc_children(pid: u32) -> Result<Vec<u32>> {
     let path = format!("/proc/{pid}/task/{pid}/children");
     let s = std::fs::read_to_string(path)?;
-    Ok(s.split_whitespace().filter_map(|x| x.parse().ok()).collect())
+    Ok(s.split_whitespace()
+        .filter_map(|x| x.parse().ok())
+        .collect())
 }
-

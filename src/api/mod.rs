@@ -78,7 +78,10 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self { status, message: message.into() }
+        Self {
+            status,
+            message: message.into(),
+        }
     }
     pub fn bad_request(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, msg)
@@ -121,6 +124,18 @@ impl From<image::ImageError> for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(node) = e.downcast_ref::<crate::services::node::NodeClientError>() {
+            let status = match node.status.and_then(|v| StatusCode::from_u16(v).ok()) {
+                Some(
+                    v @ (StatusCode::BAD_REQUEST
+                    | StatusCode::NOT_FOUND
+                    | StatusCode::CONFLICT
+                    | StatusCode::PAYLOAD_TOO_LARGE),
+                ) => v,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            return ApiError::new(status, node.message.clone());
+        }
         tracing::warn!("api error: {e}");
         ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
     }
@@ -150,14 +165,30 @@ pub struct AuthUser(pub User);
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         if state.cfg.features.enable_api_keys {
-            if let Some(raw) = parts.headers.get(axum::http::header::AUTHORIZATION).and_then(|v|v.to_str().ok()).and_then(|v|v.strip_prefix("Bearer ")) {
-                let key=crate::models::get_api_key_by_token(&state.db,&crate::auth::hash_token(raw))?.ok_or_else(||ApiError::unauthorized("invalid API key"))?;
-                if key.scopes!="full" && key.scopes!="*" { return Err(ApiError::forbidden("scoped API keys are not supported on this endpoint")); }
-                let user=crate::models::get_user(&state.db,key.user_id)?;
-                if !user.active { return Err(ApiError::forbidden("account disabled")); }
-                crate::models::touch_api_key(&state.db,key.id)?;
+            if let Some(raw) = parts
+                .headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+            {
+                let key =
+                    crate::models::get_api_key_by_token(&state.db, &crate::auth::hash_token(raw))?
+                        .ok_or_else(|| ApiError::unauthorized("invalid API key"))?;
+                if key.scopes != "full" && key.scopes != "*" {
+                    return Err(ApiError::forbidden(
+                        "scoped API keys are not supported on this endpoint",
+                    ));
+                }
+                let user = crate::models::get_user(&state.db, key.user_id)?;
+                if !user.active {
+                    return Err(ApiError::forbidden("account disabled"));
+                }
+                crate::models::touch_api_key(&state.db, key.id)?;
                 return Ok(AuthUser(user));
             }
         }
@@ -175,7 +206,8 @@ impl FromRequestParts<AppState> for AuthUser {
         let Some(raw) = raw else {
             return Err(ApiError::unauthorized("not logged in"));
         };
-        let user = crate::auth::user_from_session(&state.db, &raw).map_err(|_| ApiError::unauthorized("invalid or expired session"))?;
+        let user = crate::auth::user_from_session(&state.db, &raw)
+            .map_err(|_| ApiError::unauthorized("invalid or expired session"))?;
         if !user.active {
             return Err(ApiError::forbidden("account disabled"));
         }
@@ -190,7 +222,10 @@ pub struct AdminUser(pub User);
 impl FromRequestParts<AppState> for AdminUser {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let AuthUser(u) = AuthUser::from_request_parts(parts, state).await?;
         if !u.root_admin {
             return Err(ApiError::forbidden("admin only"));
@@ -210,11 +245,20 @@ pub fn ok<T: serde::Serialize>(v: T) -> Json<serde_json::Value> {
 pub fn data(v: serde_json::Value) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "data": v }))
 }
-pub fn require_server_permission(state: &AppState, user: &User, server_id: i64, permission: &str) -> ApiResult<()> {
-    if crate::models::user_has_server_permission(&state.db,user,server_id,permission)? { Ok(()) }
-    else { Err(ApiError::forbidden(format!("missing server permission: {permission}"))) }
+pub fn require_server_permission(
+    state: &AppState,
+    user: &User,
+    server_id: i64,
+    permission: &str,
+) -> ApiResult<()> {
+    if crate::models::user_has_server_permission(&state.db, user, server_id, permission)? {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(format!(
+            "missing server permission: {permission}"
+        )))
+    }
 }
-
 
 pub fn client_ip(parts: &Parts) -> String {
     parts

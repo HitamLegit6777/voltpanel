@@ -1,5 +1,5 @@
 //! System endpoints: node stats, health, metrics, allocations.
-use super::{data, ok, ApiError, ApiResult, AdminUser, AppState, AuthUser};
+use super::{data, ok, AdminUser, ApiError, ApiResult, AppState, AuthUser};
 use crate::db;
 use crate::models;
 use crate::services;
@@ -8,7 +8,10 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-pub async fn node_stats(_state: State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn node_stats(
+    _state: State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let s = services::node_stats();
     Ok(Json(json!({
         "cpu": {
@@ -31,7 +34,10 @@ pub async fn node_stats(_state: State<AppState>, _u: AuthUser) -> ApiResult<Json
     })))
 }
 
-pub async fn health(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn health(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let integrity = db::integrity_check(&state.db).unwrap_or_else(|_| "unknown".into());
     let server_count = models::count_servers(&state.db).unwrap_or(-1);
     let isolation = crate::isolation::probe(&crate::isolation::IsolationConfig::default());
@@ -41,7 +47,10 @@ pub async fn health(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Js
     })))
 }
 
-pub async fn isolation(State(_state): State<AppState>, _a: AdminUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn isolation(
+    State(_state): State<AppState>,
+    _a: AdminUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let config = crate::isolation::IsolationConfig::default();
     let status = crate::isolation::probe(&config);
     Ok(Json(serde_json::to_value(status)?))
@@ -63,7 +72,11 @@ pub struct PortRangeQuery {
 }
 
 /// Find free ports in a range (allocation table aware).
-pub async fn free_ports(State(state): State<AppState>, _u: AuthUser, Query(q): Query<PortRangeQuery>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn free_ports(
+    State(state): State<AppState>,
+    _u: AuthUser,
+    Query(q): Query<PortRangeQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
     let start = q.start.unwrap_or(20000);
     let end = q.end.unwrap_or(30000);
     let conn = state.db.lock();
@@ -110,7 +123,10 @@ fn port_in_use(port: i64) -> bool {
     false
 }
 
-pub async fn allocations(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn allocations(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock();
     let mut stmt = conn.prepare("SELECT a.server_id, a.port, s.name FROM allocations a LEFT JOIN servers s ON s.id=a.server_id ORDER BY a.port")?;
     let rows = stmt.query_map([], |r| {
@@ -127,8 +143,13 @@ pub async fn allocations(State(state): State<AppState>, _u: AuthUser) -> ApiResu
     Ok(data(json!(out)))
 }
 
-pub async fn assign_port(State(state): State<AppState>, _a: AdminUser, Path((server_id, port)): Path<(i64, i64)>) -> ApiResult<Json<serde_json::Value>> {
-    models::get_server(&state.db, server_id).map_err(|_| ApiError::not_found("server not found"))?;
+pub async fn assign_port(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path((server_id, port)): Path<(i64, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    models::get_server(&state.db, server_id)
+        .map_err(|_| ApiError::not_found("server not found"))?;
     if port_in_use(port) {
         return Err(ApiError::bad_request("port already in use on host"));
     }
@@ -136,15 +157,26 @@ pub async fn assign_port(State(state): State<AppState>, _a: AdminUser, Path((ser
     Ok(ok(json!({ "ok": true })))
 }
 
-pub async fn remove_port(State(state): State<AppState>, _a: AdminUser, Path((server_id, port)): Path<(i64, i64)>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn remove_port(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path((server_id, port)): Path<(i64, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock();
-    conn.execute("DELETE FROM allocations WHERE server_id=?1 AND port=?2", rusqlite::params![server_id, port])?;
+    conn.execute(
+        "DELETE FROM allocations WHERE server_id=?1 AND port=?2",
+        rusqlite::params![server_id, port],
+    )?;
     Ok(ok(json!({ "ok": true })))
 }
 
-pub async fn rate_limits_status(State(state): State<AppState>, _a: AdminUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn rate_limits_status(
+    State(state): State<AppState>,
+    _a: AdminUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock();
-    let mut stmt = conn.prepare("SELECT key, window_start, count FROM rate_limits ORDER BY count DESC LIMIT 50")?;
+    let mut stmt = conn
+        .prepare("SELECT key, window_start, count FROM rate_limits ORDER BY count DESC LIMIT 50")?;
     let rows = stmt.query_map([], |r| {
         Ok(json!({
             "key": r.get::<_, String>(0)?,
@@ -159,7 +191,10 @@ pub async fn rate_limits_status(State(state): State<AppState>, _a: AdminUser) ->
     Ok(data(json!(out)))
 }
 
-pub async fn reset_rate_limits(State(state): State<AppState>, _a: AdminUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn reset_rate_limits(
+    State(state): State<AppState>,
+    _a: AdminUser,
+) -> ApiResult<Json<serde_json::Value>> {
     models::reset_rate_limits(&state.db)?;
     Ok(ok(json!({ "ok": true })))
 }
@@ -173,8 +208,14 @@ pub struct LimitOverride {
     pub bandwidth_tx: Option<u64>,
 }
 
-pub async fn set_server_limits(State(state): State<AppState>, _a: AdminUser, Path(server_id): Path<i64>, Json(req): Json<LimitOverride>) -> ApiResult<Json<serde_json::Value>> {
-    let s = models::get_server(&state.db, server_id).map_err(|_| ApiError::not_found("server not found"))?;
+pub async fn set_server_limits(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path(server_id): Path<i64>,
+    Json(req): Json<LimitOverride>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let s = models::get_server(&state.db, server_id)
+        .map_err(|_| ApiError::not_found("server not found"))?;
     state.monitor.set_limit(services::ServerLimits {
         server_id,
         memory_mb: req.memory_mb.unwrap_or(s.memory_mb as u64),
@@ -186,7 +227,10 @@ pub async fn set_server_limits(State(state): State<AppState>, _a: AdminUser, Pat
 }
 
 /// Websocket-less live stats polling helper endpoint.
-pub async fn live_stats(State(state): State<AppState>, _u: AuthUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn live_stats(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let servers = models::list_servers(&state.db, None, false)?;
     let out: Vec<serde_json::Value> = servers
         .iter()

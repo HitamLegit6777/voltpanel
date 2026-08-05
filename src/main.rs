@@ -32,10 +32,20 @@ pub static SETTINGS: std::sync::LazyLock<config::Config> = std::sync::LazyLock::
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    unsafe { libc::umask(0o077); }
-    { use std::os::unix::fs::PermissionsExt; let path=std::env::var("VOLTPANEL_CONFIG").unwrap_or_else(|_|"config.toml".into()); if std::path::Path::new(&path).exists(){std::fs::set_permissions(path,std::fs::Permissions::from_mode(0o600))?;} }
+    unsafe {
+        libc::umask(0o077);
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::var("VOLTPANEL_CONFIG").unwrap_or_else(|_| "config.toml".into());
+        if std::path::Path::new(&path).exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let cfg = SETTINGS.clone();
@@ -69,7 +79,11 @@ async fn main() -> Result<()> {
     for s in models::list_servers(&db, None, false)? {
         procs.register_limits(s.id, s.memory_mb, s.cpu_percent);
         monitor.set_limit(services::ServerLimits {
-            server_id: s.id, memory_mb: s.memory_mb as u64, cpu_percent: s.cpu_percent as u64, bandwidth_rx: 0, bandwidth_tx: 0,
+            server_id: s.id,
+            memory_mb: s.memory_mb as u64,
+            cpu_percent: s.cpu_percent as u64,
+            bandwidth_rx: 0,
+            bandwidth_tx: 0,
         });
         if s.node == "local" {
             crate::isolation::cleanup_orphans(&s.uuid);
@@ -83,7 +97,17 @@ async fn main() -> Result<()> {
         }
     }
 
-    services::spawn_background(db.clone(), cfg.clone(), procs.clone(), monitor.clone(), notifier.clone(), hub.clone(), node_client.clone(), running.clone()).await;
+    services::spawn_background(
+        db.clone(),
+        cfg.clone(),
+        procs.clone(),
+        monitor.clone(),
+        notifier.clone(),
+        hub.clone(),
+        node_client.clone(),
+        running.clone(),
+    )
+    .await;
 
     // ---- router ----
     let app = build_router(state);
@@ -114,7 +138,12 @@ async fn shutdown_signal(running: Arc<AtomicBool>, procs: Arc<services::proc::Pr
 }
 
 fn build_router(state: api::AppState) -> Router {
-    let max_body = state.cfg.web.max_body_mb.saturating_mul(1_048_576).min(usize::MAX as u64) as usize;
+    let max_body = state
+        .cfg
+        .web
+        .max_body_mb
+        .saturating_mul(1_048_576)
+        .min(usize::MAX as u64) as usize;
     use crate::api::*;
     Router::new()
         // ------- auth/users -------
@@ -144,18 +173,27 @@ fn build_router(state: api::AppState) -> Router {
         // subusers
         .route("/api/servers/:id/subusers", get(servers::list_subusers))
         .route("/api/servers/:id/subusers", post(servers::add_subuser))
-        .route("/api/servers/:id/subusers/:sub_id", delete(servers::remove_subuser))
+        .route(
+            "/api/servers/:id/subusers/:sub_id",
+            delete(servers::remove_subuser),
+        )
         // ------- console -------
         .route("/api/servers/:id/console/history", get(console::history))
         .route("/api/servers/:id/console/stream", get(console::stream))
         .route("/api/servers/:id/console/clear", post(console::clear))
-        .route("/api/servers/:id/console/command", post(console::send_command))
+        .route(
+            "/api/servers/:id/console/command",
+            post(console::send_command),
+        )
         .route("/api/servers/:id/console/log", get(console::log_download))
         // ------- files -------
         .route("/api/servers/:id/files", get(files::list))
         .route("/api/servers/:id/files/read", get(files::read))
         .route("/api/servers/:id/files/write", post(files::write))
-        .route("/api/servers/:id/files/upload", post(files::upload_multipart))
+        .route(
+            "/api/servers/:id/files/upload",
+            post(files::upload_multipart),
+        )
         .route("/api/servers/:id/files/upload_b64", post(files::upload_b64))
         .route("/api/servers/:id/files/download", get(files::download))
         .route("/api/servers/:id/files/rename", post(files::rename))
@@ -165,7 +203,10 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/servers/:id/files/chmod", post(files::chmod))
         .route("/api/servers/:id/files/mkdir", post(files::mkdir))
         .route("/api/servers/:id/files/touch", post(files::touch))
-        .route("/api/servers/:id/files/archive", post(files::create_archive))
+        .route(
+            "/api/servers/:id/files/archive",
+            post(files::create_archive),
+        )
         .route("/api/servers/:id/files/extract", post(files::extract))
         .route("/api/servers/:id/files/summary", get(files::summary))
         .route("/api/servers/:id/files/exists", get(files::exists_check))
@@ -184,9 +225,15 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/schedules/:id", patch(schedules::update))
         .route("/api/schedules/:id", delete(schedules::delete))
         .route("/api/schedules/:id/tasks", post(schedules::add_task))
-        .route("/api/schedules/:id/tasks/:task_id", delete(schedules::remove_task))
+        .route(
+            "/api/schedules/:id/tasks/:task_id",
+            delete(schedules::remove_task),
+        )
         .route("/api/schedules/:id/runs", get(schedules::runs))
-        .route("/api/schedules/:id/toggle/:enabled", post(schedules::toggle))
+        .route(
+            "/api/schedules/:id/toggle/:enabled",
+            post(schedules::toggle),
+        )
         .route("/api/schedules/:id/run", post(schedules::run_now))
         // ------- backups -------
         .route("/api/servers/:id/backups", get(backups::list))
@@ -199,9 +246,18 @@ fn build_router(state: api::AppState) -> Router {
         // ------- databases -------
         .route("/api/servers/:id/databases", get(databases::list))
         .route("/api/servers/:id/databases", post(databases::create))
-        .route("/api/servers/:id/databases/:name/exec", post(databases::exec))
-        .route("/api/servers/:id/databases/:name/query", post(databases::query))
-        .route("/api/servers/:id/databases/:name/tables", get(databases::tables))
+        .route(
+            "/api/servers/:id/databases/:name/exec",
+            post(databases::exec),
+        )
+        .route(
+            "/api/servers/:id/databases/:name/query",
+            post(databases::query),
+        )
+        .route(
+            "/api/servers/:id/databases/:name/tables",
+            get(databases::tables),
+        )
         .route("/api/servers/:id/databases/:name", delete(databases::drop))
         // ------- keys -------
         .route("/api/keys", get(keys::list))
@@ -215,15 +271,24 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/settings/limits", post(settings::update_limits))
         .route("/api/audit", get(settings::audit_logs))
         .route("/api/notifications", get(settings::notifications))
-        .route("/api/notifications/clear", post(settings::notifications_clear))
+        .route(
+            "/api/notifications/clear",
+            post(settings::notifications_clear),
+        )
         .route("/api/system/stats", get(system::node_stats))
         .route("/api/system/health", get(system::health))
         .route("/api/system/version", get(system::version))
         .route("/api/system/isolation", get(system::isolation))
         .route("/api/system/ports/free", get(system::free_ports))
         .route("/api/system/allocations", get(system::allocations))
-        .route("/api/system/ports/:server_id/:port", post(system::assign_port))
-        .route("/api/system/ports/:server_id/:port", delete(system::remove_port))
+        .route(
+            "/api/system/ports/:server_id/:port",
+            post(system::assign_port),
+        )
+        .route(
+            "/api/system/ports/:server_id/:port",
+            delete(system::remove_port),
+        )
         .route("/api/system/rate-limits", get(system::rate_limits_status))
         // ------- multi-node -------
         .route("/api/nodes", get(nodes::list))
@@ -235,11 +300,20 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/nodes/:id", delete(nodes::delete))
         .route("/api/nodes/:id/test", post(nodes::test_connection))
         .route("/api/nodes/:id/rotate-secret", post(nodes::rotate_secret))
-        .route("/api/nodes/:id/enrollment", post(nodes::regenerate_enrollment))
+        .route(
+            "/api/nodes/:id/enrollment",
+            post(nodes::regenerate_enrollment),
+        )
         .route("/api/node/enroll", post(nodes::enroll))
         .route("/api/node/heartbeat", post(nodes::heartbeat))
-        .route("/api/system/rate-limits/reset", post(system::reset_rate_limits))
-        .route("/api/system/servers/:server_id/limits", post(system::set_server_limits))
+        .route(
+            "/api/system/rate-limits/reset",
+            post(system::reset_rate_limits),
+        )
+        .route(
+            "/api/system/servers/:server_id/limits",
+            post(system::set_server_limits),
+        )
         .route("/api/system/live-stats", get(system::live_stats))
         // ------- admin users -------
         .route("/api/admin/users", get(users::admin_list_users))
@@ -247,23 +321,50 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/admin/users/:id", patch(users::admin_update_user))
         .route("/api/admin/users/:id", delete(users::admin_delete_user))
         .route("/api/admin/sessions", get(users::admin_sessions))
-        .route("/api/admin/sessions/:token_prefix", delete(users::admin_revoke_session))
+        .route(
+            "/api/admin/sessions/:token_prefix",
+            delete(users::admin_revoke_session),
+        )
         // ------- assets + SPA -------
         .nest_service("/static", web::static_dir())
         .route("/", get(web::index))
         .fallback(get(web::spa_fallback))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(axum::http::header::X_CONTENT_TYPE_OPTIONS, axum::http::HeaderValue::from_static("nosniff")))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(axum::http::header::X_FRAME_OPTIONS, axum::http::HeaderValue::from_static("DENY")))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(axum::http::header::REFERRER_POLICY, axum::http::HeaderValue::from_static("strict-origin-when-cross-origin")))
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                axum::http::HeaderValue::from_static("nosniff"),
+            ),
+        )
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::X_FRAME_OPTIONS,
+                axum::http::HeaderValue::from_static("DENY"),
+            ),
+        )
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+                axum::http::header::REFERRER_POLICY,
+                axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
+            ),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(max_body))
         .with_state(state)
 }
 fn seed(db: &db::Db, cfg: &config::Config) -> Result<()> {
     // admin user
     if models::get_user_by_name(db, "admin").is_err() {
-        let password = std::env::var("VOLTPANEL_ADMIN_PASSWORD").unwrap_or_else(|_| auth::random_token(18));
+        let password =
+            std::env::var("VOLTPANEL_ADMIN_PASSWORD").unwrap_or_else(|_| auth::random_token(18));
         let hash = auth::hash_password(cfg, &password)?;
-        models::create_user(db, "admin", "admin@voltpanel.local", &hash, true, "en", "dark")?;
+        models::create_user(
+            db,
+            "admin",
+            "admin@voltpanel.local",
+            &hash,
+            true,
+            "en",
+            "dark",
+        )?;
         tracing::warn!("FIRST-RUN ADMIN CREDENTIAL — username=admin password={password} — change it immediately");
     }
     // eggs
@@ -275,59 +376,77 @@ fn seed(db: &db::Db, cfg: &config::Config) -> Result<()> {
 
 fn seed_eggs(db: &db::Db) -> Result<()> {
     let eggs: Vec<(serde_json::Value, &str)> = vec![
-        (serde_json::json!({
-            "name": "Node.js", "description": "Run any Node.js application", "author": "voltpanel",
-            "category": "web", "docker_image": "node:20-alpine",
-            "startup": "node {{NODE_ARGS}} {{ENTRYPOINT}}",
-            "stop": "stop",
-            "variables": [
-                {"name": "Entry Point", "description": "Main JS file", "env_var": "ENTRYPOINT", "default_value": "index.js", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"},
-                {"name": "Node Args", "description": "Extra node arguments", "env_var": "NODE_ARGS", "default_value": "", "user_viewable": true, "user_editable": true, "rules": "string|max:255"}
-            ]
-        }), "node"),
-        (serde_json::json!({
-            "name": "Python", "description": "Python 3 application runner", "author": "voltpanel",
-            "category": "generic", "docker_image": "python:3.11-slim",
-            "startup": "python3 {{PY_ARGS}} {{ENTRYPOINT}}",
-            "stop": "stop",
-            "variables": [
-                {"name": "Entry Point", "description": "Main python file", "env_var": "ENTRYPOINT", "default_value": "main.py", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"}
-            ]
-        }), "python"),
-        (serde_json::json!({
-            "name": "Minecraft Java", "description": "Minecraft: Java Edition server", "author": "voltpanel",
-            "category": "game", "docker_image": "eclipse-temurin:21",
-            "startup": "java -Xms{{MEMORY}}M -Xmx{{MEMORY}}M -jar {{SERVER_JAR}} nogui",
-            "stop": "stop",
-            "variables": [
-                {"name": "Server Jar", "description": "Jar file to run", "env_var": "SERVER_JAR", "default_value": "server.jar", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"},
-                {"name": "Memory (MB)", "description": "Heap size", "env_var": "MEMORY", "default_value": "1024", "user_viewable": true, "user_editable": true, "rules": "numeric|min:128|max:32768"}
-            ],
-            "install": {"script": "apt-get update -y && apt-get install -y wget && cd /mnt/server && if [ ! -f server.jar ]; then wget -O server.jar https://piston-data.mojang.com/v1/objects/8dd1a28015f228b9cac1499b248d8f5c8f4b8f8e/server.jar; fi"}
-        }), "mc"),
-        (serde_json::json!({
-            "name": "Terraria", "description": "Terraria dedicated server", "author": "voltpanel",
-            "category": "game", "docker_image": "mono:latest",
-            "startup": "mono TerrariaServer.exe -port {{SERVER_PORT}} -autocreate 2 -worldname world",
-            "stop": "exit",
-            "variables": [
-                {"name": "World Name", "description": "World file", "env_var": "WORLD", "default_value": "world.wld", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"}
-            ]
-        }), "terraria"),
-        (serde_json::json!({
-            "name": "Web Server", "description": "Static website hosting", "author": "voltpanel",
-            "category": "web", "docker_image": "nginx:alpine",
-            "startup": "nginx -g 'daemon off;'",
-            "stop": "quit",
-            "variables": []
-        }), "web"),
-        (serde_json::json!({
-            "name": "Redis", "description": "Redis in-memory store", "author": "voltpanel",
-            "category": "database", "docker_image": "redis:7",
-            "startup": "redis-server --port {{SERVER_PORT}} --save ''",
-            "stop": "shutdown",
-            "variables": []
-        }), "redis"),
+        (
+            serde_json::json!({
+                "name": "Node.js", "description": "Run any Node.js application", "author": "voltpanel",
+                "category": "web", "docker_image": "node:20-alpine",
+                "startup": "node {{NODE_ARGS}} {{ENTRYPOINT}}",
+                "stop": "stop",
+                "variables": [
+                    {"name": "Entry Point", "description": "Main JS file", "env_var": "ENTRYPOINT", "default_value": "index.js", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"},
+                    {"name": "Node Args", "description": "Extra node arguments", "env_var": "NODE_ARGS", "default_value": "", "user_viewable": true, "user_editable": true, "rules": "string|max:255"}
+                ]
+            }),
+            "node",
+        ),
+        (
+            serde_json::json!({
+                "name": "Python", "description": "Python 3 application runner", "author": "voltpanel",
+                "category": "generic", "docker_image": "python:3.11-slim",
+                "startup": "python3 {{PY_ARGS}} {{ENTRYPOINT}}",
+                "stop": "stop",
+                "variables": [
+                    {"name": "Entry Point", "description": "Main python file", "env_var": "ENTRYPOINT", "default_value": "main.py", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"}
+                ]
+            }),
+            "python",
+        ),
+        (
+            serde_json::json!({
+                "name": "Minecraft Java", "description": "Minecraft: Java Edition server", "author": "voltpanel",
+                "category": "game", "docker_image": "eclipse-temurin:21",
+                "startup": "java -Xms{{MEMORY}}M -Xmx{{MEMORY}}M -jar {{SERVER_JAR}} nogui",
+                "stop": "stop",
+                "variables": [
+                    {"name": "Server Jar", "description": "Jar file to run", "env_var": "SERVER_JAR", "default_value": "server.jar", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"},
+                    {"name": "Memory (MB)", "description": "Heap size", "env_var": "MEMORY", "default_value": "1024", "user_viewable": true, "user_editable": true, "rules": "numeric|min:128|max:32768"}
+                ],
+                "install": {"script": "apt-get update -y && apt-get install -y wget && cd /mnt/server && if [ ! -f server.jar ]; then wget -O server.jar https://piston-data.mojang.com/v1/objects/8dd1a28015f228b9cac1499b248d8f5c8f4b8f8e/server.jar; fi"}
+            }),
+            "mc",
+        ),
+        (
+            serde_json::json!({
+                "name": "Terraria", "description": "Terraria dedicated server", "author": "voltpanel",
+                "category": "game", "docker_image": "mono:latest",
+                "startup": "mono TerrariaServer.exe -port {{SERVER_PORT}} -autocreate 2 -worldname world",
+                "stop": "exit",
+                "variables": [
+                    {"name": "World Name", "description": "World file", "env_var": "WORLD", "default_value": "world.wld", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"}
+                ]
+            }),
+            "terraria",
+        ),
+        (
+            serde_json::json!({
+                "name": "Web Server", "description": "Static website hosting", "author": "voltpanel",
+                "category": "web", "docker_image": "nginx:alpine",
+                "startup": "nginx -g 'daemon off;'",
+                "stop": "quit",
+                "variables": []
+            }),
+            "web",
+        ),
+        (
+            serde_json::json!({
+                "name": "Redis", "description": "Redis in-memory store", "author": "voltpanel",
+                "category": "database", "docker_image": "redis:7",
+                "startup": "redis-server --port {{SERVER_PORT}} --save ''",
+                "stop": "shutdown",
+                "variables": []
+            }),
+            "redis",
+        ),
     ];
     for (egg, _slug) in eggs {
         let name = egg["name"].as_str().unwrap().to_string();
@@ -354,8 +473,21 @@ fn seed_eggs(db: &db::Db) -> Result<()> {
             })
             .unwrap_or_default();
         let install = egg["install"]["script"].as_str().map(|s| s.to_string());
-        models::create_egg(db, &uuid::Uuid::new_v4().to_string(), &name, &description, &author, &category, &image, &startup, None, None, install.as_deref(), &vars, &stop)?;
+        models::create_egg(
+            db,
+            &uuid::Uuid::new_v4().to_string(),
+            &name,
+            &description,
+            &author,
+            &category,
+            &image,
+            &startup,
+            None,
+            None,
+            install.as_deref(),
+            &vars,
+            &stop,
+        )?;
     }
     Ok(())
 }
-

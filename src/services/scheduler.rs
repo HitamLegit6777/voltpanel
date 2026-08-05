@@ -31,7 +31,8 @@ pub fn parse_cron(expr: &str) -> Result<cron::Schedule> {
 
 pub fn next_run(expr: &str, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
     let sched = parse_cron(expr)?;
-    sched.after(&after)
+    sched
+        .after(&after)
         .next()
         .context("no future run time for expression")
 }
@@ -62,12 +63,15 @@ impl Scheduler {
         for id in ids {
             let mut sch = models::get_schedule(&self.db, id)?;
             let due = match &sch.next_run_at {
-                Some(n) => DateTime::parse_from_rfc3339(n).map(|d| d.with_timezone(&Utc)).unwrap_or(DateTime::<Utc>::MIN_UTC),
+                Some(n) => DateTime::parse_from_rfc3339(n)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or(DateTime::<Utc>::MIN_UTC),
                 None => {
                     // compute first next
                     match next_run(&sch.cron_expr, Utc::now()) {
                         Ok(n) => {
-                            let _ = models::set_schedule_next(&self.db, sch.id, Some(&n.to_rfc3339()));
+                            let _ =
+                                models::set_schedule_next(&self.db, sch.id, Some(&n.to_rfc3339()));
                             n
                         }
                         Err(_) => continue,
@@ -120,7 +124,12 @@ impl Scheduler {
                             rusqlite::params![log, sch.id, now.to_rfc3339()],
                         )
                     };
-                    self.notifier.notify("error", &format!("Schedule '{}' failed", sch.name), &e.to_string(), Some(sch.server_id));
+                    self.notifier.notify(
+                        "error",
+                        &format!("Schedule '{}' failed", sch.name),
+                        &e.to_string(),
+                        Some(sch.server_id),
+                    );
                     return Ok(());
                 }
             }
@@ -140,19 +149,83 @@ impl Scheduler {
         if srv.node != "local" {
             let node = crate::nodes::get_by_name(&self.db, &srv.node)?;
             match task.action.as_str() {
-                "start" => { self.node_client.power(&node,&srv.uuid,crate::node_protocol::PowerAction::Start).await?; }
-                "stop" => { self.node_client.power(&node,&srv.uuid,crate::node_protocol::PowerAction::Stop).await?; }
-                "restart" => { self.node_client.power(&node,&srv.uuid,crate::node_protocol::PowerAction::Restart).await?; }
-                "kill" => { self.node_client.power(&node,&srv.uuid,crate::node_protocol::PowerAction::Kill).await?; }
-                "command" => { self.node_client.command(&node,&srv.uuid,task.payload.trim_matches('\'')).await?; }
+                "start" => {
+                    self.node_client
+                        .power(&node, &srv.uuid, crate::node_protocol::PowerAction::Start)
+                        .await?;
+                }
+                "stop" => {
+                    self.node_client
+                        .power(&node, &srv.uuid, crate::node_protocol::PowerAction::Stop)
+                        .await?;
+                }
+                "restart" => {
+                    self.node_client
+                        .power(&node, &srv.uuid, crate::node_protocol::PowerAction::Restart)
+                        .await?;
+                }
+                "kill" => {
+                    self.node_client
+                        .power(&node, &srv.uuid, crate::node_protocol::PowerAction::Kill)
+                        .await?;
+                }
+                "command" => {
+                    self.node_client
+                        .command(&node, &srv.uuid, task.payload.trim_matches('\''))
+                        .await?;
+                }
                 "backup" => {
-                    let snapshot=self.node_client.snapshot(&node,&srv.uuid).await?;
-                    let uuid=uuid::Uuid::new_v4().to_string();
+                    let was_running = srv.status == "running";
+                    if was_running {
+                        self.node_client
+                            .power(&node, &srv.uuid, crate::node_protocol::PowerAction::Stop)
+                            .await?;
+                        for _ in 0..50 {
+                            if self
+                                .node_client
+                                .stats(&node, &srv.uuid)
+                                .await
+                                .map(|s| s.pid.is_none())
+                                .unwrap_or(true)
+                            {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                    let snapshot_result = self.node_client.snapshot(&node, &srv.uuid).await;
+                    if was_running {
+                        let _ = self
+                            .node_client
+                            .power(&node, &srv.uuid, crate::node_protocol::PowerAction::Start)
+                            .await;
+                    }
+                    let snapshot = snapshot_result?;
+                    let uuid = uuid::Uuid::new_v4().to_string();
                     std::fs::create_dir_all(&crate::SETTINGS.paths.backups_dir)?;
-                    let path=crate::SETTINGS.paths.backups_dir.join(format!("{uuid}.tar.gz"));
-                    let bytes=base64::Engine::decode(&base64::engine::general_purpose::STANDARD,snapshot.archive_b64)?;
-                    std::fs::write(&path,&bytes)?;
-                    crate::models::create_backup(&self.db,&uuid,srv.id,if task.payload.is_empty(){"scheduled"}else{&task.payload},&path.to_string_lossy(),bytes.len() as i64,&snapshot.checksum,"tar.gz")?;
+                    let path = crate::SETTINGS
+                        .paths
+                        .backups_dir
+                        .join(format!("{uuid}.tar.gz"));
+                    let bytes = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        snapshot.archive_b64,
+                    )?;
+                    std::fs::write(&path, &bytes)?;
+                    crate::models::create_backup(
+                        &self.db,
+                        &uuid,
+                        srv.id,
+                        if task.payload.is_empty() {
+                            "scheduled"
+                        } else {
+                            &task.payload
+                        },
+                        &path.to_string_lossy(),
+                        bytes.len() as i64,
+                        &snapshot.checksum,
+                        "tar.gz",
+                    )?;
                 }
                 other => bail!("unknown schedule action: {other}"),
             }
@@ -186,7 +259,8 @@ impl Scheduler {
                 } else {
                     task.payload.clone()
                 };
-                crate::services::backups::create(&self.db, &crate::SETTINGS, server_id, &name).await?;
+                crate::services::backups::create(&self.db, &crate::SETTINGS, server_id, &name)
+                    .await?;
             }
             other => bail!("unknown schedule action: {other}"),
         }

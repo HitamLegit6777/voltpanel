@@ -26,7 +26,7 @@ curl -fsS http://127.0.0.1:8080/api/system/health
 
 Authenticated administrators can inspect `/api/system/isolation` for namespace/cgroup capabilities.
 
-Node health is signed and normally queried through **Admin → Nodes → Test**.
+Node health is signed and normally queried through **Control Center → Fabric → Test**.
 
 ## Backup the panel
 

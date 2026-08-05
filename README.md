@@ -3,9 +3,23 @@
 A free, self-hosted, Docker-free control plane for game servers and application workloads. VoltPanel is written in Rust and ships as two binaries:
 
 - `voltpanel` — web panel, API, scheduler, database, UI, placement and orchestration
-- `voltd` — node daemon for isolated workload execution, remote files, console, metrics, snapshots and transfers
+- `voltd` — execution agent for isolated workload execution, remote files, console, metrics, snapshots and transfers
 
 VoltPanel uses SQLite for panel state and Linux-native isolation (`bubblewrap`, namespaces, unique UIDs, cgroup v2, veth and nftables) instead of Docker.
+
+## VoltPanel product model
+
+VoltPanel is designed as a Linux-native workload control plane, not a clone of an existing hosting panel. Its interface and architecture use a distinct operational model:
+
+- **Fleet** — aggregate capacity, health, activity and workload telemetry
+- **Workspaces** — isolated game/application environments owned by users or teams
+- **Fabric** — the distributed set of `voltd` execution agents
+- **Blueprints** — reusable workload definitions, variables, runtime and installer logic
+- **Automations** — cross-workspace cron and event-driven operations
+- **Vault** — verified snapshots, restore points and transfers
+- **Signals** — security, lifecycle and operator activity events
+
+This model treats games, bots, websites and application processes as first-class workloads on the same secure fabric.
 
 ## Highlights
 
@@ -15,7 +29,7 @@ VoltPanel uses SQLite for panel state and Linux-native isolation (`bubblewrap`, 
 - cgroup v2 memory, CPU and process limits
 - Per-server network namespace and node-scoped multi-port allocations
 - Remote console, files, power, stats, snapshots and node transfer
-- Egg templates, variables and sandboxed installers
+- Workload blueprints, variables and sandboxed installers
 - Backups, schedules, per-server SQLite databases and audit history
 - Argon2id, TOTP 2FA, hashed sessions, bearer API keys and subuser permissions
 - Responsive custom UI with live telemetry and command palette
@@ -62,7 +76,7 @@ Open `http://SERVER_IP:8080`. Public internet deployments should use HTTPS, not 
 
 ## Add a node
 
-1. Open **Admin → Nodes → Add node**
+1. Open **Control Center → Fabric → Attach agent**
 2. Enter the node name, location and public URL
 3. Copy the generated enrollment token/command
 4. On the node machine run:

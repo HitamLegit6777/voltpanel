@@ -11,7 +11,7 @@ Nodes can be in different locations as long as panel↔node HTTPS connectivity e
 
 ## Enrollment
 
-1. Create a node in **Admin → Nodes**
+1. Attach an agent in **Control Center → Fabric**
 2. Copy the one-time token
 3. Run `install-node.sh` or `voltd join`
 4. The node receives its UUID and signing secret

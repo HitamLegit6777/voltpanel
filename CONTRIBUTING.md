@@ -1,6 +1,6 @@
 # Contributing to VoltPanel
 
-Thank you for improving VoltPanel. Contributions are welcome: bug fixes, security hardening, installers, documentation, UI/UX, eggs, platform support and new hosting features.
+Thank you for improving VoltPanel. Contributions are welcome: bug fixes, security hardening, installers, documentation, UI/UX, blueprints, platform support and new hosting features.
 
 ## Before opening work
 
@@ -100,7 +100,7 @@ A PR should include:
 
 Keep commits focused. Do not include runtime data, secrets, databases, logs or generated binaries.
 
-## Egg contributions
+## Blueprint contributions
 
 Provide:
 

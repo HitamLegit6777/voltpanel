@@ -39,7 +39,10 @@ pub fn resolve_startup(db: &Db, server: &Server) -> Result<String> {
     env.insert("SERVER_MEMORY".into(), server.memory_mb.to_string());
     env.insert("SERVER_DISK".into(), server.disk_mb.to_string());
     env.insert("SERVER_CPU".into(), server.cpu_percent.to_string());
-    env.insert("SERVER_PORT".into(), server.port.map(|p| p.to_string()).unwrap_or_default());
+    env.insert(
+        "SERVER_PORT".into(),
+        server.port.map(|p| p.to_string()).unwrap_or_default(),
+    );
     let re = Regex::new(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}").unwrap();
     let out = re.replace_all(&template, |caps: &regex::Captures| {
         env.get(&caps[1]).cloned().unwrap_or_default()
@@ -57,14 +60,27 @@ pub fn env_for_server(db: &Db, server: &Server) -> Vec<(String, String)> {
             }
         }
     }
-    env.push(("HOME".into(), crate::services::proc::server_dir(server).to_string_lossy().to_string()));
-    env.push(("PWD".into(), crate::services::proc::server_dir(server).to_string_lossy().to_string()));
+    env.push((
+        "HOME".into(),
+        crate::services::proc::server_dir(server)
+            .to_string_lossy()
+            .to_string(),
+    ));
+    env.push((
+        "PWD".into(),
+        crate::services::proc::server_dir(server)
+            .to_string_lossy()
+            .to_string(),
+    ));
     env.push(("SERVER_UUID".into(), server.uuid.clone()));
     env.push(("SERVER_NAME".into(), server.name.clone()));
     env.push(("SERVER_MEMORY".into(), server.memory_mb.to_string()));
     env.push(("SERVER_DISK".into(), server.disk_mb.to_string()));
     env.push(("SERVER_CPU".into(), server.cpu_percent.to_string()));
-    env.push(("SERVER_PORT".into(), server.port.map(|p| p.to_string()).unwrap_or_default()));
+    env.push((
+        "SERVER_PORT".into(),
+        server.port.map(|p| p.to_string()).unwrap_or_default(),
+    ));
     env
 }
 
@@ -83,10 +99,20 @@ pub fn validate_value(var: &EggVariable, value: &str) -> Result<()> {
             }
             "numeric" => numeric = true,
             r if r.starts_with("min:") => {
-                min = Some(r[4..].trim().parse().map_err(|_| anyhow!("invalid min rule"))?);
+                min = Some(
+                    r[4..]
+                        .trim()
+                        .parse()
+                        .map_err(|_| anyhow!("invalid min rule"))?,
+                );
             }
             r if r.starts_with("max:") => {
-                max = Some(r[4..].trim().parse().map_err(|_| anyhow!("invalid max rule"))?);
+                max = Some(
+                    r[4..]
+                        .trim()
+                        .parse()
+                        .map_err(|_| anyhow!("invalid max rule"))?,
+                );
             }
             r if r.starts_with("regex:") => {
                 let re = Regex::new(&r[6..]).map_err(|_| anyhow!("invalid regex rule"))?;
@@ -105,7 +131,10 @@ pub fn validate_value(var: &EggVariable, value: &str) -> Result<()> {
         }
     };
     if numeric {
-        let v: f64 = value.trim().parse().map_err(|_| anyhow!("{} must be numeric", var.env_var))?;
+        let v: f64 = value
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("{} must be numeric", var.env_var))?;
         if let Some(mn) = min {
             if v < mn {
                 bail!("{} must be at least {}", var.env_var, fmt_num(mn));
@@ -119,7 +148,11 @@ pub fn validate_value(var: &EggVariable, value: &str) -> Result<()> {
     } else if let (Some(mn), Some(mx)) = (min, max) {
         let len = value.len() as f64;
         if len < mn {
-            bail!("{} must be at least {} characters", var.env_var, fmt_num(mn));
+            bail!(
+                "{} must be at least {} characters",
+                var.env_var,
+                fmt_num(mn)
+            );
         }
         if len > mx {
             bail!("{} must be at most {} characters", var.env_var, fmt_num(mx));
@@ -170,7 +203,12 @@ pub struct InstallScript {
 }
 
 /// Run the egg install script inside a server dir. Blocks until done.
-pub fn run_install(db: &Db, server: &Server, egg: &Egg, notifier: &crate::services::proc::Notifier) -> Result<()> {
+pub fn run_install(
+    db: &Db,
+    server: &Server,
+    egg: &Egg,
+    notifier: &crate::services::proc::Notifier,
+) -> Result<()> {
     let Some(script) = &egg.install_script else {
         return Ok(());
     };
@@ -183,23 +221,53 @@ pub fn run_install(db: &Db, server: &Server, egg: &Egg, notifier: &crate::servic
     crate::isolation::own_tree(&dir, &server.uuid)?;
     let env = env_for_server(db, server);
     let isolation = crate::isolation::IsolationConfig::default();
-    let limits = crate::isolation::Limits { memory_bytes: server.memory_mb.max(256) as u64 * 1_048_576, cpu_percent: server.cpu_percent.max(25) as u64, pids_max: 256 };
-    let cgroup = crate::isolation::Cgroup::create(&isolation, &format!("{}-install", server.uuid), &limits)?;
-    let mut cmd = crate::isolation::sandbox_command(&isolation, &dir, &format!("{}-install", server.uuid), script, &limits)?;
-    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    for (k, v) in &env { cmd.env(k, v); }
-    let child = cmd.spawn().map_err(|e| anyhow!("sandboxed install failed to start: {e}"))?;
+    let limits = crate::isolation::Limits {
+        memory_bytes: server.memory_mb.max(256) as u64 * 1_048_576,
+        cpu_percent: server.cpu_percent.max(25) as u64,
+        pids_max: 256,
+    };
+    let cgroup =
+        crate::isolation::Cgroup::create(&isolation, &format!("{}-install", server.uuid), &limits)?;
+    let mut cmd = crate::isolation::sandbox_command(
+        &isolation,
+        &dir,
+        &format!("{}-install", server.uuid),
+        script,
+        &limits,
+    )?;
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    let child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("sandboxed install failed to start: {e}"))?;
     let pid = child.id();
     cgroup.attach(pid)?;
-    let network = crate::isolation::NetworkLease::configure(pid, &format!("{}-install", server.uuid), &[])?;
+    let network =
+        crate::isolation::NetworkLease::configure(pid, &format!("{}-install", server.uuid), &[])?;
     let out = child.wait_with_output()?;
     drop(network);
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr).to_string();
-        notifier.notify("error", &format!("Install failed for '{}'", server.name), &msg, Some(server.id));
-        bail!("install script failed: {}", msg.lines().next().unwrap_or("unknown error"));
+        notifier.notify(
+            "error",
+            &format!("Install failed for '{}'", server.name),
+            &msg,
+            Some(server.id),
+        );
+        bail!(
+            "install script failed: {}",
+            msg.lines().next().unwrap_or("unknown error")
+        );
     }
-    notifier.notify("success", &format!("'{}' installed", server.name), "Install script completed", Some(server.id));
+    notifier.notify(
+        "success",
+        &format!("'{}' installed", server.name),
+        "Install script completed",
+        Some(server.id),
+    );
     Ok(())
 }
 
@@ -213,13 +281,19 @@ pub fn build_default_config(db: &Db, server: &Server) -> Result<Option<serde_jso
     for (v, val) in resolve_variables(db, server)? {
         env.insert(v.env_var.clone(), val);
     }
-    env.insert("SERVER_PORT".into(), server.port.map(|p| p.to_string()).unwrap_or_default());
+    env.insert(
+        "SERVER_PORT".into(),
+        server.port.map(|p| p.to_string()).unwrap_or_default(),
+    );
     env.insert("SERVER_NAME".into(), server.name.clone());
     let mut text = cfg.clone();
     let re = Regex::new(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}").unwrap();
-    text = re.replace_all(&text, |caps: &regex::Captures| {
-        env.get(&caps[1]).cloned().unwrap_or_default()
-    })
-    .to_string();
-    Ok(Some(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)))
+    text = re
+        .replace_all(&text, |caps: &regex::Captures| {
+            env.get(&caps[1]).cloned().unwrap_or_default()
+        })
+        .to_string();
+    Ok(Some(
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    ))
 }

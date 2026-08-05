@@ -1,13 +1,13 @@
 //! Auth + user management endpoints.
-use super::{ok, ApiError, ApiResult, AdminUser, AppState, AuthUser};
+use super::{ok, AdminUser, ApiError, ApiResult, AppState, AuthUser};
 use crate::auth;
 use crate::models::{self, User};
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Json;
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -36,14 +36,19 @@ pub async fn login(
 ) -> ApiResult<axum::response::Response> {
     let ip = peer.ip().to_string();
     auth::rate_limit(&state.db, &state.cfg, &format!("login:{ip}"))?;
-    let user = models::get_user_by_name(&state.db, &req.username.trim()).map_err(|_| ApiError::unauthorized("invalid credentials"))?;
+    let user = models::get_user_by_name(&state.db, &req.username.trim())
+        .map_err(|_| ApiError::unauthorized("invalid credentials"))?;
     if !user.active {
         return Err(ApiError::forbidden("account disabled"));
     }
     let stored = {
         let conn = state.db.lock();
-        conn.query_row("SELECT password_hash FROM users WHERE id=?1", [user.id], |r| r.get::<_, String>(0))
-            .map_err(|_| ApiError::unauthorized("invalid credentials"))?
+        conn.query_row(
+            "SELECT password_hash FROM users WHERE id=?1",
+            [user.id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|_| ApiError::unauthorized("invalid credentials"))?
     };
     if !auth::verify_password(&stored, &req.password) {
         return Err(ApiError::unauthorized("invalid credentials"));
@@ -67,12 +72,26 @@ pub async fn login(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let (raw, expires) = auth::create_session(&state.db, &state.cfg, user.id, &ua, &ip, req.remember)?;
-    models::audit(&state.db, Some(user.id), "login", "session", &ip, "user logged in")?;
+    let (raw, expires) =
+        auth::create_session(&state.db, &state.cfg, user.id, &ua, &ip, req.remember)?;
+    models::audit(
+        &state.db,
+        Some(user.id),
+        "login",
+        "session",
+        &ip,
+        "user logged in",
+    )?;
     let cookie = {
-        let mut c = format!("{}={}; Path=/; HttpOnly; SameSite=Lax", crate::auth::SESSION_COOKIE, raw);
+        let mut c = format!(
+            "{}={}; Path=/; HttpOnly; SameSite=Lax",
+            crate::auth::SESSION_COOKIE,
+            raw
+        );
         if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(&expires) {
-            let max_age = (exp.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds().max(0);
+            let max_age = (exp.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                .num_seconds()
+                .max(0);
             if req.remember {
                 c.push_str(&format!("; Max-Age={max_age}"));
             }
@@ -100,15 +119,30 @@ pub async fn logout(
     let raw = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|c| c.split(';').find(|c| c.trim_start().starts_with(&format!("{}=", crate::auth::SESSION_COOKIE))))
+        .and_then(|c| {
+            c.split(';').find(|c| {
+                c.trim_start()
+                    .starts_with(&format!("{}=", crate::auth::SESSION_COOKIE))
+            })
+        })
         .and_then(|c| c.split_once('='))
         .map(|(_, v)| v.trim().to_string());
     if let Some(raw) = raw {
         let _ = auth::revoke_session(&state.db, &raw);
     }
-    models::audit(&state.db, Some(u.id), "logout", "session", "", "user logged out")?;
+    models::audit(
+        &state.db,
+        Some(u.id),
+        "logout",
+        "session",
+        "",
+        "user logged out",
+    )?;
     let mut resp = ok(serde_json::json!({ "ok": true })).into_response();
-    let clear = format!("{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", crate::auth::SESSION_COOKIE);
+    let clear = format!(
+        "{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        crate::auth::SESSION_COOKIE
+    );
     if let Ok(v) = axum::http::HeaderValue::from_str(&clear) {
         resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
     }
@@ -128,7 +162,11 @@ pub struct UpdateProfileReq {
     pub about: Option<String>,
 }
 
-pub async fn update_profile(State(state): State<AppState>, AuthUser(u): AuthUser, Json(req): Json<UpdateProfileReq>) -> ApiResult<Json<User>> {
+pub async fn update_profile(
+    State(state): State<AppState>,
+    AuthUser(u): AuthUser,
+    Json(req): Json<UpdateProfileReq>,
+) -> ApiResult<Json<User>> {
     let mut u = models::get_user(&state.db, u.id)?;
     if let Some(email) = req.email {
         if !email.contains('@') {
@@ -158,13 +196,22 @@ pub struct ChangePasswordReq {
     pub new: String,
 }
 
-pub async fn change_password(State(state): State<AppState>, AuthUser(u): AuthUser, Json(req): Json<ChangePasswordReq>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn change_password(
+    State(state): State<AppState>,
+    AuthUser(u): AuthUser,
+    Json(req): Json<ChangePasswordReq>,
+) -> ApiResult<Json<serde_json::Value>> {
     if req.new.len() < state.cfg.security.password_min_len {
-        return Err(ApiError::bad_request(format!("password must be at least {} chars", state.cfg.security.password_min_len)));
+        return Err(ApiError::bad_request(format!(
+            "password must be at least {} chars",
+            state.cfg.security.password_min_len
+        )));
     }
     let stored = {
         let conn = state.db.lock();
-        conn.query_row("SELECT password_hash FROM users WHERE id=?1", [u.id], |r| r.get::<_, String>(0))?
+        conn.query_row("SELECT password_hash FROM users WHERE id=?1", [u.id], |r| {
+            r.get::<_, String>(0)
+        })?
     };
     if !auth::verify_password(&stored, &req.current) {
         return Err(ApiError::bad_request("current password incorrect"));
@@ -172,7 +219,14 @@ pub async fn change_password(State(state): State<AppState>, AuthUser(u): AuthUse
     let hash = auth::hash_password(&state.cfg, &req.new)?;
     models::set_password(&state.db, u.id, &hash)?;
     auth::revoke_all_user_sessions(&state.db, u.id, None)?;
-    models::audit(&state.db, Some(u.id), "password_change", "user", "", "password changed")?;
+    models::audit(
+        &state.db,
+        Some(u.id),
+        "password_change",
+        "user",
+        "",
+        "password changed",
+    )?;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
 
@@ -185,12 +239,18 @@ pub struct TotpSetupResp {
     pub qr_b64: String,
 }
 
-pub async fn setup_2fa(State(_state): State<AppState>, AuthUser(u): AuthUser) -> ApiResult<Json<TotpSetupResp>> {
+pub async fn setup_2fa(
+    State(_state): State<AppState>,
+    AuthUser(u): AuthUser,
+) -> ApiResult<Json<TotpSetupResp>> {
     let secret = auth::generate_totp_secret()?;
     let uri = auth::totp_uri(&secret, &u.username)?;
     // render QR as PNG (frontend shows it as data:image/png)
     let qr = qrcode::QrCode::new(uri.clone())?;
-    let img = qr.render::<image::Luma<u8>>().min_dimensions(256, 256).build();
+    let img = qr
+        .render::<image::Luma<u8>>()
+        .min_dimensions(256, 256)
+        .build();
     let mut cursor = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageLuma8(img).write_to(&mut cursor, image::ImageFormat::Png)?;
     let b64 = STANDARD.encode(cursor.into_inner());
@@ -207,21 +267,43 @@ pub struct TotpConfirmReq {
     pub code: String,
 }
 
-pub async fn confirm_2fa(State(state): State<AppState>, AuthUser(u): AuthUser, Json(req): Json<TotpConfirmReq>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn confirm_2fa(
+    State(state): State<AppState>,
+    AuthUser(u): AuthUser,
+    Json(req): Json<TotpConfirmReq>,
+) -> ApiResult<Json<serde_json::Value>> {
     if !auth::verify_totp(&req.secret, &req.code) {
         return Err(ApiError::bad_request("invalid code"));
     }
     models::set_twofa_secret(&state.db, u.id, Some(&req.secret))?;
-    models::audit(&state.db, Some(u.id), "2fa_enable", "user", "", "2FA enabled")?;
+    models::audit(
+        &state.db,
+        Some(u.id),
+        "2fa_enable",
+        "user",
+        "",
+        "2FA enabled",
+    )?;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
 
-pub async fn disable_2fa(State(state): State<AppState>, AuthUser(u): AuthUser, Json(req): Json<TotpConfirmReq>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn disable_2fa(
+    State(state): State<AppState>,
+    AuthUser(u): AuthUser,
+    Json(req): Json<TotpConfirmReq>,
+) -> ApiResult<Json<serde_json::Value>> {
     if !auth::verify_totp(&req.secret, &req.code) {
         return Err(ApiError::bad_request("invalid code"));
     }
     models::set_twofa_secret(&state.db, u.id, None)?;
-    models::audit(&state.db, Some(u.id), "2fa_disable", "user", "", "2FA disabled")?;
+    models::audit(
+        &state.db,
+        Some(u.id),
+        "2fa_disable",
+        "user",
+        "",
+        "2FA disabled",
+    )?;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
 
@@ -235,7 +317,11 @@ pub struct CreateUserReq {
     pub root_admin: bool,
 }
 
-pub async fn admin_create_user(State(state): State<AppState>, _a: AdminUser, Json(req): Json<CreateUserReq>) -> ApiResult<Json<User>> {
+pub async fn admin_create_user(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Json(req): Json<CreateUserReq>,
+) -> ApiResult<Json<User>> {
     if req.username.len() < 3 {
         return Err(ApiError::bad_request("username too short"));
     }
@@ -249,11 +335,22 @@ pub async fn admin_create_user(State(state): State<AppState>, _a: AdminUser, Jso
         return Err(ApiError::bad_request("username taken"));
     }
     let hash = auth::hash_password(&state.cfg, &req.password)?;
-    let id = models::create_user(&state.db, &req.username, &req.email.trim(), &hash, req.root_admin, &state.cfg.general.locale, "dark")?;
+    let id = models::create_user(
+        &state.db,
+        &req.username,
+        &req.email.trim(),
+        &hash,
+        req.root_admin,
+        &state.cfg.general.locale,
+        "dark",
+    )?;
     Ok(Json(models::get_user(&state.db, id)?))
 }
 
-pub async fn admin_list_users(State(state): State<AppState>, _a: AdminUser) -> ApiResult<Json<Vec<User>>> {
+pub async fn admin_list_users(
+    State(state): State<AppState>,
+    _a: AdminUser,
+) -> ApiResult<Json<Vec<User>>> {
     Ok(Json(models::list_users(&state.db)?))
 }
 
@@ -268,10 +365,17 @@ pub struct AdminUpdateUserReq {
     pub reset_password: Option<String>,
 }
 
-pub async fn admin_update_user(State(state): State<AppState>, _a: AdminUser, axum::extract::Path(id): axum::extract::Path<i64>, Json(req): Json<AdminUpdateUserReq>) -> ApiResult<Json<User>> {
+pub async fn admin_update_user(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(req): Json<AdminUpdateUserReq>,
+) -> ApiResult<Json<User>> {
     let mut u = models::get_user(&state.db, id)?;
     if u.id == 1 && (req.root_admin == Some(false) || req.active == Some(false)) {
-        return Err(ApiError::bad_request("cannot demote or disable the primary admin"));
+        return Err(ApiError::bad_request(
+            "cannot demote or disable the primary admin",
+        ));
     }
     if let Some(email) = req.email {
         if !email.contains('@') || email.trim().is_empty() {
@@ -306,17 +410,31 @@ pub async fn admin_update_user(State(state): State<AppState>, _a: AdminUser, axu
     Ok(Json(u))
 }
 
-pub async fn admin_delete_user(State(state): State<AppState>, _a: AdminUser, axum::extract::Path(id): axum::extract::Path<i64>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn admin_delete_user(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
     if id == 1 {
         return Err(ApiError::bad_request("cannot delete the first admin"));
     }
     let u = models::get_user(&state.db, id)?;
-    models::audit(&state.db, Some(u.id), "user_delete", "user", "", "user deleted by admin")?;
+    models::audit(
+        &state.db,
+        Some(u.id),
+        "user_delete",
+        "user",
+        "",
+        "user deleted by admin",
+    )?;
     models::delete_user(&state.db, id)?;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
 
-pub async fn admin_sessions(State(state): State<AppState>, _a: AdminUser) -> ApiResult<Json<serde_json::Value>> {
+pub async fn admin_sessions(
+    State(state): State<AppState>,
+    _a: AdminUser,
+) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock();
     let mut stmt = conn.prepare("SELECT token,user_id,user_agent,ip,created_at,expires_at,revoked,remember,last_seen FROM sessions ORDER BY id DESC LIMIT 100")?;
     let rows = stmt.query_map([], |r| {
@@ -339,8 +457,15 @@ pub async fn admin_sessions(State(state): State<AppState>, _a: AdminUser) -> Api
     Ok(Json(serde_json::json!({ "data": out })))
 }
 
-pub async fn admin_revoke_session(State(state): State<AppState>, _a: AdminUser, axum::extract::Path(token_prefix): axum::extract::Path<String>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn admin_revoke_session(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    axum::extract::Path(token_prefix): axum::extract::Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock();
-    let n = conn.execute("UPDATE sessions SET revoked=1 WHERE token LIKE ?1", [format!("{token_prefix}%")])?;
+    let n = conn.execute(
+        "UPDATE sessions SET revoked=1 WHERE token LIKE ?1",
+        [format!("{token_prefix}%")],
+    )?;
     Ok(ok(serde_json::json!({ "revoked": n })))
 }

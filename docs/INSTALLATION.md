@@ -74,7 +74,7 @@ curl -I https://panel.example.com
 
 ## Install a node
 
-Create a node from **Admin → Nodes** first. Copy its enrollment token.
+Create an agent from **Control Center → Fabric** first. Copy its enrollment token.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-node.sh \

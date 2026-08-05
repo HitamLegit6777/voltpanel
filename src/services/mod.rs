@@ -5,26 +5,25 @@ pub mod console;
 pub mod databases;
 pub mod egg;
 pub mod files;
-pub mod proc;
 pub mod node;
+pub mod proc;
 pub mod scheduler;
 pub mod websites;
 
 use crate::config::Config;
 use crate::db::Db;
 use crate::models;
+pub use console::ConsoleHub;
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-pub use console::ConsoleHub;
 
-pub use proc::{Notifier, Notification, ProcManager, ProcessInfo};
+pub use proc::{Notification, Notifier, ProcManager, ProcessInfo};
 
 // ---------------- Resource monitor (per-server limits + auto-kill) ----------------
-
 
 #[derive(Clone, Debug)]
 pub struct ServerLimits {
@@ -90,7 +89,9 @@ impl Monitor {
                 let (prx, ptx) = prev.unwrap_or((info.bandwidth_rx_bytes, info.bandwidth_tx_bytes));
                 let drx = info.bandwidth_rx_bytes.saturating_sub(prx);
                 let dtx = info.bandwidth_tx_bytes.saturating_sub(ptx);
-                self.last_bandwidth.lock().insert(sid, (info.bandwidth_rx_bytes, info.bandwidth_tx_bytes));
+                self.last_bandwidth
+                    .lock()
+                    .insert(sid, (info.bandwidth_rx_bytes, info.bandwidth_tx_bytes));
                 if lim.bandwidth_rx > 0 && drx > lim.bandwidth_rx {
                     over = true;
                     reason = format!("rx {}KB > {}KB", drx / 1024, lim.bandwidth_rx / 1024);
@@ -174,10 +175,18 @@ pub fn node_stats() -> NodeStats {
         cpu_percent: cpu.cpu_usage() as f64,
         mem_total,
         mem_used,
-        mem_percent: if mem_total > 0 { mem_used as f64 / mem_total as f64 * 100.0 } else { 0.0 },
+        mem_percent: if mem_total > 0 {
+            mem_used as f64 / mem_total as f64 * 100.0
+        } else {
+            0.0
+        },
         disk_total,
         disk_used,
-        disk_percent: if disk_total > 0 { disk_used as f64 / disk_total as f64 * 100.0 } else { 0.0 },
+        disk_percent: if disk_total > 0 {
+            disk_used as f64 / disk_total as f64 * 100.0
+        } else {
+            0.0
+        },
         load_1: 0.0,
         load_5: 0.0,
         load_15: 0.0,
@@ -251,17 +260,32 @@ pub async fn spawn_background(
         let db = db.clone();
         let running = running.clone();
         tokio::spawn(async move {
-            let client = match crate::services::node::NodeClient::new() { Ok(v) => v, Err(_) => return };
+            let client = match crate::services::node::NodeClient::new() {
+                Ok(v) => v,
+                Err(_) => return,
+            };
             let mut tick = tokio::time::interval(Duration::from_secs(15));
             loop {
                 tick.tick().await;
-                if !running.load(Ordering::Relaxed) { break; }
-                let servers = match crate::models::list_servers(&db, None, false) { Ok(v) => v, Err(_) => continue };
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
+                let servers = match crate::models::list_servers(&db, None, false) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 for server in servers.into_iter().filter(|s| s.node != "local") {
-                    let node = match crate::nodes::get_by_name(&db, &server.node) { Ok(v) if v.online() => v, _ => continue };
+                    let node = match crate::nodes::get_by_name(&db, &server.node) {
+                        Ok(v) if v.online() => v,
+                        _ => continue,
+                    };
                     match client.stats(&node, &server.uuid).await {
-                        Ok(stats) => { let _ = crate::models::set_server_status(&db, server.id, &stats.state); },
-                        Err(e) => { let _ = crate::nodes::set_error(&db, &node.uuid, &e.to_string()); },
+                        Ok(stats) => {
+                            let _ = crate::models::set_server_status(&db, server.id, &stats.state);
+                        }
+                        Err(e) => {
+                            let _ = crate::nodes::set_error(&db, &node.uuid, &e.to_string());
+                        }
                     }
                 }
             }
