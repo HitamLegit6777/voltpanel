@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_PATH=${BASH_SOURCE[0]:-$0}
+SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
 if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/lib/common.sh"
