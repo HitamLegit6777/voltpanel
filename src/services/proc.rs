@@ -217,17 +217,17 @@ impl ProcManager {
             .map(|t| (Utc::now() - t).num_seconds().max(0) as u64)
             .unwrap_or(0);
         ProcessInfo {
-            pid: pid,
+            pid,
             status: status.clone(),
-            started_at: started_at,
-            exit_code: exit_code,
+            started_at,
+            exit_code,
             cpu_percent: cpu,
             memory_bytes: mem,
             memory_percent: mem_percent(mem, server.memory_mb as u64),
             bandwidth_rx_bytes: rx,
             bandwidth_tx_bytes: tx,
             disk_usage_bytes: disk,
-            uptime_secs: uptime_secs,
+            uptime_secs,
         }
     }
 
@@ -560,11 +560,13 @@ pub fn server_dir(server: &Server) -> PathBuf {
 
 pub fn fs_usage(dir: &Path) -> Result<u64> {
     let mut total: u64 = 0;
-    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
-        if let Ok(e) = entry {
-            if e.file_type().is_file() {
-                total += e.metadata().map(|m| m.len()).unwrap_or(0);
-            }
+    for e in walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
+        if e.file_type().is_file() {
+            total += e.metadata().map(|m| m.len()).unwrap_or(0);
         }
     }
     Ok(total)
@@ -591,7 +593,7 @@ fn read_proc_stat(pid: u32) -> Option<(u64, u64)> {
         .ok()?
         .read_to_string(&mut s)
         .ok()?;
-    let rest = s.splitn(3, ')').nth(1)?;
+    let rest = s.split(')').nth(1)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();
     if fields.len() < 22 {
         return None;

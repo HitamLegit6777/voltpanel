@@ -36,7 +36,7 @@ pub async fn login(
 ) -> ApiResult<axum::response::Response> {
     let ip = peer.ip().to_string();
     auth::rate_limit(&state.db, &state.cfg, &format!("login:{ip}"))?;
-    let user = models::get_user_by_name(&state.db, &req.username.trim())
+    let user = models::get_user_by_name(&state.db, req.username.trim())
         .map_err(|_| ApiError::unauthorized("invalid credentials"))?;
     if !user.active {
         return Err(ApiError::forbidden("account disabled"));
@@ -338,7 +338,7 @@ pub async fn admin_create_user(
     let id = models::create_user(
         &state.db,
         &req.username,
-        &req.email.trim(),
+        req.email.trim(),
         &hash,
         req.root_admin,
         &state.cfg.general.locale,

@@ -547,12 +547,10 @@ pub async fn summary(
     let root = files::server_root(&state.cfg, &s);
     let mut total = 0u64;
     let mut entries = 0usize;
-    for entry in walkdir::WalkDir::new(&root) {
-        if let Ok(e) = entry {
-            entries += 1;
-            if e.file_type().is_file() {
-                total += e.metadata().map(|m| m.len()).unwrap_or(0);
-            }
+    for e in walkdir::WalkDir::new(&root).into_iter().flatten() {
+        entries += 1;
+        if e.file_type().is_file() {
+            total += e.metadata().map(|m| m.len()).unwrap_or(0);
         }
     }
     Ok(Json(FileSummary {

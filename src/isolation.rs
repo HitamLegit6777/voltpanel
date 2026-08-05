@@ -163,15 +163,14 @@ pub fn prepare_root(root: &Path, uuid: &str) -> Result<(u32, u32)> {
                 continue;
             }
             if let Ok(meta) = entry.metadata() {
-                if meta.uid() >= MIN_SERVER_UID && meta.uid() < MIN_SERVER_UID + UID_RANGE {
+                if (MIN_SERVER_UID..MIN_SERVER_UID + UID_RANGE).contains(&meta.uid()) {
                     used.insert(meta.uid());
                 }
             }
         }
     }
     let current = fs::metadata(root)?.uid();
-    let uid = if current >= MIN_SERVER_UID
-        && current < MIN_SERVER_UID + UID_RANGE
+    let uid = if (MIN_SERVER_UID..MIN_SERVER_UID + UID_RANGE).contains(&current)
         && !used.contains(&current)
     {
         current

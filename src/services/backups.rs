@@ -53,7 +53,7 @@ pub async fn restore(db: &Db, cfg: &Config, backup_id: i64) -> Result<()> {
         let mut zip = zip::ZipArchive::new(f)?;
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i)?;
-            let out = crate::services::files::safe_join(&staging, &entry.name())?;
+            let out = crate::services::files::safe_join(&staging, entry.name())?;
             if entry.is_dir() {
                 fs::create_dir_all(&out)?;
                 continue;

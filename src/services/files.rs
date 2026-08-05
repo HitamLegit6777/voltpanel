@@ -324,7 +324,7 @@ pub fn unzip_into(cfg: &Config, server: &Server, archive_rel: &str, dest_rel: &s
     let mut zip = zip::ZipArchive::new(f)?;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i)?;
-        let out_path = safe_join(&dest, &entry.name())?;
+        let out_path = safe_join(&dest, entry.name())?;
         if entry.is_dir() {
             fs::create_dir_all(&out_path)?;
             continue;

@@ -39,6 +39,12 @@ pub struct Monitor {
     last_bandwidth: Mutex<HashMap<i64, (u64, u64)>>,
     overs: Mutex<HashMap<i64, u32>>,
 }
+impl Default for Monitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Monitor {
     pub fn new() -> Self {
         Self {
