@@ -1,0 +1,31 @@
+[Unit]
+Description=VoltPanel game hosting control plane
+Documentation=https://github.com/HitamLegit6777/voltpanel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/voltpanel
+Environment=VOLTPANEL_CONFIG=/etc/voltpanel/config.toml
+Environment=RUST_LOG=info
+ExecStart=/usr/local/bin/voltpanel
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=45
+UMask=0077
+Delegate=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/voltpanel /run/voltpanel /sys/fs/cgroup
+CapabilityBoundingSet=CAP_CHOWN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_KILL
+AmbientCapabilities=CAP_CHOWN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_KILL
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

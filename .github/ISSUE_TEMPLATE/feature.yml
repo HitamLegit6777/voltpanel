@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a useful VoltPanel improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe behavior, UI/API changes and alternatives.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Area
+      options: [Panel, Node daemon, Isolation, Multi-node, UI/UX, Installer, Documentation, Egg ecosystem]
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and compatibility
+      description: Does this affect isolation, permissions, migrations or local/remote parity?
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: Project principles
+      options:
+        - label: This can remain free and self-hosted.
+          required: true
+        - label: This does not require Docker as the default runtime.
+          required: true

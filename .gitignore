@@ -1,0 +1,14 @@
+/target/
+/data/
+/backups/
+/logs/
+/websites/
+/eggs/
+config.toml
+voltd.toml
+*.db
+*.db-shm
+*.db-wal
+err_*.txt
+*.log
+.DS_Store

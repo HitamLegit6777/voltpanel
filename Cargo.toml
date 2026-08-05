@@ -1,0 +1,66 @@
+[package]
+name = "voltpanel"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight, Docker-free game/server/web hosting panel written in Rust"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["multipart", "macros", "ws"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors", "trace", "limit", "set-header"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+serde_urlencoded = "0.7"
+tokio-serde = "0.8"
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde", "fast-rng"] }
+argon2 = "0.5"
+qrcode = "0.13"
+image = { version = "0.24", default-features = false, features = ["png"] }
+rand = "0.8"
+futures = "0.3"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+regex = "1"
+glob = "0.3"
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+walkdir = "2"
+libc = "0.2"
+sysinfo = "0.30"
+toml = "0.8"
+cron = "0.12"
+url = "2"
+mime_guess = "2"
+percent-encoding = "2"
+async-trait = "0.1"
+futures-channel = "0.3"
+parking_lot = "0.12"
+tokio-stream = "0.1"
+async-stream = "0.3"
+arc-swap = "1"
+dashmap = "6"
+hmac = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+hostname = "0.4"
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,52 @@
+# ============ VoltPanel Configuration ============
+# Copy to config.toml and adjust. Paths below are relative to the data_dir.
+
+[general]
+instance_name = "VoltPanel"
+# locale: en / id
+locale = "en"
+timezone = "UTC"
+# Base data directory (absolute or relative to cwd)
+data_dir = "./data"
+log_level = "info"
+
+[web]
+# Bind address. For public access use 0.0.0.0:8080 behind a reverse proxy.
+listen = "127.0.0.1:8080"
+base_path = "/"
+session_ttl_hours = 24
+max_body_mb = 64
+
+[paths]
+servers_dir = "servers"
+backups_dir = "backups"
+eggs_dir = "eggs"
+logs_dir = "logs"
+website_dir = "websites"
+
+[limits]
+default_memory_mb = 1024
+default_disk_mb = 8192
+default_cpu_percent = 100
+max_memory_mb = 16384
+max_servers_per_user = 16
+
+[security]
+argon2_cost = 3
+argon2_mem_kib = 65536
+# Change this! Used to sign session tokens.
+jwt_secret = "CHANGE_ME_to_a_long_random_string"
+rate_limit_per_min = 120
+password_min_len = 8
+# System user to drop privileges to when spawning game servers.
+userland = "nobody"
+allow_cross_server_dir = false
+
+[features]
+enable_backups = true
+enable_databases = true
+enable_schedules = true
+enable_api_keys = true
+enable_2fa = true
+enable_websites = true
+enable_audit_log = true
