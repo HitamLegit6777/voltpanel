@@ -13,3 +13,4 @@ voltd.toml
 err_*.txt
 *.log
 .DS_Store
+/graphify-out/
