@@ -1,5 +1,6 @@
 //! Backup endpoints.
 use super::{data, ok, ApiError, ApiResult, AppState, AuthUser};
+use crate::capability::Capability;
 use crate::models::{self, User};
 use crate::services::backups;
 use axum::extract::{Path, State};
@@ -23,7 +24,7 @@ pub async fn list(
     Path(server_id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
     access_ok(&state, &u, server_id)?;
-    super::require_server_permission(&state, &u, server_id, "backups.read")?;
+    super::require_capability(&state, &u, server_id, Capability::BackupsRead)?;
     let backups = models::list_backups(&state.db, server_id)?;
     Ok(data(serde_json::to_value(backups)?))
 }
@@ -40,7 +41,7 @@ pub async fn create(
     Json(req): Json<CreateReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let server = access_ok(&state, &u, server_id)?;
-    super::require_server_permission(&state, &u, server_id, "backups.write")?;
+    super::require_capability(&state, &u, server_id, Capability::BackupsWrite)?;
     let name = req
         .name
         .unwrap_or_else(|| format!("backup-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
@@ -113,7 +114,7 @@ pub async fn download(
 ) -> ApiResult<Response> {
     let b = models::get_backup(&state.db, backup_id)?;
     access_ok(&state, &u, b.server_id)?;
-    super::require_server_permission(&state, &u, b.server_id, "backups.read")?;
+    super::require_capability(&state, &u, b.server_id, Capability::BackupsRead)?;
     let (name, bytes) = backups::download(&state.db, backup_id)?;
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -134,7 +135,7 @@ pub async fn restore(
 ) -> ApiResult<Json<serde_json::Value>> {
     let b = models::get_backup(&state.db, backup_id)?;
     let server = access_ok(&state, &u, b.server_id)?;
-    super::require_server_permission(&state, &u, b.server_id, "backups.write")?;
+    super::require_capability(&state, &u, b.server_id, Capability::BackupsWrite)?;
     if server.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &server.node)?;
         let bytes = std::fs::read(&b.path)?;
@@ -165,7 +166,7 @@ pub async fn delete(
 ) -> ApiResult<Json<serde_json::Value>> {
     let b = models::get_backup(&state.db, backup_id)?;
     access_ok(&state, &u, b.server_id)?;
-    super::require_server_permission(&state, &u, b.server_id, "backups.write")?;
+    super::require_capability(&state, &u, b.server_id, Capability::BackupsWrite)?;
     backups::delete(&state.db, backup_id)?;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
@@ -177,7 +178,7 @@ pub async fn verify(
 ) -> ApiResult<Json<serde_json::Value>> {
     let b = models::get_backup(&state.db, backup_id)?;
     access_ok(&state, &u, b.server_id)?;
-    super::require_server_permission(&state, &u, b.server_id, "backups.read")?;
+    super::require_capability(&state, &u, b.server_id, Capability::BackupsRead)?;
     let ok = backups::verify(&state.db, backup_id)?;
     Ok(Json(serde_json::json!({ "ok": ok, "checksum_ok": ok })))
 }
@@ -194,7 +195,7 @@ pub async fn cleanup(
     Json(req): Json<CleanupReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     access_ok(&state, &u, server_id)?;
-    super::require_server_permission(&state, &u, server_id, "backups.write")?;
+    super::require_capability(&state, &u, server_id, Capability::BackupsWrite)?;
     let removed = backups::cleanup_old(&state.db, &state.cfg, server_id, req.keep).await?;
     Ok(ok(serde_json::json!({ "removed": removed })))
 }

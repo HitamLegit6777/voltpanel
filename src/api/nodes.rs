@@ -180,13 +180,17 @@ pub async fn regenerate_enrollment(
 pub struct EnrollmentRequest {
     pub token: String,
     pub heartbeat: NodeHeartbeat,
+    /// SHA-256 fingerprint of the agent's self-signed certificate. Absent for
+    /// agents enrolled with `--plaintext`.
+    #[serde(default)]
+    pub tls_fingerprint: String,
 }
 
 pub async fn enroll(
     State(state): State<AppState>,
     Json(req): Json<EnrollmentRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let n = nodes::enroll(&state.db, &req.token, &req.heartbeat)
+    let n = nodes::enroll(&state.db, &req.token, &req.heartbeat, &req.tls_fingerprint)
         .map_err(|e| ApiError::unauthorized(e.to_string()))?;
     nodes::record_event(
         &state.db,
@@ -381,7 +385,7 @@ pub async fn transfer_server(
             return Err(e.into());
         }
     };
-    let blueprint = crate::models::get_blueprint(&state.db, server.egg_id)?;
+    let blueprint = crate::models::get_blueprint(&state.db, server.blueprint_id)?;
     let spec = crate::node_protocol::ServerSpec {
         uuid: server.uuid.clone(),
         name: server.name.clone(),

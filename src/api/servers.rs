@@ -1,9 +1,12 @@
 //! Workspace management endpoints: lifecycle, launch inputs, team access, and placement.
 use super::{data, ok, AdminUser, ApiError, ApiResult, AppState, AuthUser};
+use crate::capability::{power_capability, Capability, Grant, Role};
+use crate::node_protocol::PowerAction;
 use crate::models::{self, Server, User};
 use crate::services::{self, blueprint};
 use axum::extract::{Path, State};
 use axum::Json;
+use std::str::FromStr;
 use serde::Deserialize;
 
 /// Runtime limit override from the settings table, falling back to config.
@@ -53,7 +56,7 @@ pub async fn list(
 
 pub async fn admin_list_all(
     State(state): State<AppState>,
-    _a: AdminUser,
+    AdminUser(admin): AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
     let servers = models::list_servers(&state.db, None, false)?;
     let mut out = Vec::new();
@@ -61,20 +64,7 @@ pub async fn admin_list_all(
         out.push(server_json(
             &state,
             s,
-            &User {
-                id: 0,
-                username: String::new(),
-                email: String::new(),
-                avatar: String::new(),
-                language: String::new(),
-                theme: String::new(),
-                root_admin: true,
-                active: true,
-                twofa_secret: None,
-                about: String::new(),
-                created_at: String::new(),
-                updated_at: String::new(),
-            },
+            &admin,
         ));
     }
     Ok(Json(serde_json::json!({ "data": out })))
@@ -82,7 +72,7 @@ pub async fn admin_list_all(
 
 fn server_json(state: &AppState, s: &Server, u: &User) -> serde_json::Value {
     let info = state.procs.info(s);
-    let blueprint = models::get_blueprint(&state.db, s.egg_id).ok();
+    let blueprint = models::get_blueprint(&state.db, s.blueprint_id).ok();
     serde_json::json!({
         "id": s.id,
         "uuid": s.uuid,
@@ -96,7 +86,7 @@ fn server_json(state: &AppState, s: &Server, u: &User) -> serde_json::Value {
         "user_id": s.user_id,
         "cpu_percent": s.cpu_percent,
         "blueprint": blueprint.map(|definition| definition.name).unwrap_or_default(),
-        "blueprint_id": s.egg_id,
+        "blueprint_id": s.blueprint_id,
         "suspended": s.suspended,
         "auto_restart": s.auto_restart,
         "restart_count": s.restart_count,
@@ -114,10 +104,10 @@ pub async fn get(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    let blueprint = models::get_blueprint(&state.db, s.egg_id)?;
+    let blueprint = models::get_blueprint(&state.db, s.blueprint_id)?;
     let can_view_secrets = u.root_admin
         || u.id == s.user_id
-        || models::user_has_server_permission(&state.db, &u, s.id, "startup.secrets")?;
+        || models::user_has_capability(&state.db, &u, s.id, Capability::StartupSecrets)?;
     let vars: Vec<serde_json::Value> = blueprint::resolve_variables(&state.db, &s)?
         .into_iter()
         .filter(|(v, _)| v.user_viewable || can_view_secrets)
@@ -130,7 +120,8 @@ pub async fn get(
                 "default": v.default_value,
                 "user_viewable": v.user_viewable,
                 "user_editable": v.user_editable,
-                "rules": v.rules,
+                "required": v.required,
+                "kind": v.kind,
             })
         })
         .collect();
@@ -150,12 +141,10 @@ pub async fn get(
         "ports": allocated,
         "websites": websites,
         "databases": databases,
-        "subusers": subusers.iter().map(|(su, perms)| serde_json::json!({
-            "id": su.id, "username": su.username, "email": su.email, "permissions": perms
-        })).collect::<Vec<_>>(),
+        "subusers": subusers.iter().map(|(su, grant)| subuser_json(su, grant)).collect::<Vec<_>>(),
         "schedules": schedules,
         "launch_command": s.startup,
-        "runtime_hint": s.docker_image,
+        "runtime_hint": s.runtime_hint,
         "resolved_launch": blueprint::resolve_startup(&state.db, &s).unwrap_or_default(),
     })))
 }
@@ -164,17 +153,15 @@ pub async fn get(
 pub struct CreateServerReq {
     pub name: String,
     pub user_id: i64,
-    #[serde(alias = "egg_id")]
     pub blueprint_id: i64,
     pub description: Option<String>,
-    #[serde(alias = "docker_image")]
     pub runtime_hint: Option<String>,
     pub memory_mb: Option<i64>,
     pub disk_mb: Option<i64>,
     pub cpu_percent: Option<i64>,
-    pub threads: Option<String>,
     pub variables: Option<std::collections::HashMap<String, String>>,
     pub port: Option<i64>,
+    #[serde(default)]
     pub start_on_create: bool,
     pub node: Option<String>,
     #[serde(default)]
@@ -254,7 +241,7 @@ pub async fn create(
     let runtime_hint = req
         .runtime_hint
         .clone()
-        .unwrap_or(blueprint.docker_image.clone());
+        .unwrap_or(blueprint.runtime_hint.clone());
     let launch_command = if blueprint.startup.is_empty() {
         String::new()
     } else {
@@ -271,7 +258,6 @@ pub async fn create(
         mem,
         disk,
         cpu,
-        req.threads.as_deref().unwrap_or(""),
     )?;
     let mut rollback = CreateRollback {
         db: state.db.clone(),
@@ -405,21 +391,17 @@ pub async fn create(
 pub struct UpdateServerReq {
     pub name: Option<String>,
     pub description: Option<String>,
-    #[serde(alias = "docker_image")]
     pub runtime_hint: Option<String>,
-    #[serde(alias = "startup")]
     pub launch_command: Option<String>,
     pub memory_mb: Option<i64>,
     pub disk_mb: Option<i64>,
     pub cpu_percent: Option<i64>,
-    pub threads: Option<String>,
     pub auto_restart: Option<bool>,
-    pub ignore_oom: Option<bool>,
 }
 
 pub async fn update(
     State(state): State<AppState>,
-    _a: AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<i64>,
     Json(req): Json<UpdateServerReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -432,7 +414,7 @@ pub async fn update(
         s.description = desc;
     }
     if let Some(runtime_hint) = req.runtime_hint {
-        s.docker_image = runtime_hint;
+        s.runtime_hint = runtime_hint;
     }
     if let Some(launch_command) = req.launch_command {
         s.startup = launch_command;
@@ -454,19 +436,13 @@ pub async fn update(
     if let Some(cpu) = req.cpu_percent {
         s.cpu_percent = cpu;
     }
-    if let Some(threads) = req.threads {
-        s.threads = threads;
-    }
     if let Some(ar) = req.auto_restart {
         s.auto_restart = ar;
-    }
-    if let Some(oom) = req.ignore_oom {
-        s.ignore_oom = oom;
     }
     models::update_server(&state.db, &s)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
-        let definition = models::get_blueprint(&state.db, s.egg_id)?;
+        let definition = models::get_blueprint(&state.db, s.blueprint_id)?;
         let ports = models::ports_for_server(&state.db, s.id)?
             .into_iter()
             .filter_map(|p| u16::try_from(p).ok())
@@ -512,20 +488,7 @@ pub async fn update(
     Ok(Json(server_json(
         &state,
         &s,
-        &User {
-            id: 0,
-            username: String::new(),
-            email: String::new(),
-            avatar: String::new(),
-            language: String::new(),
-            theme: String::new(),
-            root_admin: true,
-            active: true,
-            twofa_secret: None,
-            about: String::new(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        },
+        &admin,
     )))
 }
 
@@ -541,8 +504,8 @@ pub async fn update_vars(
     Json(req): Json<UpdateVarsReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "startup.update")?;
-    let definition = models::get_blueprint(&state.db, s.egg_id)?;
+    super::require_capability(&state, &u, id, Capability::StartupUpdate)?;
+    let definition = models::get_blueprint(&state.db, s.blueprint_id)?;
     let old_vars = models::get_server_vars(&state.db, s.id)?;
     for (k, v) in &req.variables {
         let Some(var) = definition.variables.iter().find(|v| &v.env_var == k) else {
@@ -674,9 +637,11 @@ pub async fn purge(
     Ok(ok(serde_json::json!({ "ok": true })))
 }
 
+/// Power actions arrive as a closed enum, so an unknown verb is rejected by
+/// deserialization before any authorization or dispatch logic runs.
 #[derive(Deserialize)]
 pub struct PowerReq {
-    pub action: String, // start | stop | restart | kill
+    pub action: PowerAction,
 }
 
 pub async fn power(
@@ -686,25 +651,19 @@ pub async fn power(
     Json(req): Json<PowerReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, &format!("control.{}", req.action))?;
+    super::require_capability(&state, &u, id, power_capability(req.action))?;
     if s.suspended && !u.root_admin {
         return Err(ApiError::forbidden("server suspended"));
     }
+    let audit_action = format!("server_{}", req.action.as_str());
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
-        let action = match req.action.as_str() {
-            "start" => crate::node_protocol::PowerAction::Start,
-            "stop" => crate::node_protocol::PowerAction::Stop,
-            "restart" => crate::node_protocol::PowerAction::Restart,
-            "kill" => crate::node_protocol::PowerAction::Kill,
-            other => return Err(ApiError::bad_request(format!("unknown action {other}"))),
-        };
-        let stats = state.node_client.power(&node, &s.uuid, action).await?;
+        let stats = state.node_client.power(&node, &s.uuid, req.action).await?;
         models::set_server_status(&state.db, s.id, &stats.state)?;
         models::audit(
             &state.db,
             Some(u.id),
-            &format!("server_{}", req.action),
+            &audit_action,
             &s.name,
             "",
             &format!("node={}", node.name),
@@ -713,28 +672,27 @@ pub async fn power(
             serde_json::json!({ "ok": true, "remote": true, "stats": stats }),
         ));
     }
-    match req.action.as_str() {
-        "start" => {
-            let cmd = blueprint::resolve_startup(&state.db, &s)?;
-            let env = blueprint::env_for_server(&state.db, &s);
-            state.procs.start(&s, &cmd, &env, state.notifier.clone())?;
-        }
-        "stop" => state.procs.stop(s.id)?,
-        "restart" => {
+    let start = |srv: &Server| -> Result<(), ApiError> {
+        let cmd = blueprint::resolve_startup(&state.db, srv)?;
+        let env = blueprint::env_for_server(&state.db, srv);
+        state.procs.start(srv, &cmd, &env, state.notifier.clone())?;
+        Ok(())
+    };
+    match req.action {
+        PowerAction::Start => start(&s)?,
+        PowerAction::Stop => state.procs.stop(s.id)?,
+        PowerAction::Restart => {
             state.procs.stop(s.id)?;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let s = models::get_server(&state.db, s.id)?;
-            let cmd = blueprint::resolve_startup(&state.db, &s)?;
-            let env = blueprint::env_for_server(&state.db, &s);
-            state.procs.start(&s, &cmd, &env, state.notifier.clone())?;
+            // Re-read: a stop may have rewritten status/ports the startup uses.
+            start(&models::get_server(&state.db, s.id)?)?;
         }
-        "kill" => state.procs.kill(s.id)?,
-        other => return Err(ApiError::bad_request(format!("unknown action {other}"))),
+        PowerAction::Kill => state.procs.kill(s.id)?,
     }
     models::audit(
         &state.db,
         Some(u.id),
-        &format!("server_{}", req.action),
+        &audit_action,
         &s.name,
         "",
         "node=local",
@@ -755,14 +713,14 @@ pub async fn install(
     Json(req): Json<InstallReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "startup.install")?;
+    super::require_capability(&state, &u, id, Capability::StartupInstall)?;
     if s.node != "local" {
         return Err(ApiError::new(
             axum::http::StatusCode::NOT_IMPLEMENTED,
             "remote blueprint setup must run through the execution agent",
         ));
     }
-    let mut definition = models::get_blueprint(&state.db, s.egg_id)?;
+    let mut definition = models::get_blueprint(&state.db, s.blueprint_id)?;
     if let Some(script) = req.script {
         if !u.root_admin {
             return Err(ApiError::forbidden(
@@ -815,6 +773,17 @@ pub async fn unsuspend(
 
 // ---------------- Subusers ----------------
 
+/// Shared shape for a team member: identity plus their effective grant.
+fn subuser_json(su: &User, grant: &crate::capability::Grant) -> serde_json::Value {
+    serde_json::json!({
+        "id": su.id,
+        "username": su.username,
+        "email": su.email,
+        "role": grant.role.as_str(),
+        "permissions": grant.names(),
+    })
+}
+
 pub async fn list_subusers(
     State(state): State<AppState>,
     AuthUser(u): AuthUser,
@@ -823,8 +792,8 @@ pub async fn list_subusers(
     access_ok(&state, &u, id)?;
     let subs = models::list_subusers(&state.db, id)?;
     let out: Vec<serde_json::Value> = subs
-        .into_iter()
-        .map(|(su, perms)| serde_json::json!({ "id": su.id, "username": su.username, "email": su.email, "permissions": perms }))
+        .iter()
+        .map(|(su, grant)| subuser_json(su, grant))
         .collect();
     Ok(data(serde_json::json!(out)))
 }
@@ -832,7 +801,12 @@ pub async fn list_subusers(
 #[derive(Deserialize)]
 pub struct AddSubuserReq {
     pub user_id: i64,
-    pub permissions: Vec<String>,
+    /// Role preset; defaults to `custom` when omitted.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Extra capabilities granted on top of the preset.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 pub async fn add_subuser(
@@ -845,7 +819,21 @@ pub async fn add_subuser(
     if s.user_id != u.id && !u.root_admin {
         return Err(ApiError::forbidden("only owner can manage subusers"));
     }
-    models::add_subuser(&state.db, id, req.user_id, &req.permissions)?;
+    let role = match req.role.as_deref() {
+        Some(r) => Role::from_str(r).map_err(|e| ApiError::bad_request(e.to_string()))?,
+        None => Role::Custom,
+    };
+    let extra = req
+        .capabilities
+        .iter()
+        .map(|c| Capability::from_str(c))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let grant = Grant::new(role, extra);
+    if grant.capabilities().next().is_none() {
+        return Err(ApiError::bad_request("grant must include at least one capability"));
+    }
+    models::add_subuser(&state.db, id, req.user_id, &grant)?;
     Ok(ok(serde_json::json!({ "ok": true })))
 }
 
@@ -903,7 +891,7 @@ pub async fn send_command(
     Json(req): Json<SendCmdReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "console.write")?;
+    super::require_capability(&state, &u, id, Capability::ConsoleWrite)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
         state

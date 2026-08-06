@@ -113,6 +113,23 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// HTTP client for panel-bound requests.
+///
+/// When the panel runs its own self-signed certificate the operator passes its
+/// fingerprint, and the agent trusts exactly that certificate; otherwise the
+/// normal WebPKI roots apply and a real domain certificate validates as usual.
+fn panel_client(panel_fingerprint: &str, timeout_secs: u64) -> Result<reqwest::Client> {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(timeout_secs));
+    let fp = voltpanel::tls::normalize_fingerprint(panel_fingerprint);
+    if fp.is_empty() {
+        return Ok(builder.build()?);
+    }
+    let cfg = voltpanel::tls::pinned_client_config(&fp)?;
+    Ok(builder.use_preconfigured_tls((*cfg).clone()).build()?)
+}
+
 async fn join(args: &[String]) -> Result<()> {
     let panel_url = args
         .first()
@@ -144,22 +161,38 @@ async fn join(args: &[String]) -> Result<()> {
         let port = listen.rsplit_once(':').map(|(_, p)| p).unwrap_or("8081");
         format!("http://{host}:{port}")
     });
+    let plaintext = args.iter().any(|v| v == "--plaintext");
+    let panel_fingerprint = option(args, "--panel-fingerprint")
+        .map(|f| voltpanel::tls::normalize_fingerprint(&f))
+        .unwrap_or_default();
     let heartbeat = heartbeat_value(&DaemonRuntime::new(DaemonConfig {
         listen: listen.clone(),
         data_dir: data_dir.clone(),
         panel_url: panel_url.clone(),
+        public_url: public_url.clone(),
         node_id: String::new(),
         secret: String::new(),
         heartbeat_interval_secs: 15,
         max_upload_mb: 256,
+        plaintext,
+        panel_fingerprint: panel_fingerprint.clone(),
     })?);
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
+    // Mint the node certificate before enrolling so the panel can pin its
+    // fingerprint in the same round trip; `serve` reuses the same material.
+    let tls_fingerprint = if plaintext {
+        String::new()
+    } else {
+        let sans = voltpanel::tls::default_sans(&host_sans(&public_url));
+        voltpanel::tls::ensure_material(&data_dir.join("tls"), &sans)?.fingerprint
+    };
+    let client = panel_client(&panel_fingerprint, 20)?;
     let response = client
         .post(format!("{panel_url}/api/node/enroll"))
-        .json(&serde_json::json!({ "token": token, "heartbeat": heartbeat }))
+        .json(&serde_json::json!({
+            "token": token,
+            "heartbeat": heartbeat,
+            "tls_fingerprint": tls_fingerprint,
+        }))
         .send()
         .await?;
     let status = response.status();
@@ -185,10 +218,13 @@ async fn join(args: &[String]) -> Result<()> {
         listen,
         data_dir,
         panel_url,
+        public_url: public_url.clone(),
         node_id,
         secret,
         heartbeat_interval_secs: interval,
         max_upload_mb: 256,
+        plaintext,
+        panel_fingerprint,
     };
     config.save(&config_path)?;
     println!(
@@ -243,12 +279,38 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         )
         .layer(axum::extract::DefaultBodyLimit::max(max_body))
         .with_state(state);
-    tracing::info!("voltd {} listening on {}", runtime.config.node_id, address);
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown(runtime))
-        .await?;
+    if runtime.config.plaintext {
+        tracing::warn!(
+            "voltd {} listening on http://{} (plaintext; only sane behind a trusted reverse proxy)",
+            runtime.config.node_id,
+            address
+        );
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown(runtime))
+            .await?;
+        return Ok(());
+    }
+    let sans = voltpanel::tls::default_sans(&host_sans(&runtime.config.public_url));
+    let material = voltpanel::tls::ensure_material(&runtime.config.tls_dir(), &sans)?;
+    let server_config = voltpanel::tls::server_config(&material)?;
+    tracing::info!(
+        "voltd {} listening on https://{} (cert fingerprint {})",
+        runtime.config.node_id,
+        address,
+        material.fingerprint
+    );
+    voltpanel::tls::serve_tls(listener, app, server_config, shutdown(runtime)).await?;
     Ok(())
+}
+
+/// Extra SAN entries so a node reached by its public hostname still validates
+/// under the pinned certificate.
+fn host_sans(public_url: &str) -> Vec<String> {
+    url::Url::parse(public_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| vec![h.to_string()]))
+        .unwrap_or_default()
 }
 
 async fn shutdown(runtime: DaemonRuntime) {
@@ -258,10 +320,7 @@ async fn shutdown(runtime: DaemonRuntime) {
 }
 
 async fn heartbeat_loop(runtime: DaemonRuntime) {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-    {
+    let client = match panel_client(&runtime.config.panel_fingerprint, 15) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!("heartbeat client: {e}");

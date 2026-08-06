@@ -13,29 +13,42 @@ else
   source "$TMP_COMMON"
 fi
 
-PANEL_URL=""; TOKEN=""; PUBLIC_URL=""; DOMAIN=""; EMAIL=""; LISTEN=""; DATA_DIR=/var/lib/voltd; CONFIG_DIR=/etc/voltpanel-node; ALLOW_HTTP=0; NO_CADDY=0
+PANEL_URL=""; TOKEN=""; PUBLIC_URL=""; DOMAIN=""; IP_ADDRESS=""; EMAIL=""; TLS_MODE=""; CF_CERT=""; CF_KEY=""; LISTEN=""; DATA_DIR=/var/lib/voltd; CONFIG_DIR=/etc/voltpanel-node; ALLOW_HTTP=0; INTERACTIVE=auto
+ARG_COUNT=$#
 while (($#)); do
   case "$1" in
     --panel) PANEL_URL=${2:?}; shift 2;;
     --token) TOKEN=${2:?}; shift 2;;
     --public-url) PUBLIC_URL=${2:?}; shift 2;;
     --domain) DOMAIN=${2:?}; shift 2;;
+    --ip-address) IP_ADDRESS=${2:?}; shift 2;;
     --email) EMAIL=${2:?}; shift 2;;
+    --tls) TLS_MODE=${2:?}; shift 2;;
+    --cloudflare-cert) CF_CERT=${2:?}; shift 2;;
+    --cloudflare-key) CF_KEY=${2:?}; shift 2;;
     --listen) LISTEN=${2:?}; shift 2;;
     --data-dir) DATA_DIR=${2:?}; shift 2;;
     --allow-http) ALLOW_HTTP=1; shift;;
-    --no-caddy) NO_CADDY=1; shift;;
+    --no-caddy) TLS_MODE=none; shift;;
+    --non-interactive) INTERACTIVE=0; shift;;
     --version) VOLTPANEL_VERSION=${2:?}; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     --help|-h) cat <<'EOF'
 VoltPanel execution agent installer
 
-Usage: sudo ./install-node.sh --panel URL --token TOKEN [options]
-  --domain agent.example.com  HTTPS agent endpoint through Caddy
-  --public-url URL            Explicit agent URL stored in the control plane
+Usage: sudo ./install-node.sh [options]
+  --panel URL                 Panel URL
+  --token TOKEN               One-time enrollment token
+  --domain agent.example.com  Public node domain
+  --tls MODE                  caddy, certbot, certbot-ip, cloudflare, or none
+  --ip-address IP             Public IPv4 or IPv6 for certbot-ip
+  --cloudflare-cert PATH      Cloudflare Origin Certificate PEM
+  --cloudflare-key PATH       Cloudflare Origin private key
+  --public-url URL            Explicit node URL stored in the panel
   --listen ADDRESS            Agent listen address
   --allow-http                Permit plain HTTP enrollment on trusted LAN
-  --no-caddy                  Do not configure Caddy
+  --no-caddy                  Alias for --tls none
+  --non-interactive           Disable the terminal wizard
   --data-dir PATH             Node data directory (default /var/lib/voltd)
   --version VERSION           Release tag (default latest)
   --dry-run                   Print actions without modifying the host
@@ -46,15 +59,53 @@ EOF
 done
 export VOLTPANEL_VERSION
 
+if [[ "$INTERACTIVE" == auto && "$ARG_COUNT" == 0 ]] && tui_available; then INTERACTIVE=1; else INTERACTIVE=0; fi
+if [[ "$INTERACTIVE" == 1 ]]; then
+  tui_title "VoltPanel Node Installer"
+  PANEL_URL=$(tui_input "Panel URL" "$PANEL_URL")
+  TOKEN=$(tui_secret "Enrollment token")
+  TLS_MODE=$(tui_menu "Choose node HTTPS mode" "caddy" \
+    caddy "Caddy automatic HTTPS (recommended)" \
+    certbot "Certbot + Nginx with a domain" \
+    certbot-ip "Certbot + Nginx with a public IP" \
+    cloudflare "Cloudflare Origin Certificate" \
+    none "No reverse proxy / trusted LAN only")
+  if [[ "$TLS_MODE" != none ]]; then
+    if [[ "$TLS_MODE" == certbot-ip ]]; then
+      tui_note "IP certificates require Certbot 5.4+, are valid for about 6 days, and must renew automatically."
+      IP_ADDRESS=$(tui_input "Public node IP address" "$IP_ADDRESS")
+    else
+      DOMAIN=$(tui_input "Node domain" "$DOMAIN")
+    fi
+    if [[ "$TLS_MODE" == caddy || "$TLS_MODE" == certbot || "$TLS_MODE" == certbot-ip ]]; then EMAIL=$(tui_input "ACME email (optional)" "$EMAIL"); fi
+    if [[ "$TLS_MODE" == cloudflare ]]; then
+      tui_note "Create an Origin Certificate in Cloudflare and set this hostname to Full (strict)."
+      CF_CERT=$(tui_input "Origin Certificate PEM path" "$CF_CERT")
+      CF_KEY=$(tui_input "Origin private key path" "$CF_KEY")
+    fi
+  else
+    ALLOW_HTTP=1
+  fi
+  DATA_DIR=$(tui_input "Node data directory" "$DATA_DIR")
+  printf '\n  Panel:    %s\n  TLS mode: %s\n  Address:  %s\n  Data:     %s\n' "$PANEL_URL" "$TLS_MODE" "${DOMAIN:-${IP_ADDRESS:-(none)}}" "$DATA_DIR" > /dev/tty
+  tui_pause
+fi
+
+TLS_MODE=${TLS_MODE:-$([[ -n "$DOMAIN" ]] && printf caddy || printf none)}
+case "$TLS_MODE" in caddy|certbot|certbot-ip|cloudflare|none) ;; *) die "Invalid --tls mode: $TLS_MODE";; esac
+[[ "$TLS_MODE" == none || "$TLS_MODE" == certbot-ip || -n "$DOMAIN" ]] || die "--domain is required for TLS mode $TLS_MODE"
+[[ "$TLS_MODE" != certbot-ip || -n "$IP_ADDRESS" ]] || die "certbot-ip mode requires --ip-address"
+[[ "$TLS_MODE" != cloudflare || (-n "$CF_CERT" && -n "$CF_KEY") ]] || die "Cloudflare mode requires --cloudflare-cert and --cloudflare-key"
+
 require_root; require_systemd; load_os
 [[ -n "$PANEL_URL" ]] || die "--panel is required"
 [[ -n "$TOKEN" ]] || die "--token is required"
 validate_url "$PANEL_URL"
-[[ -z "$DOMAIN" ]] || validate_domain "$DOMAIN"
+[[ -z "$DOMAIN" ]] || validate_domain "$DOMAIN"; [[ -z "$IP_ADDRESS" ]] || validate_ip "$IP_ADDRESS"
 
-if [[ -n "$DOMAIN" && "$NO_CADDY" == 0 ]]; then
+if [[ "$TLS_MODE" != none ]]; then
   LISTEN=${LISTEN:-127.0.0.1:8081}
-  PUBLIC_URL=${PUBLIC_URL:-https://$DOMAIN}
+  PUBLIC_URL=${PUBLIC_URL:-https://${DOMAIN:-$IP_ADDRESS}}
 else
   LISTEN=${LISTEN:-0.0.0.0:8081}
   if [[ -z "$PUBLIC_URL" ]]; then
@@ -114,10 +165,11 @@ elif [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] download voltd-manage"
 else curl -fsSL "$VOLTPANEL_RAW/scripts/manage-node.sh" -o /usr/local/sbin/voltd-manage; chmod 0755 /usr/local/sbin/voltd-manage
 fi
 
-if [[ -n "$DOMAIN" && "$NO_CADDY" == 0 ]]; then
-  install_caddy
-  TLS_LINE=""; [[ -z "$EMAIL" ]] || TLS_LINE="    tls $EMAIL"
-  write_file /etc/caddy/conf.d/voltpanel-node.caddy 0644 <<EOF
+case "$TLS_MODE" in
+  caddy)
+    install_caddy
+    TLS_LINE=""; [[ -z "$EMAIL" ]] || TLS_LINE="    tls $EMAIL"
+    write_file /etc/caddy/conf.d/voltpanel-node.caddy 0644 <<EOF
 $DOMAIN {
 $TLS_LINE
     encode zstd gzip
@@ -129,15 +181,15 @@ $TLS_LINE
     }
 }
 EOF
-  if [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] ensure Caddyfile imports /etc/caddy/conf.d/*.caddy"
-  else
-    install -d -m755 /etc/caddy/conf.d
-    touch /etc/caddy/Caddyfile
-    grep -Fq 'import /etc/caddy/conf.d/*.caddy' /etc/caddy/Caddyfile || { cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.pre-voltpanel; printf '\nimport /etc/caddy/conf.d/*.caddy\n' >> /etc/caddy/Caddyfile; }
-  fi
-  run systemctl enable --now caddy
-  run systemctl reload caddy
-fi
+    configure_caddy_import
+    run systemctl enable --now caddy
+    run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    run systemctl reload caddy
+    ;;
+  certbot) configure_certbot_proxy node "$DOMAIN" 127.0.0.1:8081 "$EMAIL" ;;
+  certbot-ip) configure_certbot_ip_proxy node "$IP_ADDRESS" 127.0.0.1:8081 "$EMAIL" ;;
+  cloudflare) configure_cloudflare_proxy node "$DOMAIN" 127.0.0.1:8081 "$CF_CERT" "$CF_KEY" ;;
+esac
 
 systemctl_reload_start voltd
 firewall_hint node

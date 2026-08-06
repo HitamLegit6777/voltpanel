@@ -1,4 +1,5 @@
 //! Database-backed data models + CRUD helpers.
+use crate::capability::{Capability, Grant};
 use crate::db::Db;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -25,6 +26,10 @@ pub struct User {
     pub about: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Set only when the request authenticated with a scoped API key. Narrows
+    /// every capability check to the key's grant; never crosses the API surface.
+    #[serde(skip)]
+    pub key_scope: Option<crate::services::keys::KeyScope>,
 }
 
 pub fn user_from_row(r: &Row) -> rusqlite::Result<User> {
@@ -41,6 +46,7 @@ pub fn user_from_row(r: &Row) -> rusqlite::Result<User> {
         about: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
+        key_scope: None,
     })
 }
 
@@ -151,15 +157,70 @@ pub fn delete_user(db: &Db, id: i64) -> Result<()> {
 
 // ---------------- Blueprint ----------------
 
+/// Typed constraint attached to a blueprint input. Replaces the pipe-rule DSL:
+/// the shape of a value is declared once and enforced identically by the API,
+/// the seeder, and the launch templater.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputKind {
+    /// Free text, optionally length-capped and pattern-checked.
+    Text {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_len: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<String>,
+    },
+    /// Numeric value with inclusive bounds.
+    Number {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max: Option<f64>,
+    },
+    /// Boolean rendered as a toggle.
+    Bool,
+    /// One of a fixed option set.
+    Choice { options: Vec<String> },
+    /// Workspace-relative path. Rejects absolute paths and `..` traversal so a
+    /// value cannot escape the workspace when interpolated into a launch plan.
+    Path {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_len: Option<usize>,
+    },
+    /// Absolute http(s) URL.
+    Url,
+}
+
+impl Default for InputKind {
+    fn default() -> Self {
+        Self::Text {
+            max_len: None,
+            pattern: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueprintInput {
     pub name: String,
+    #[serde(default)]
     pub description: String,
     pub env_var: String,
+    #[serde(default)]
     pub default_value: String,
+    #[serde(default = "default_true")]
     pub user_viewable: bool,
+    #[serde(default = "default_true")]
     pub user_editable: bool,
-    pub rules: String,
+    /// Empty values are rejected when set.
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub kind: InputKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,10 +231,9 @@ pub struct Blueprint {
     pub description: String,
     pub author: String,
     pub category: String,
-    pub docker_image: String,
+    pub runtime_hint: String,
     pub startup: String,
     pub default_config: Option<String>,
-    pub config_files: Option<String>,
     pub install_script: Option<String>,
     pub variables: Vec<BlueprintInput>,
     pub stop_command: String,
@@ -189,22 +249,24 @@ fn blueprint_from_row(r: &Row) -> rusqlite::Result<Blueprint> {
         description: r.get(3)?,
         author: r.get(4)?,
         category: r.get(5)?,
-        docker_image: r.get(6)?,
+        runtime_hint: r.get(6)?,
         startup: r.get(7)?,
         default_config: r.get(8)?,
-        config_files: r.get(9)?,
-        install_script: r.get(10)?,
-        variables: serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default(),
-        stop_command: r.get(12)?,
-        created_at: r.get(13)?,
-        updated_at: r.get(14)?,
+        install_script: r.get(9)?,
+        variables: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
+        stop_command: r.get(11)?,
+        created_at: r.get(12)?,
+        updated_at: r.get(13)?,
     })
 }
+
+const BLUEPRINT_COLS: &str =
+    "id,uuid,name,description,author,category,runtime_hint,startup,default_config,install_script,variables,stop_command,created_at,updated_at";
 
 pub fn get_blueprint(db: &Db, id: i64) -> Result<Blueprint> {
     let conn = db.lock();
     conn.query_row(
-        "SELECT id,uuid,name,description,author,category,docker_image,startup,default_config,config_files,install_script,variables,stop_command,created_at,updated_at FROM egss WHERE id=?1",
+        &format!("SELECT {BLUEPRINT_COLS} FROM blueprints WHERE id=?1"),
         [id],
         blueprint_from_row,
     )
@@ -213,9 +275,8 @@ pub fn get_blueprint(db: &Db, id: i64) -> Result<Blueprint> {
 
 pub fn list_blueprints(db: &Db) -> Result<Vec<Blueprint>> {
     let conn = db.lock();
-    let mut stmt = conn.prepare(
-        "SELECT id,uuid,name,description,author,category,docker_image,startup,default_config,config_files,install_script,variables,stop_command,created_at,updated_at FROM egss ORDER BY name",
-    )?;
+    let mut stmt =
+        conn.prepare(&format!("SELECT {BLUEPRINT_COLS} FROM blueprints ORDER BY name"))?;
     let rows = stmt.query_map([], blueprint_from_row)?;
     let mut out = Vec::new();
     for e in rows {
@@ -232,10 +293,9 @@ pub fn create_blueprint(
     description: &str,
     author: &str,
     category: &str,
-    docker_image: &str,
+    runtime_hint: &str,
     startup: &str,
     default_config: Option<&str>,
-    config_files: Option<&str>,
     install_script: Option<&str>,
     variables: &[BlueprintInput],
     stop_command: &str,
@@ -243,17 +303,16 @@ pub fn create_blueprint(
     let conn = db.lock();
     let t = now();
     conn.execute(
-        "INSERT INTO egss(uuid,name,description,author,category,docker_image,startup,default_config,config_files,install_script,variables,stop_command,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)",
+        "INSERT INTO blueprints(uuid,name,description,author,category,runtime_hint,startup,default_config,install_script,variables,stop_command,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
         params![
             uuid,
             name,
             description,
             author,
             category,
-            docker_image,
+            runtime_hint,
             startup,
             default_config,
-            config_files,
             install_script,
             serde_json::to_string(variables)?,
             stop_command,
@@ -266,16 +325,15 @@ pub fn create_blueprint(
 pub fn update_blueprint(db: &Db, blueprint: &Blueprint) -> Result<()> {
     let conn = db.lock();
     conn.execute(
-        "UPDATE egss SET name=?1, description=?2, author=?3, category=?4, docker_image=?5, startup=?6, default_config=?7, config_files=?8, install_script=?9, variables=?10, stop_command=?11, updated_at=?12 WHERE id=?13",
+        "UPDATE blueprints SET name=?1, description=?2, author=?3, category=?4, runtime_hint=?5, startup=?6, default_config=?7, install_script=?8, variables=?9, stop_command=?10, updated_at=?11 WHERE id=?12",
         params![
             blueprint.name,
             blueprint.description,
             blueprint.author,
             blueprint.category,
-            blueprint.docker_image,
+            blueprint.runtime_hint,
             blueprint.startup,
             blueprint.default_config,
-            blueprint.config_files,
             blueprint.install_script,
             serde_json::to_string(&blueprint.variables)?,
             blueprint.stop_command,
@@ -289,14 +347,14 @@ pub fn update_blueprint(db: &Db, blueprint: &Blueprint) -> Result<()> {
 pub fn delete_blueprint(db: &Db, id: i64) -> Result<()> {
     let conn = db.lock();
     let used: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM servers WHERE egg_id=?1 AND deleted=0",
+        "SELECT COUNT(*) FROM servers WHERE blueprint_id=?1 AND deleted=0",
         [id],
         |r| r.get(0),
     )?;
     if used > 0 {
         bail!("blueprint is used by {used} workspace(s)");
     }
-    conn.execute("DELETE FROM egss WHERE id=?1", [id])?;
+    conn.execute("DELETE FROM blueprints WHERE id=?1", [id])?;
     Ok(())
 }
 
@@ -308,21 +366,19 @@ pub struct Server {
     pub uuid: String,
     pub name: String,
     pub user_id: i64,
-    pub egg_id: i64,
+    pub blueprint_id: i64,
     pub description: String,
     pub status: String,
-    pub docker_image: String,
+    pub runtime_hint: String,
     pub startup: String,
     pub node: String,
     pub port: Option<i64>,
     pub memory_mb: i64,
     pub disk_mb: i64,
     pub cpu_percent: i64,
-    pub threads: String,
     pub suspended: bool,
     pub auto_restart: bool,
     pub restart_count: i64,
-    pub ignore_oom: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -333,28 +389,26 @@ fn server_from_row(r: &Row) -> rusqlite::Result<Server> {
         uuid: r.get(1)?,
         name: r.get(2)?,
         user_id: r.get(3)?,
-        egg_id: r.get(4)?,
+        blueprint_id: r.get(4)?,
         description: r.get(5)?,
         status: r.get(6)?,
-        docker_image: r.get(7)?,
+        runtime_hint: r.get(7)?,
         startup: r.get(8)?,
         node: r.get(9)?,
         port: r.get(10)?,
         memory_mb: r.get(11)?,
         disk_mb: r.get(12)?,
         cpu_percent: r.get(13)?,
-        threads: r.get(14)?,
-        suspended: r.get::<_, i64>(15)? != 0,
-        auto_restart: r.get::<_, i64>(16)? != 0,
-        restart_count: r.get(17)?,
-        ignore_oom: r.get::<_, i64>(18)? != 0,
-        created_at: r.get(19)?,
-        updated_at: r.get(20)?,
+        suspended: r.get::<_, i64>(14)? != 0,
+        auto_restart: r.get::<_, i64>(15)? != 0,
+        restart_count: r.get(16)?,
+        created_at: r.get(17)?,
+        updated_at: r.get(18)?,
     })
 }
 
 const SERVER_COLS: &str =
-    "id,uuid,name,user_id,egg_id,description,status,docker_image,startup,node,port,memory_mb,disk_mb,cpu_percent,threads,suspended,auto_restart,restart_count,ignore_oom,created_at,updated_at";
+    "id,uuid,name,user_id,blueprint_id,description,status,runtime_hint,startup,node,port,memory_mb,disk_mb,cpu_percent,suspended,auto_restart,restart_count,created_at,updated_at";
 
 pub fn get_server(db: &Db, id: i64) -> Result<Server> {
     let conn = db.lock();
@@ -459,19 +513,18 @@ pub fn create_server(
     uuid: &str,
     name: &str,
     user_id: i64,
-    egg_id: i64,
-    docker_image: &str,
+    blueprint_id: i64,
+    runtime_hint: &str,
     startup: &str,
     memory_mb: i64,
     disk_mb: i64,
     cpu_percent: i64,
-    threads: &str,
 ) -> Result<i64> {
     let conn = db.lock();
     let t = now();
     conn.execute(
-        "INSERT INTO servers(uuid,name,user_id,egg_id,docker_image,startup,memory_mb,disk_mb,cpu_percent,threads,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'offline',?11,?11)",
-        params![uuid, name, user_id, egg_id, docker_image, startup, memory_mb, disk_mb, cpu_percent, threads, t],
+        "INSERT INTO servers(uuid,name,user_id,blueprint_id,runtime_hint,startup,memory_mb,disk_mb,cpu_percent,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'offline',?10,?10)",
+        params![uuid, name, user_id, blueprint_id, runtime_hint, startup, memory_mb, disk_mb, cpu_percent, t],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -479,18 +532,16 @@ pub fn create_server(
 pub fn update_server(db: &Db, s: &Server) -> Result<()> {
     let conn = db.lock();
     conn.execute(
-        "UPDATE servers SET name=?1, description=?2, docker_image=?3, startup=?4, memory_mb=?5, disk_mb=?6, cpu_percent=?7, threads=?8, auto_restart=?9, ignore_oom=?10, updated_at=?11 WHERE id=?12",
+        "UPDATE servers SET name=?1, description=?2, runtime_hint=?3, startup=?4, memory_mb=?5, disk_mb=?6, cpu_percent=?7, auto_restart=?8, updated_at=?9 WHERE id=?10",
         params![
             s.name,
             s.description,
-            s.docker_image,
+            s.runtime_hint,
             s.startup,
             s.memory_mb,
             s.disk_mb,
             s.cpu_percent,
-            s.threads,
             s.auto_restart as i64,
-            s.ignore_oom as i64,
             now(),
             s.id
         ],
@@ -558,11 +609,17 @@ pub fn get_server_vars(db: &Db, server_id: i64) -> Result<Vec<(String, String)>>
     Ok(out)
 }
 
-pub fn set_server_var(db: &Db, server_id: i64, egg_id: i64, key: &str, value: &str) -> Result<()> {
+pub fn set_server_var(
+    db: &Db,
+    server_id: i64,
+    blueprint_id: i64,
+    key: &str,
+    value: &str,
+) -> Result<()> {
     let conn = db.lock();
     conn.execute(
-        "INSERT INTO server_variables(server_id,egg_id,key,value) VALUES(?1,?2,?3,?4) ON CONFLICT(server_id,key) DO UPDATE SET value=?4",
-        params![server_id, egg_id, key, value],
+        "INSERT INTO server_variables(server_id,blueprint_id,key,value) VALUES(?1,?2,?3,?4) ON CONFLICT(server_id,key) DO UPDATE SET value=?4",
+        params![server_id, blueprint_id, key, value],
     )?;
     Ok(())
 }
@@ -576,11 +633,10 @@ pub fn delete_server_vars(db: &Db, server_id: i64) -> Result<()> {
     Ok(())
 }
 
-// ---------------- Subusers ----------------
 pub fn replace_server_vars(
     db: &Db,
     server_id: i64,
-    egg_id: i64,
+    blueprint_id: i64,
     vars: &[(String, String)],
 ) -> Result<()> {
     let mut conn = db.lock();
@@ -591,22 +647,25 @@ pub fn replace_server_vars(
     )?;
     for (key, value) in vars {
         tx.execute(
-            "INSERT INTO server_variables(server_id,egg_id,key,value) VALUES(?1,?2,?3,?4)",
-            params![server_id, egg_id, key, value],
+            "INSERT INTO server_variables(server_id,blueprint_id,key,value) VALUES(?1,?2,?3,?4)",
+            params![server_id, blueprint_id, key, value],
         )?;
     }
     tx.commit()?;
     Ok(())
 }
 
-pub fn list_subusers(db: &Db, server_id: i64) -> Result<Vec<(User, Vec<String>)>> {
+// ---------------- Subusers ----------------
+
+pub fn list_subusers(db: &Db, server_id: i64) -> Result<Vec<(User, Grant)>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
-        "SELECT u.id,u.username,u.email,u.avatar,u.language,u.theme,u.root_admin,u.active,u.twofa_secret,u.about,u.created_at,u.updated_at,s.permissions FROM subusers s JOIN users u ON u.id=s.user_id WHERE s.server_id=?1",
+        "SELECT u.id,u.username,u.email,u.avatar,u.language,u.theme,u.root_admin,u.active,u.twofa_secret,u.about,u.created_at,u.updated_at,s.permissions,s.role FROM subusers s JOIN users u ON u.id=s.user_id WHERE s.server_id=?1",
     )?;
     let rows = stmt.query_map([server_id], |r| {
-        let perms: Vec<String> = serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default();
-        Ok((user_from_row(r)?, perms))
+        let perms: String = r.get(12)?;
+        let role: String = r.get(13)?;
+        Ok((user_from_row(r)?, Grant::from_stored(&role, &perms)))
     })?;
     let mut out = Vec::new();
     for v in rows {
@@ -615,11 +674,11 @@ pub fn list_subusers(db: &Db, server_id: i64) -> Result<Vec<(User, Vec<String>)>
     Ok(out)
 }
 
-pub fn add_subuser(db: &Db, server_id: i64, user_id: i64, perms: &[String]) -> Result<()> {
+pub fn add_subuser(db: &Db, server_id: i64, user_id: i64, grant: &Grant) -> Result<()> {
     let conn = db.lock();
     conn.execute(
-        "INSERT OR REPLACE INTO subusers(server_id,user_id,permissions) VALUES(?1,?2,?3)",
-        params![server_id, user_id, serde_json::to_string(perms)?],
+        "INSERT OR REPLACE INTO subusers(server_id,user_id,permissions,role) VALUES(?1,?2,?3,?4)",
+        params![server_id, user_id, grant.to_json(), grant.role.as_str()],
     )?;
     Ok(())
 }
@@ -654,14 +713,28 @@ pub fn user_has_server_access(db: &Db, user: &User, server_id: i64) -> Result<bo
     Ok(sub > 0)
 }
 
-pub fn user_has_server_permission(
-    db: &Db,
-    user: &User,
-    server_id: i64,
-    permission: &str,
-) -> Result<bool> {
+/// Effective grant a user holds on a server, or `None` when they have no access.
+///
+/// When the request authenticated with a scoped API key, the underlying grant is
+/// intersected with the key's scope: a key can only ever narrow its owner's rights,
+/// never widen them — including for root admins.
+pub fn server_grant(db: &Db, user: &User, server_id: i64) -> Result<Option<Grant>> {
+    let grant = raw_server_grant(db, user, server_id)?;
+    let Some(scope) = user.key_scope.as_ref() else {
+        return Ok(grant);
+    };
+    Ok(grant.map(|g| {
+        Grant::custom(
+            g.capabilities()
+                .filter(|cap| scope.allows(server_id, *cap))
+                .collect::<Vec<_>>(),
+        )
+    }))
+}
+
+fn raw_server_grant(db: &Db, user: &User, server_id: i64) -> Result<Option<Grant>> {
     if user.root_admin {
-        return Ok(true);
+        return Ok(Some(Grant::owner()));
     }
     let conn = db.lock();
     let owner: i64 = conn.query_row(
@@ -670,34 +743,27 @@ pub fn user_has_server_permission(
         |r| r.get(0),
     )?;
     if owner > 0 {
-        return Ok(true);
+        return Ok(Some(Grant::owner()));
     }
-    let raw: Option<String> = conn
+    let row: Option<(String, String)> = conn
         .query_row(
-            "SELECT permissions FROM subusers WHERE server_id=?1 AND user_id=?2",
+            "SELECT role,permissions FROM subusers WHERE server_id=?1 AND user_id=?2",
             params![server_id, user.id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some(raw) = raw else { return Ok(false) };
-    let perms: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
-    let category = permission.split('.').next().unwrap_or(permission);
-    let legacy_control = match permission {
-        "control.start" => Some("start"),
-        "control.stop" => Some("stop"),
-        "control.restart" => Some("restart"),
-        "control.kill" => Some("kill"),
-        _ => None,
-    };
-    Ok(perms.iter().any(|p| {
-        p == "*"
-            || p == permission
-            || p == category
-            || legacy_control == Some(p.as_str())
-            || (permission.starts_with("control.") && p == "power")
-            || (permission.starts_with("console.") && p == "console")
-            || (permission.starts_with("files.") && p == "files")
-    }))
+    Ok(row.map(|(role, perms)| Grant::from_stored(&role, &perms)))
+}
+
+pub fn user_has_capability(
+    db: &Db,
+    user: &User,
+    server_id: i64,
+    capability: Capability,
+) -> Result<bool> {
+    Ok(server_grant(db, user, server_id)?
+        .map(|g| g.contains(capability))
+        .unwrap_or(false))
 }
 
 // ---------------- Backup ----------------
@@ -1284,4 +1350,180 @@ pub fn reset_rate_limits(db: &Db) -> Result<()> {
     let conn = db.lock();
     conn.execute("DELETE FROM rate_limits", [])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::Capability;
+    use crate::services::keys::KeyScope;
+
+    static DB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    struct TestDb {
+        db: Db,
+        path: std::path::PathBuf,
+        owner_id: i64,
+        server_id: i64,
+        other_server_id: i64,
+    }
+
+    impl TestDb {
+        fn new() -> Self {
+            let seq = DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "voltpanel-models-test-{}-{}.db",
+                std::process::id(),
+                seq
+            ));
+            let _ = std::fs::remove_file(&path);
+            let db = crate::db::open(path.to_str().unwrap()).unwrap();
+            let conn = db.lock();
+            conn.execute(
+                "INSERT INTO users(username,email,password_hash,created_at,updated_at)
+                 VALUES('owner','owner@t','x','now','now')",
+                [],
+            )
+            .unwrap();
+            let owner_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO blueprints(uuid,name,created_at,updated_at)
+                 VALUES('b','b','now','now')",
+                [],
+            )
+            .unwrap();
+            let bid = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO servers(uuid,name,user_id,blueprint_id,created_at,updated_at)
+                 VALUES('s1','s1',?1,?2,'now','now')",
+                params![owner_id, bid],
+            )
+            .unwrap();
+            let server_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO servers(uuid,name,user_id,blueprint_id,created_at,updated_at)
+                 VALUES('s2','s2',?1,?2,'now','now')",
+                params![owner_id, bid],
+            )
+            .unwrap();
+            let other_server_id = conn.last_insert_rowid();
+            drop(conn);
+            TestDb {
+                db,
+                path,
+                owner_id,
+                server_id,
+                other_server_id,
+            }
+        }
+
+        fn owner(&self) -> User {
+            get_user(&self.db, self.owner_id).unwrap()
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let wal = self.path.with_extension("db-wal");
+            let shm = self.path.with_extension("db-shm");
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_file(wal);
+            let _ = std::fs::remove_file(shm);
+        }
+    }
+
+    fn scope(caps: Vec<Capability>, wildcard: bool, server_ids: Vec<i64>) -> KeyScope {
+        KeyScope {
+            capabilities: caps,
+            wildcard,
+            server_ids,
+        }
+    }
+
+    #[test]
+    fn session_user_keeps_full_owner_grant() {
+        let t = TestDb::new();
+        let g = server_grant(&t.db, &t.owner(), t.server_id).unwrap().unwrap();
+        assert!(g.contains(Capability::ControlStart));
+        assert!(g.contains(Capability::FilesWrite));
+    }
+
+    #[test]
+    fn scoped_key_narrows_owner_capabilities() {
+        let t = TestDb::new();
+        let mut u = t.owner();
+        u.key_scope = Some(scope(vec![Capability::ConsoleRead], false, vec![]));
+        let g = server_grant(&t.db, &u, t.server_id).unwrap().unwrap();
+        assert!(g.contains(Capability::ConsoleRead));
+        // Owner holds these, but the key does not grant them.
+        assert!(!g.contains(Capability::FilesWrite));
+        assert!(!g.contains(Capability::ControlStart));
+    }
+
+    #[test]
+    fn scoped_key_cannot_reach_servers_outside_its_list() {
+        let t = TestDb::new();
+        let mut u = t.owner();
+        u.key_scope = Some(scope(vec![], true, vec![t.server_id]));
+        let allowed = server_grant(&t.db, &u, t.server_id).unwrap().unwrap();
+        assert!(allowed.contains(Capability::ControlStart));
+        let denied = server_grant(&t.db, &u, t.other_server_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(denied.capabilities().count(), 0);
+        assert!(!denied.contains(Capability::ConsoleRead));
+    }
+
+    #[test]
+    fn scoped_key_cannot_widen_a_root_admin() {
+        let t = TestDb::new();
+        let mut admin = t.owner();
+        admin.root_admin = true;
+        admin.key_scope = Some(scope(vec![Capability::ConsoleRead], false, vec![]));
+        // Root admin normally gets everything; the key still narrows it.
+        let g = server_grant(&t.db, &admin, t.other_server_id)
+            .unwrap()
+            .unwrap();
+        assert!(g.contains(Capability::ConsoleRead));
+        assert!(!g.contains(Capability::FilesWrite));
+    }
+
+    #[test]
+    fn full_authority_key_matches_a_session() {
+        let t = TestDb::new();
+        let mut u = t.owner();
+        u.key_scope = Some(scope(vec![], true, vec![]));
+        let session = server_grant(&t.db, &t.owner(), t.server_id).unwrap().unwrap();
+        let keyed = server_grant(&t.db, &u, t.server_id).unwrap().unwrap();
+        assert_eq!(
+            session.capabilities().collect::<Vec<_>>(),
+            keyed.capabilities().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn user_has_capability_honours_the_key_scope() {
+        let t = TestDb::new();
+        let mut u = t.owner();
+        u.key_scope = Some(scope(vec![Capability::ConsoleRead], false, vec![]));
+        assert!(user_has_capability(&t.db, &u, t.server_id, Capability::ConsoleRead).unwrap());
+        assert!(!user_has_capability(&t.db, &u, t.server_id, Capability::FilesWrite).unwrap());
+    }
+
+    #[test]
+    fn non_member_gains_nothing_from_a_wildcard_key() {
+        let t = TestDb::new();
+        let conn = t.db.lock();
+        conn.execute(
+            "INSERT INTO users(username,email,password_hash,created_at,updated_at)
+             VALUES('stranger','s@t','x','now','now')",
+            [],
+        )
+        .unwrap();
+        let sid = conn.last_insert_rowid();
+        drop(conn);
+        let mut stranger = get_user(&t.db, sid).unwrap();
+        stranger.key_scope = Some(scope(vec![], true, vec![]));
+        assert!(server_grant(&t.db, &stranger, t.server_id).unwrap().is_none());
+    }
 }

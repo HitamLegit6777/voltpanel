@@ -84,6 +84,37 @@ Alert on:
 - Snapshot/transfer failures
 - Isolation health not secure
 
+## Signals (outbound webhooks)
+
+Signals POST a JSON envelope to an external URL when a subscribed event fires.
+
+- Subscriptions match on event name, with `*` as a trailing wildcard (`backup.*`)
+- A webhook with no `server_id` is global; a scoped one only fires for its workload
+- The dispatcher claims due deliveries every 5 seconds, 50 per sweep
+- `2xx` marks the delivery `delivered`; anything else reschedules with exponential
+  backoff until the attempt cap, then `failed`
+- The panel DB lock is never held across the outbound HTTP call
+
+Each request carries:
+
+| Header | Meaning |
+| --- | --- |
+| `X-VoltPanel-Event` | event name |
+| `X-VoltPanel-Delivery` | delivery id, stable across retries |
+| `X-VoltPanel-Timestamp` | unix seconds used in the signature |
+| `X-VoltPanel-Signature` | `sha256=` HMAC over `<timestamp>.<body>` |
+
+Verify with the webhook secret, which is returned **only** in the create response
+and never re-exposed by the list endpoint:
+
+```
+expected = "sha256=" + hmac_sha256(secret, timestamp + "." + raw_body)
+```
+
+Use `POST /api/webhooks/{id}/test` to queue a `test.ping` straight to one webhook,
+bypassing subscription matching, then read `GET /api/webhooks/{id}/deliveries` to
+inspect attempt count, response code, and error text.
+
 ## First response to node failure
 
 1. Check `voltd-manage status`

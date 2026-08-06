@@ -40,6 +40,9 @@ pub struct Node {
     pub last_error: String,
     pub created_at: String,
     pub updated_at: String,
+    /// SHA-256 fingerprint of the agent's self-signed certificate, captured at
+    /// enrollment. Empty means the node is still on plaintext HTTP.
+    pub tls_fingerprint: String,
 }
 
 impl Node {
@@ -107,10 +110,11 @@ fn from_row(r: &Row) -> rusqlite::Result<Node> {
         last_error: r.get(23)?,
         created_at: r.get(24)?,
         updated_at: r.get(25)?,
+        tls_fingerprint: r.get(26)?,
     })
 }
 
-const COLS: &str = "id,uuid,name,public_url,secret,enrollment_token,enrolled,enabled,maintenance,schedulable,location,tags,memory_limit_mb,disk_limit_mb,cpu_limit_percent,memory_overallocate,disk_overallocate,daemon_version,hostname,os,arch,capacity_json,last_heartbeat,last_error,created_at,updated_at";
+const COLS: &str = "id,uuid,name,public_url,secret,enrollment_token,enrolled,enabled,maintenance,schedulable,location,tags,memory_limit_mb,disk_limit_mb,cpu_limit_percent,memory_overallocate,disk_overallocate,daemon_version,hostname,os,arch,capacity_json,last_heartbeat,last_error,created_at,updated_at,tls_fingerprint";
 
 pub fn create(
     db: &Db,
@@ -175,7 +179,12 @@ pub fn get_by_name(db: &Db, name: &str) -> Result<Node> {
     .context("node not found")
 }
 
-pub fn enroll(db: &Db, token: &str, heartbeat: &NodeHeartbeat) -> Result<Node> {
+pub fn enroll(
+    db: &Db,
+    token: &str,
+    heartbeat: &NodeHeartbeat,
+    tls_fingerprint: &str,
+) -> Result<Node> {
     let conn = db.lock();
     let id: Option<i64> = conn
         .query_row(
@@ -187,8 +196,8 @@ pub fn enroll(db: &Db, token: &str, heartbeat: &NodeHeartbeat) -> Result<Node> {
     let id = id.context("invalid or used enrollment token")?;
     let t = now();
     conn.execute(
-        "UPDATE nodes SET enrolled=1,enrollment_token=NULL,daemon_version=?1,hostname=?2,os=?3,arch=?4,capacity_json=?5,last_heartbeat=?6,last_error='',updated_at=?6 WHERE id=?7",
-        params![heartbeat.daemon_version, heartbeat.hostname, heartbeat.os, heartbeat.arch, serde_json::to_string(&heartbeat.capacity)?, t, id],
+        "UPDATE nodes SET enrolled=1,enrollment_token=NULL,daemon_version=?1,hostname=?2,os=?3,arch=?4,capacity_json=?5,last_heartbeat=?6,last_error='',tls_fingerprint=?8,updated_at=?6 WHERE id=?7",
+        params![heartbeat.daemon_version, heartbeat.hostname, heartbeat.os, heartbeat.arch, serde_json::to_string(&heartbeat.capacity)?, t, id, crate::tls::normalize_fingerprint(tls_fingerprint)],
     )?;
     conn.query_row(
         &format!("SELECT {COLS} FROM nodes WHERE id=?1"),

@@ -5,9 +5,12 @@ pub mod blueprint;
 pub mod console;
 pub mod databases;
 pub mod files;
+pub mod keys;
+pub mod metrics;
 pub mod node;
 pub mod proc;
 pub mod scheduler;
+pub mod webhooks;
 pub mod websites;
 
 use crate::config::Config;
@@ -294,6 +297,28 @@ pub async fn spawn_background(
                         }
                     }
                 }
+            }
+        });
+    }
+    // Webhook delivery dispatcher every 5s.
+    {
+        let db = db.clone();
+        let running = running.clone();
+        tokio::spawn(async move {
+            let client = match reqwest::Client::builder().build() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("webhook dispatcher disabled: {e}");
+                    return;
+                }
+            };
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
+                webhooks::dispatch_due(&db, &client, 50).await;
             }
         });
     }

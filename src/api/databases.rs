@@ -1,5 +1,6 @@
 //! SQLite database endpoints per server.
 use super::{data, ok, ApiError, ApiResult, AppState, AuthUser};
+use crate::capability::Capability;
 use crate::models::{self, User};
 use crate::services::databases;
 use axum::extract::{Path, Query, State};
@@ -10,11 +11,11 @@ fn access_ok(
     state: &AppState,
     user: &User,
     server_id: i64,
-    permission: &str,
+    capability: Capability,
 ) -> ApiResult<crate::models::Server> {
     let s = models::get_server(&state.db, server_id)
         .map_err(|_| ApiError::not_found("server not found"))?;
-    super::require_server_permission(state, user, s.id, permission)?;
+    super::require_capability(state, user, s.id, capability)?;
     if s.node != "local" {
         return Err(ApiError::new(
             axum::http::StatusCode::NOT_IMPLEMENTED,
@@ -29,7 +30,7 @@ pub async fn list(
     AuthUser(u): AuthUser,
     Path(server_id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let s = access_ok(&state, &u, server_id, "database.read")?;
+    let s = access_ok(&state, &u, server_id, Capability::DatabaseRead)?;
     let names = databases::list(&s)?;
     let out: Vec<serde_json::Value> = names
         .iter()
@@ -54,7 +55,7 @@ pub async fn create(
     Path(server_id): Path<i64>,
     Json(req): Json<CreateReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let s = access_ok(&state, &u, server_id, "database.write")?;
+    let s = access_ok(&state, &u, server_id, Capability::DatabaseWrite)?;
     databases::validate_name(&req.name)?;
     if databases::list(&s)?.contains(&req.name) {
         return Err(ApiError::bad_request("database already exists"));
@@ -74,7 +75,7 @@ pub async fn exec(
     Path((server_id, name)): Path<(i64, String)>,
     Json(req): Json<ExecReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let s = access_ok(&state, &u, server_id, "database.write")?;
+    let s = access_ok(&state, &u, server_id, Capability::DatabaseWrite)?;
     databases::validate_name(&name)?;
     databases::exec(&s, &name, &req.sql).map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(ok(serde_json::json!({"ok":true})))
@@ -91,7 +92,7 @@ pub async fn query(
     Path((server_id, name)): Path<(i64, String)>,
     Json(req): Json<QueryReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let s = access_ok(&state, &u, server_id, "database.read")?;
+    let s = access_ok(&state, &u, server_id, Capability::DatabaseRead)?;
     databases::validate_name(&name)?;
     let rows =
         databases::query(&s, &name, &req.sql).map_err(|e| ApiError::bad_request(e.to_string()))?;
@@ -103,7 +104,7 @@ pub async fn drop(
     AuthUser(u): AuthUser,
     Path((server_id, name)): Path<(i64, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let s = access_ok(&state, &u, server_id, "database.write")?;
+    let s = access_ok(&state, &u, server_id, Capability::DatabaseWrite)?;
     databases::validate_name(&name)?;
     databases::drop(&s, &name)?;
     Ok(ok(serde_json::json!({ "ok": true })))
@@ -120,7 +121,7 @@ pub async fn tables(
     Path((server_id, name)): Path<(i64, String)>,
     Query(q): Query<SqliteQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let s = access_ok(&state, &u, server_id, "database.read")?;
+    let s = access_ok(&state, &u, server_id, Capability::DatabaseRead)?;
     databases::validate_name(&name)?;
     let sql = q.sql.unwrap_or_else(|| {
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name".into()

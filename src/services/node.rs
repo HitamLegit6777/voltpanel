@@ -35,18 +35,48 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub struct NodeClient {
-    client: reqwest::Client,
+    /// WebPKI-validating client: plaintext nodes and nodes fronted by a real
+    /// certificate for a real domain.
+    plain: reqwest::Client,
+    /// One client per pinned fingerprint. Building a client is expensive and the
+    /// TLS config is immutable, so they are cached for the process lifetime;
+    /// re-enrolling a node mints a new fingerprint and therefore a new entry.
+    pinned: Arc<DashMap<String, reqwest::Client>>,
+}
+
+fn builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(5))
+        .pool_idle_timeout(Duration::from_secs(60))
+        .user_agent(format!("VoltPanel/{}", env!("CARGO_PKG_VERSION")))
 }
 
 impl NodeClient {
     pub fn new() -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .connect_timeout(Duration::from_secs(5))
-            .pool_idle_timeout(Duration::from_secs(60))
-            .user_agent(format!("VoltPanel/{}", env!("CARGO_PKG_VERSION")))
+        Ok(Self {
+            plain: builder().build()?,
+            pinned: Arc::new(DashMap::new()),
+        })
+    }
+
+    /// Client that will talk to `node`, pinning its self-signed certificate when
+    /// one was recorded at enrollment.
+    fn client_for(&self, node: &Node) -> Result<reqwest::Client> {
+        let fp = crate::tls::normalize_fingerprint(&node.tls_fingerprint);
+        if fp.is_empty() {
+            return Ok(self.plain.clone());
+        }
+        if let Some(c) = self.pinned.get(&fp) {
+            return Ok(c.clone());
+        }
+        let cfg = crate::tls::pinned_client_config(&fp)
+            .with_context(|| format!("node '{}' has an invalid TLS fingerprint", node.name))?;
+        let client = builder()
+            .use_preconfigured_tls((*cfg).clone())
             .build()?;
-        Ok(Self { client })
+        self.pinned.insert(fp, client.clone());
+        Ok(client)
     }
 
     async fn request<B: Serialize + ?Sized, T: DeserializeOwned>(
@@ -70,7 +100,7 @@ impl NodeClient {
             node_protocol::sign(&node.secret, method.as_str(), path, &body_bytes, &node.uuid)?;
         let url = format!("{}{}", node.public_url.trim_end_matches('/'), path);
         let mut req = self
-            .client
+            .client_for(node)?
             .request(method, &url)
             .header(node_protocol::NODE_ID_HEADER, &signed.node_id)
             .header(

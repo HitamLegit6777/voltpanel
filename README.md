@@ -43,53 +43,72 @@ Games are one workload type—not the shape of the product. Sites, bots, proxies
 - Architectures: x86_64 and arm64
 - systemd and cgroup v2 are required
 
-## One-command panel installation
+## Interactive installation
 
-### Domain with automatic HTTPS (recommended)
-
-Point the domain's `A`/`AAAA` record to the panel server first, then run:
+Run the installer from a real terminal. With no arguments it opens a TUI wizard for the domain, storage path, and HTTPS mode:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-panel.sh \
-  | sudo bash -s -- --domain panel.example.com --email admin@example.com
+curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-panel.sh -o /tmp/install-panel.sh
+sudo bash /tmp/install-panel.sh
 ```
 
-The installer:
+Available HTTPS modes:
 
-1. Installs kernel/runtime dependencies
-2. Downloads the release binary
-3. Creates private config and data directories
-4. Generates secrets and a random first-admin password
-5. Installs a hardened systemd service
-6. Installs/configures Caddy for HTTPS
-7. Starts VoltPanel and prints the credentials once
+- **Caddy automatic HTTPS** — recommended for a public hostname.
+- **Certbot + Nginx (domain)** — provisions and renews a regular Let's Encrypt certificate.
+- **Certbot + Nginx (public IP)** — provisions a publicly trusted certificate without a domain. It requires a directly reachable public IPv4/IPv6 and open ports 80/443. Certificates last about six days, so the installer configures renewal checks every 12 hours.
+- **Cloudflare Origin Certificate** — uses a certificate and private key created in Cloudflare; set Cloudflare SSL/TLS mode to **Full (strict)**.
+- **No reverse proxy** — intended only for a trusted LAN.
+
+For unattended automation, pass `--non-interactive` with explicit options:
+
+```bash
+sudo bash /tmp/install-panel.sh --non-interactive \
+  --tls certbot --domain panel.example.com --email admin@example.com
+```
+
+Public-IP certificate example:
+
+```bash
+sudo bash /tmp/install-panel.sh --non-interactive \
+  --tls certbot-ip --ip-address 203.0.113.10 --email admin@example.com
+```
+
+The `certbot-ip` mode installs Certbot 5.4 or newer because older distro packages cannot request IP certificates. It uses Let's Encrypt's mandatory `shortlived` profile; do not disable its systemd renewal timer.
+
+Cloudflare example:
+
+```bash
+sudo bash /tmp/install-panel.sh --non-interactive \
+  --tls cloudflare --domain panel.example.com \
+  --cloudflare-cert /root/panel-origin.pem \
+  --cloudflare-key /root/panel-origin.key
+```
+
+The installer installs dependencies and the release binary, creates private data/configuration directories, generates secrets and a random first-admin password, installs a hardened systemd service, configures the selected TLS proxy, then starts VoltPanel. The initial password is printed once.
 
 ### LAN-only installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-panel.sh \
-  | sudo bash -s -- --public --no-caddy
+sudo bash /tmp/install-panel.sh --non-interactive --tls none --public
 ```
 
 Open `http://SERVER_IP:8080`. Public internet deployments should use HTTPS, not direct port 8080.
 
 ## Add a node
 
-1. Open **Control Center → Fabric → Attach agent**
-2. Enter the node name, location and public URL
-3. Copy the generated enrollment token/command
-4. On the node machine run:
+1. Open **Control Center → Fabric → Attach agent**.
+2. Enter the node name, location and public URL.
+3. Copy its one-time enrollment token.
+4. Download and run the node wizard on the node host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-node.sh \
-  | sudo bash -s -- \
-      --panel https://panel.example.com \
-      --token ENROLLMENT_TOKEN \
-      --domain node1.example.com \
-      --email admin@example.com
+curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-node.sh -o /tmp/install-node.sh
+sudo bash /tmp/install-node.sh
 ```
 
-For a trusted private LAN without TLS, add `--allow-http` explicitly.
+The node wizard provides the same Caddy, domain Certbot, public-IP Certbot, Cloudflare, and LAN-only modes. For a trusted private LAN without TLS, the wizard enables HTTP enrollment explicitly; automated installs must pass `--allow-http`.
+
 
 ## Management commands
 

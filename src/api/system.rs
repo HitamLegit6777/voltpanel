@@ -61,7 +61,7 @@ pub async fn version(_state: State<AppState>, _u: AuthUser) -> ApiResult<Json<se
         "version": env!("CARGO_PKG_VERSION"),
         "name": "voltpanel",
         "rust": std::env::var("RUST_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_RUST_VERSION").to_string()),
-        "no_docker": true,
+        "isolation": "native",
     })))
 }
 

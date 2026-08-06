@@ -1003,6 +1003,36 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 
 @media(max-width:1100px){.blueprint-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:680px){.blueprint-grid{grid-template-columns:1fr}.blueprint-card{min-height:220px}}
 
+/* ---------- VoltSpec Blueprint Studio: versions, drift & pinning ---------- */
+.bp-modal.modal-card.big { max-width: 1100px; }
+.bp-modal-body { display:grid; grid-template-columns:300px minmax(0,1fr) 330px; min-height:460px; max-height:min(68vh,640px); }
+.bp-pane { display:flex; flex-direction:column; min-width:0; border-right:1px solid var(--border); }
+.bp-pane:last-child { border-right:0; }
+.bp-pane-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); font-size:10.5px; font-weight:800; letter-spacing:.8px; text-transform:uppercase; color:var(--text-3); }
+.bp-list { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:10px; }
+.bp-list > .empty { margin:auto; }
+.bp-rev { display:grid; gap:5px; padding:10px 12px; border:1px solid var(--border); border-radius:11px; background:var(--panel-2); cursor:pointer; transition:.16s var(--ease); text-align:left; }
+.bp-rev:hover { border-color:var(--accent); }
+.bp-rev.current { border-color:color-mix(in srgb,var(--green) 40%,var(--border)); }
+.bp-rev.active { border-color:var(--accent); background:var(--accent-dim); }
+.bp-rev-top { display:flex; align-items:center; gap:8px; }
+.bp-rev-top b { font-size:13px; color:var(--text); }
+.bp-rev-time { margin-left:auto; font-size:10.5px; color:var(--text-3); }
+.bp-rev-meta { display:flex; align-items:center; gap:7px; font-size:10.5px; color:var(--text-3); }
+.bp-rev-meta code { padding:1px 6px; border-radius:5px; background:var(--bg); border:1px solid var(--border); font-size:10px; }
+.bp-rev-note { font-size:11px; color:var(--text-2); }
+.bp-rev-actions { margin-top:2px; }
+.bp-snap-pre { flex:1; margin:0; padding:14px; overflow:auto; font-family:var(--mono); font-size:11.5px; line-height:1.55; color:var(--text-2); white-space:pre; }
+.bp-drift-row { display:grid; gap:7px; padding:10px 12px; border:1px solid var(--border); border-radius:11px; background:var(--panel-2); }
+.bp-drift-name { display:flex; align-items:center; gap:7px; font-size:12.5px; }
+.bp-drift-name .muted { font-size:10.5px; }
+.bp-drift-fields { display:flex; flex-wrap:wrap; gap:5px; font-size:10.5px; }
+.bp-drift-fields code { padding:1px 6px; border-radius:5px; background:var(--bg); border:1px solid var(--border); font-size:10px; color:var(--accent); }
+.bp-drift-actions { display:flex; align-items:center; gap:7px; }
+.bp-pin-select { font:inherit; font-size:11px; padding:4px 6px; border-radius:7px; background:var(--bg); border:1px solid var(--border-2); color:var(--text-2); }
+.bp-pin-select:focus { outline:none; border-color:var(--accent); }
+@media (max-width:980px) { .bp-modal-body { grid-template-columns:1fr; max-height:none; } .bp-pane { border-right:0; border-bottom:1px solid var(--border); } .bp-pane-snap { order:-1; min-height:240px; } }
+
 @media (max-width:900px) { .fleet-hero { grid-template-columns:1fr; min-height:0; padding:28px; } .fleet-visual { display:none; } .node-grid { grid-template-columns:1fr; } }
 @media (max-width:520px) { .fleet-hero { padding:22px 18px; border-radius:13px; } .fleet-copy h2,.nodes-header h2{font-size:24px}.nodes-header{align-items:flex-start;flex-direction:column;padding:20px}.isolation-strip .isolation-node{display:none}.isolation-strip span{white-space:normal}.node-metrics{grid-template-columns:1fr}.node-card{padding:16px} }
 
@@ -1069,3 +1099,35 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 
 
 body.modal-open { overflow:hidden; }
 [role="dialog"]:focus { outline:none; }
+/* ---------- 28. Credentials & webhooks (Settings) ---------- */
+.cred-row { display:flex; align-items:center; gap:12px; padding:11px 14px; border-bottom:1px solid var(--border); }
+.cred-row:last-child { border-bottom:none; }
+.cred-row:hover { background:var(--panel-2); }
+.cred-row.revoked { opacity:.6; }
+.cred-ico { display:flex; color:var(--muted); flex-shrink:0; }
+.cred-main { min-width:0; flex:1; display:flex; flex-direction:column; gap:5px; }
+.cred-title { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.cred-title b { font-size:13px; }
+.cred-title code { font-family:var(--mono); font-size:11.5px; color:var(--accent); }
+.cred-meta { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.cred-url { font-family:var(--mono); font-size:11px; color:var(--text-2); max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cred-side { text-align:right; color:var(--muted); font-size:11.5px; }
+.cred-error { font-size:11.5px; color:var(--red); background:var(--red-dim); border-radius:6px; padding:4px 8px; margin-top:2px; }
+.cred-row .f-actions { display:flex; gap:4px; opacity:.35; transition:opacity .18s var(--ease); }
+.cred-row:hover .f-actions { opacity:1; }
+.cap-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px 14px; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg); max-height:230px; overflow-y:auto; }
+.cap-grid .check-row { font-size:12px; }
+.badge.accent { background:var(--accent-dim); color:var(--accent); }
+@media(max-width:640px){ .cap-grid { grid-template-columns:1fr; } .cred-row { flex-wrap:wrap; } .cred-side { text-align:left; } .cred-url { max-width:180px; } }
+
+/* ---------- 29. Workspace metrics ---------- */
+.metrics-head { margin-bottom: 14px; }
+.range-select { display: flex; gap: 6px; flex-wrap: wrap; }
+.metrics-summary { margin-bottom: 16px; }
+.metrics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.metrics-grid .card { margin: 0; }
+.metric-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.metric-card-head h3 { margin: 0; font-size: 13px; }
+.metric-card-head .muted { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.metric-card .sparkline { height: 64px; min-width: 0; }
+@media (max-width: 720px) { .metrics-grid { grid-template-columns: 1fr; } }

@@ -1,5 +1,6 @@
 //! File manager endpoints.
 use super::{ok, ApiError, ApiResult, AppState, AuthUser};
+use crate::capability::Capability;
 use crate::models::{self, User};
 use crate::services::files;
 use axum::extract::{Path, Query, State};
@@ -33,7 +34,7 @@ pub async fn list(
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.read")?;
+    super::require_capability(&state, &u, id, Capability::FilesRead)?;
     let rel = q.path.unwrap_or_else(|| "/".into());
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
@@ -61,7 +62,7 @@ pub async fn read(
     Query(q): Query<ReadQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.read")?;
+    super::require_capability(&state, &u, id, Capability::FilesRead)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
         let value = state.node_client.read_file(&node, &s.uuid, &q.path).await?;
@@ -91,7 +92,7 @@ pub async fn write(
     Json(req): Json<WriteReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     let data = match (&req.content, &req.content_b64) {
         (Some(c), _) => c.as_bytes().to_vec(),
         (None, Some(b)) => STANDARD
@@ -131,7 +132,7 @@ pub async fn upload_multipart(
     mut multipart: axum::extract::Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     let mut saved = 0usize;
     while let Some(field) = multipart
         .next_field()
@@ -177,7 +178,7 @@ pub async fn rename(
     Json(req): Json<RenameReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         let n = crate::nodes::get_by_name(&state.db, &s.node)?;
         state
@@ -211,7 +212,7 @@ pub async fn copy(
     Json(req): Json<CopyReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         let n = crate::nodes::get_by_name(&state.db, &s.node)?;
         state
@@ -244,7 +245,7 @@ pub async fn delete(
     Json(req): Json<DeleteReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         let n = crate::nodes::get_by_name(&state.db, &s.node)?;
         state
@@ -277,7 +278,7 @@ pub async fn chmod(
     let s = access_ok(&state, &u, id)?;
     let mode = u32::from_str_radix(req.mode.trim_start_matches("0o"), 8)
         .map_err(|_| ApiError::bad_request("invalid mode"))?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         let n = crate::nodes::get_by_name(&state.db, &s.node)?;
         state
@@ -310,7 +311,7 @@ pub async fn mkdir(
     Json(req): Json<MkdirReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         let n = crate::nodes::get_by_name(&state.db, &s.node)?;
         state
@@ -340,7 +341,7 @@ pub async fn touch(
     Json(req): Json<TouchReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         let n = crate::nodes::get_by_name(&state.db, &s.node)?;
         state
@@ -371,7 +372,7 @@ pub async fn create_archive(
     Json(req): Json<ArchiveReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -412,7 +413,7 @@ pub async fn extract(
     Json(req): Json<ExtractReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
@@ -437,7 +438,7 @@ pub async fn download(
     Query(q): Query<ReadQuery>,
 ) -> ApiResult<Response> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.read")?;
+    super::require_capability(&state, &u, id, Capability::FilesRead)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
         let value = state.node_client.read_file(&node, &s.uuid, &q.path).await?;
@@ -506,7 +507,7 @@ pub async fn upload_b64(
     Json(req): Json<B64UploadReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
         let req = crate::node_protocol::FileWriteRequest {
@@ -534,7 +535,7 @@ pub async fn summary(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<FileSummary>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.read")?;
+    super::require_capability(&state, &u, id, Capability::FilesRead)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
         let root_entries = state.node_client.files(&node, &s.uuid, "/").await?;
@@ -566,7 +567,7 @@ pub async fn exists_check(
     Query(q): Query<ReadQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.read")?;
+    super::require_capability(&state, &u, id, Capability::FilesRead)?;
     if s.node != "local" {
         if q.path == "/" {
             return Ok(Json(serde_json::json!({"exists":true})));
@@ -600,7 +601,7 @@ pub async fn move_files(
     Json(req): Json<MoveReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "files.write")?;
+    super::require_capability(&state, &u, id, Capability::FilesWrite)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
         for from in &req.files {

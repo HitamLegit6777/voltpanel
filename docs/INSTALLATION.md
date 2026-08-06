@@ -41,26 +41,49 @@ If IPv6 is reachable, add matching `AAAA` records. Ports 80 and 443 must reach C
 
 ## Install the panel
 
+Download the script, then launch it from a real terminal to use the TUI wizard:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-panel.sh \
-  | sudo bash -s -- \
-      --domain panel.example.com \
-      --email admin@example.com
+curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-panel.sh -o /tmp/install-panel.sh
+sudo bash /tmp/install-panel.sh
 ```
 
-The random admin password is printed once. Save it and change it immediately.
+The wizard offers Caddy automatic HTTPS, Certbot with Nginx for a domain, Certbot with Nginx for a public IP, a Cloudflare Origin Certificate, or LAN-only HTTP. The random admin password is printed once. Save it and change it immediately.
 
-### Installer options
+For a Cloudflare setup, create an Origin Certificate in Cloudflare, copy its PEM and private key to the host, select **Cloudflare Origin Certificate**, then set the zone SSL/TLS encryption mode to **Full (strict)**. Keep both origin key files private.
+
+Public-IP certificates require a directly reachable IPv4/IPv6 and ports 80 and 443. The installer installs Certbot 5.4 or newer, requests Let's Encrypt's mandatory `shortlived` profile, configures Nginx manually, and checks renewal every 12 hours. IP certificates expire after approximately six days; do not disable the generated renewal timer.
+
+### Unattended installer options
 
 ```text
---domain DOMAIN       Install Caddy and enable automatic HTTPS
---email EMAIL         ACME contact email
---listen ADDRESS      Explicit origin listen address
---public              Listen directly on 0.0.0.0:8080
---no-caddy            Skip Caddy installation
---data-dir PATH       Panel data directory
---version VERSION     Install a release tag instead of latest
---dry-run             Print actions only
+--domain DOMAIN          Public panel domain
+--email EMAIL            ACME contact email
+--tls MODE               caddy, certbot, certbot-ip, cloudflare, or none
+--ip-address IP          Public IPv4 or IPv6 for certbot-ip
+--cloudflare-cert PATH   Cloudflare Origin Certificate PEM
+--cloudflare-key PATH    Cloudflare Origin private key
+--listen ADDRESS         Explicit origin listen address
+--public                 Listen directly on 0.0.0.0:8080
+--no-caddy               Alias for --tls none
+--non-interactive        Disable the TUI wizard
+--data-dir PATH          Panel data directory
+--version VERSION        Install a release tag instead of latest
+--dry-run                Print actions only
+```
+
+Example:
+
+```bash
+sudo bash /tmp/install-panel.sh --non-interactive \
+  --tls certbot --domain panel.example.com --email admin@example.com
+```
+
+Public-IP example:
+
+```bash
+sudo bash /tmp/install-panel.sh --non-interactive \
+  --tls certbot-ip --ip-address 203.0.113.10 --email admin@example.com
 ```
 
 ### Verify
@@ -74,27 +97,23 @@ curl -I https://panel.example.com
 
 ## Install a node
 
-Create an agent from **Control Center → Fabric** first. Copy its enrollment token.
+Create an agent from **Control Center → Fabric** first and copy its enrollment token. Then launch the node wizard:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-node.sh \
-  | sudo bash -s -- \
-      --panel https://panel.example.com \
-      --token TOKEN \
-      --domain node1.example.com \
-      --email admin@example.com
+curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-node.sh -o /tmp/install-node.sh
+sudo bash /tmp/install-node.sh
 ```
+
+The wizard asks for the panel URL and enrollment token and provides the same five TLS modes as the panel installer.
 
 ### Private LAN node
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scripts/install-node.sh \
-  | sudo bash -s -- \
-      --panel http://192.168.1.10:8080 \
-      --token TOKEN \
-      --public-url http://192.168.1.11:8081 \
-      --allow-http \
-      --no-caddy
+sudo bash /tmp/install-node.sh --non-interactive \
+  --panel http://192.168.1.10:8080 \
+  --token TOKEN \
+  --public-url http://192.168.1.11:8081 \
+  --allow-http --tls none
 ```
 
 `--allow-http` must only be used on a trusted private network. HMAC protects integrity and authenticity, but only TLS protects console/file/snapshot confidentiality.
@@ -102,16 +121,21 @@ curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scrip
 ### Execution-agent installer options
 
 ```text
---panel URL           Panel URL (required)
---token TOKEN         One-time enrollment token (required)
---domain DOMAIN       Configure node HTTPS with Caddy
---public-url URL      URL stored by the panel
---listen ADDRESS      voltd listen address
---allow-http          Explicitly permit non-loopback HTTP enrollment
---no-caddy            Skip Caddy
---data-dir PATH       Workload data path
---version VERSION     Release tag
---dry-run             Print actions only
+--panel URL              Panel URL
+--token TOKEN            One-time enrollment token
+--domain DOMAIN          Public node domain
+--tls MODE               caddy, certbot, certbot-ip, cloudflare, or none
+--ip-address IP          Public IPv4 or IPv6 for certbot-ip
+--cloudflare-cert PATH   Cloudflare Origin Certificate PEM
+--cloudflare-key PATH    Cloudflare Origin private key
+--public-url URL         URL stored by the panel
+--listen ADDRESS         voltd listen address
+--allow-http             Explicitly permit non-loopback HTTP enrollment
+--no-caddy               Alias for --tls none
+--non-interactive        Disable the TUI wizard
+--data-dir PATH          Workload data path
+--version VERSION        Release tag
+--dry-run                Print actions only
 ```
 
 ### Verify node

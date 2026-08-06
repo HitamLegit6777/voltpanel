@@ -306,6 +306,152 @@ fn migrate(conn: &Connection) -> Result<()> {
             "#,
         )?;
     }
+    if version < 5 {
+        // Native VoltPanel domain naming: blueprints replace the borrowed egg table,
+        // and columns that were never read by the isolation layer are removed.
+        conn.execute_batch(
+            r#"
+            ALTER TABLE egss RENAME TO blueprints;
+            ALTER TABLE blueprints RENAME COLUMN docker_image TO runtime_hint;
+            ALTER TABLE blueprints DROP COLUMN config_files;
+            ALTER TABLE servers RENAME COLUMN egg_id TO blueprint_id;
+            ALTER TABLE servers RENAME COLUMN docker_image TO runtime_hint;
+            ALTER TABLE servers DROP COLUMN threads;
+            ALTER TABLE servers DROP COLUMN ignore_oom;
+            ALTER TABLE server_variables RENAME COLUMN egg_id TO blueprint_id;
+            PRAGMA user_version = 5;
+            "#,
+        )?;
+    }
+    if version < 6 {
+        // Typed capability model: subusers gain a role preset, and legacy
+        // free-form permission tokens are normalized to canonical capabilities.
+        conn.execute_batch(
+            r#"
+            ALTER TABLE subusers ADD COLUMN role TEXT NOT NULL DEFAULT 'custom';
+            PRAGMA user_version = 6;
+            "#,
+        )?;
+        normalize_subuser_permissions(conn)?;
+    }
+    if version < 7 {
+        // Telemetry, blueprint revisions, capability-scoped keys, webhook bus,
+        // schedule retry policy, and first-class sites.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS server_metrics (
+                server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                ts INTEGER NOT NULL,
+                cpu_percent REAL NOT NULL DEFAULT 0,
+                memory_bytes INTEGER NOT NULL DEFAULT 0,
+                disk_bytes INTEGER NOT NULL DEFAULT 0,
+                rx_bytes INTEGER NOT NULL DEFAULT 0,
+                tx_bytes INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, ts)
+            );
+            CREATE INDEX IF NOT EXISTS idx_server_metrics_ts ON server_metrics(ts);
+
+            ALTER TABLE blueprints ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+            CREATE TABLE IF NOT EXISTS blueprint_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                blueprint_id INTEGER NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                snapshot TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                author TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(blueprint_id, version)
+            );
+            ALTER TABLE servers ADD COLUMN blueprint_version INTEGER NOT NULL DEFAULT 0;
+
+            ALTER TABLE api_keys ADD COLUMN capabilities TEXT NOT NULL DEFAULT '["*"]';
+            ALTER TABLE api_keys ADD COLUMN server_ids TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE api_keys ADD COLUMN expires_at TEXT;
+            ALTER TABLE api_keys ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0;
+            UPDATE api_keys SET capabilities='["*"]' WHERE scopes IN ('full','*');
+
+            CREATE TABLE IF NOT EXISTS webhooks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL,
+                secret TEXT NOT NULL DEFAULT '',
+                events TEXT NOT NULL DEFAULT '["*"]',
+                server_id INTEGER REFERENCES servers(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                last_status TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                webhook_id INTEGER NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+                event TEXT NOT NULL,
+                payload TEXT NOT NULL DEFAULT '{}',
+                attempt INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                response_code INTEGER,
+                error TEXT NOT NULL DEFAULT '',
+                next_attempt_at INTEGER,
+                created_at TEXT NOT NULL,
+                delivered_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_pending
+                ON webhook_deliveries(status, next_attempt_at);
+
+            ALTER TABLE schedules ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE schedules ADD COLUMN retry_backoff_s INTEGER NOT NULL DEFAULT 30;
+            ALTER TABLE schedules ADD COLUMN only_when_online INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE schedule_runs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE schedule_runs ADD COLUMN finished_at TEXT;
+
+            ALTER TABLE websites ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+            ALTER TABLE websites ADD COLUMN upstream TEXT NOT NULL DEFAULT '';
+            ALTER TABLE websites ADD COLUMN force_https INTEGER NOT NULL DEFAULT 0;
+            DELETE FROM websites WHERE id NOT IN (SELECT MIN(id) FROM websites GROUP BY domain);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_websites_domain ON websites(domain);
+
+            PRAGMA user_version = 7;
+            "#,
+        )?;
+    }
+    if version < 8 {
+        // Node agents serve HTTPS with a self-signed certificate; the panel pins
+        // the fingerprint captured at enrollment instead of trusting the WebPKI.
+        conn.execute_batch(
+            r#"
+            ALTER TABLE nodes ADD COLUMN tls_fingerprint TEXT NOT NULL DEFAULT '';
+            PRAGMA user_version = 8;
+            "#,
+        )?;
+    }
+    Ok(())
+}
+
+/// Rewrite pre-v6 permission rows into canonical capability names and infer a
+/// role preset where the stored set matches one exactly.
+fn normalize_subuser_permissions(conn: &Connection) -> Result<()> {
+    use crate::capability::{expand_legacy, Role};
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id,permissions FROM subusers")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<std::result::Result<_, _>>()?
+    };
+    for (id, raw) in rows {
+        let tokens: Vec<String> = serde_json::from_str(&raw).unwrap_or_default();
+        let caps = expand_legacy(&tokens);
+        let role = Role::ALL
+            .into_iter()
+            .find(|r| r.capabilities() == caps)
+            .unwrap_or(Role::Custom);
+        let names: Vec<&str> = caps.iter().map(|c| c.as_str()).collect();
+        conn.execute(
+            "UPDATE subusers SET permissions=?1, role=?2 WHERE id=?3",
+            rusqlite::params![serde_json::to_string(&names)?, role.as_str(), id],
+        )?;
+    }
     Ok(())
 }
 

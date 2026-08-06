@@ -141,13 +141,25 @@ pub struct PowerRequest {
     pub action: PowerAction,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PowerAction {
     Start,
     Stop,
     Restart,
     Kill,
+}
+
+impl PowerAction {
+    /// Stable lowercase name; used for audit-log actions and API echoes.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PowerAction::Start => "start",
+            PowerAction::Stop => "stop",
+            PowerAction::Restart => "restart",
+            PowerAction::Kill => "kill",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

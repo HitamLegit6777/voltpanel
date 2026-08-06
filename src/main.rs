@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod capability;
 pub mod config;
 pub mod db;
 pub mod isolation;
@@ -13,6 +14,7 @@ pub mod models;
 pub mod node_protocol;
 pub mod nodes;
 pub mod services;
+pub mod tls;
 pub mod web;
 
 use anyhow::Result;
@@ -113,14 +115,26 @@ async fn main() -> Result<()> {
     let app = build_router(state);
 
     let addr = cfg.web.listen;
-    tracing::info!("{} listening on http://{addr}", cfg.general.instance_name);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal(running.clone(), procs.clone()))
-    .await?;
+    let shutdown = shutdown_signal(running.clone(), procs.clone());
+    if cfg.web.tls_self_signed {
+        let sans = tls::default_sans(&cfg.web.tls_extra_sans);
+        let material = tls::ensure_material(&cfg.general.data_dir.join("tls"), &sans)?;
+        tracing::info!(
+            "{} listening on https://{addr} (cert fingerprint {})",
+            cfg.general.instance_name,
+            material.fingerprint
+        );
+        tls::serve_tls(listener, app, tls::server_config(&material)?, shutdown).await?;
+    } else {
+        tracing::info!("{} listening on http://{addr}", cfg.general.instance_name);
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await?;
+    }
     Ok(())
 }
 
@@ -210,6 +224,16 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/servers/:id/files/extract", post(files::extract))
         .route("/api/servers/:id/files/summary", get(files::summary))
         .route("/api/servers/:id/files/exists", get(files::exists_check))
+        // ------- websites (vhosts/proxy) -------
+        .route("/api/servers/:id/sites", get(sites::list))
+        .route("/api/servers/:id/sites", post(sites::create))
+        .route("/api/servers/:id/sites/:site_id", get(sites::get))
+        .route("/api/servers/:id/sites/:site_id", patch(sites::update))
+        .route("/api/servers/:id/sites/:site_id", delete(sites::delete))
+        .route("/api/servers/:id/sites/:site_id/toggle", post(sites::toggle))
+        // ------- metrics -------
+        .route("/api/servers/:id/metrics", get(metrics::series))
+        .route("/api/servers/:id/metrics/summary", get(metrics::summary))
         // ------- workload blueprints -------
         .route("/api/blueprints", get(blueprints::list))
         .route("/api/blueprints/:id", get(blueprints::get))
@@ -219,6 +243,14 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/blueprints/import", post(blueprints::import))
         .route("/api/blueprints/:id/export", get(blueprints::export))
         .route("/api/blueprints/categories", get(blueprints::categories))
+        .route("/api/blueprints/:id/revisions", get(blueprints::revisions))
+        .route(
+            "/api/blueprints/:id/revisions/:version",
+            get(blueprints::revision_detail),
+        )
+        .route("/api/blueprints/:id/rollback", post(blueprints::rollback))
+        .route("/api/blueprints/:id/drift", get(blueprints::drift))
+        .route("/api/servers/:id/blueprint/pin", post(blueprints::pin))
         // ------- schedules -------
         .route("/api/servers/:id/schedules", get(schedules::list))
         .route("/api/servers/:id/schedules", post(schedules::create))
@@ -263,6 +295,16 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/keys", get(keys::list))
         .route("/api/keys", post(keys::create))
         .route("/api/keys/:id", delete(keys::delete))
+        .route("/api/keys/:id/revoke", post(keys::revoke))
+        // ------- webhooks -------
+        .route("/api/webhooks", get(webhooks::list))
+        .route("/api/webhooks", post(webhooks::create))
+        .route("/api/webhooks/:id", get(webhooks::get))
+        .route("/api/webhooks/:id", patch(webhooks::update))
+        .route("/api/webhooks/:id", delete(webhooks::delete))
+        .route("/api/webhooks/:id/toggle", post(webhooks::toggle))
+        .route("/api/webhooks/:id/deliveries", get(webhooks::deliveries))
+        .route("/api/webhooks/:id/test", post(webhooks::test))
         // ------- settings/system -------
         .route("/api/settings/public", get(settings::public))
         .route("/api/settings", get(settings::get))
@@ -375,80 +417,72 @@ fn seed(db: &db::Db, cfg: &config::Config) -> Result<()> {
 }
 
 fn seed_blueprints(db: &db::Db) -> Result<()> {
-    let blueprints: Vec<(serde_json::Value, &str)> = vec![
-        (
-            serde_json::json!({
-                "name": "Node.js", "description": "Run any Node.js application", "author": "voltpanel",
-                "category": "web", "docker_image": "node:20-alpine",
-                "startup": "node {{NODE_ARGS}} {{ENTRYPOINT}}",
-                "stop": "stop",
-                "variables": [
-                    {"name": "Entry Point", "description": "Main JS file", "env_var": "ENTRYPOINT", "default_value": "index.js", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"},
-                    {"name": "Node Args", "description": "Extra node arguments", "env_var": "NODE_ARGS", "default_value": "", "user_viewable": true, "user_editable": true, "rules": "string|max:255"}
-                ]
-            }),
-            "node",
-        ),
-        (
-            serde_json::json!({
-                "name": "Python", "description": "Python 3 application runner", "author": "voltpanel",
-                "category": "generic", "docker_image": "python:3.11-slim",
-                "startup": "python3 {{PY_ARGS}} {{ENTRYPOINT}}",
-                "stop": "stop",
-                "variables": [
-                    {"name": "Entry Point", "description": "Main python file", "env_var": "ENTRYPOINT", "default_value": "main.py", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"}
-                ]
-            }),
-            "python",
-        ),
-        (
-            serde_json::json!({
-                "name": "Minecraft Java", "description": "Minecraft: Java Edition server", "author": "voltpanel",
-                "category": "game", "docker_image": "eclipse-temurin:21",
-                "startup": "java -Xms{{MEMORY}}M -Xmx{{MEMORY}}M -jar {{SERVER_JAR}} nogui",
-                "stop": "stop",
-                "variables": [
-                    {"name": "Server Jar", "description": "Jar file to run", "env_var": "SERVER_JAR", "default_value": "server.jar", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"},
-                    {"name": "Memory (MB)", "description": "Heap size", "env_var": "MEMORY", "default_value": "1024", "user_viewable": true, "user_editable": true, "rules": "numeric|min:128|max:32768"}
-                ],
-                "install": {"script": "apt-get update -y && apt-get install -y wget && cd /mnt/server && if [ ! -f server.jar ]; then wget -O server.jar https://piston-data.mojang.com/v1/objects/8dd1a28015f228b9cac1499b248d8f5c8f4b8f8e/server.jar; fi"}
-            }),
-            "mc",
-        ),
-        (
-            serde_json::json!({
-                "name": "Terraria", "description": "Terraria dedicated server", "author": "voltpanel",
-                "category": "game", "docker_image": "mono:latest",
-                "startup": "mono TerrariaServer.exe -port {{SERVER_PORT}} -autocreate 2 -worldname world",
-                "stop": "exit",
-                "variables": [
-                    {"name": "World Name", "description": "World file", "env_var": "WORLD", "default_value": "world.wld", "user_viewable": true, "user_editable": true, "rules": "required|string|max:255"}
-                ]
-            }),
-            "terraria",
-        ),
-        (
-            serde_json::json!({
-                "name": "Web Server", "description": "Static website hosting", "author": "voltpanel",
-                "category": "web", "docker_image": "nginx:alpine",
-                "startup": "nginx -g 'daemon off;'",
-                "stop": "quit",
-                "variables": []
-            }),
-            "web",
-        ),
-        (
-            serde_json::json!({
-                "name": "Redis", "description": "Redis in-memory store", "author": "voltpanel",
-                "category": "database", "docker_image": "redis:7",
-                "startup": "redis-server --port {{SERVER_PORT}} --save ''",
-                "stop": "shutdown",
-                "variables": []
-            }),
-            "redis",
-        ),
+    let blueprints: Vec<serde_json::Value> = vec![
+        serde_json::json!({
+            "name": "Node.js", "description": "Run any Node.js application from the workspace root",
+            "author": "voltpanel", "category": "web", "runtime_hint": "node",
+            "startup": "node ${input.NODE_ARGS} ${input.ENTRYPOINT}",
+            "stop": "^C",
+            "variables": [
+                {"name": "Entry Point", "description": "Main JS file", "env_var": "ENTRYPOINT", "default_value": "index.js", "required": true, "kind": {"type": "path", "max_len": 255}},
+                {"name": "Node Args", "description": "Extra node arguments", "env_var": "NODE_ARGS", "default_value": "", "kind": {"type": "text", "max_len": 255}}
+            ],
+            "install": {"script": "if [ -f package.json ]; then npm install --omit=dev; fi"}
+        }),
+        serde_json::json!({
+            "name": "Python", "description": "Python 3 application runner with optional venv",
+            "author": "voltpanel", "category": "generic", "runtime_hint": "python",
+            "startup": "${input.PYTHON_BIN} ${input.PY_ARGS} ${input.ENTRYPOINT}",
+            "stop": "^C",
+            "variables": [
+                {"name": "Entry Point", "description": "Main python file", "env_var": "ENTRYPOINT", "default_value": "main.py", "required": true, "kind": {"type": "path", "max_len": 255}},
+                {"name": "Python Binary", "description": "Interpreter to launch", "env_var": "PYTHON_BIN", "default_value": "python3", "required": true, "kind": {"type": "choice", "options": ["python3", "python3.11", "python3.12", "./.venv/bin/python"]}},
+                {"name": "Python Args", "description": "Extra interpreter arguments", "env_var": "PY_ARGS", "default_value": "", "kind": {"type": "text", "max_len": 255}}
+            ],
+            "install": {"script": "if [ -f requirements.txt ]; then python3 -m venv .venv && ./.venv/bin/pip install --no-input -r requirements.txt; fi"}
+        }),
+        serde_json::json!({
+            "name": "Minecraft Java", "description": "Minecraft: Java Edition server on the host JVM",
+            "author": "voltpanel", "category": "game", "runtime_hint": "java",
+            "startup": "java -Xms${input.MEMORY}M -Xmx${input.MEMORY}M -jar ${input.SERVER_JAR} nogui",
+            "stop": "stop",
+            "variables": [
+                {"name": "Server Jar", "description": "Jar file to run", "env_var": "SERVER_JAR", "default_value": "server.jar", "required": true, "kind": {"type": "path", "max_len": 255}},
+                {"name": "Server Jar URL", "description": "Download source used when the jar is missing", "env_var": "SERVER_JAR_URL", "default_value": "", "kind": {"type": "url"}},
+                {"name": "Memory (MB)", "description": "Heap size", "env_var": "MEMORY", "default_value": "1024", "required": true, "kind": {"type": "number", "min": 128.0, "max": 32768.0}}
+            ],
+            "install": {"script": "if [ ! -f \"$SERVER_JAR\" ] && [ -n \"$SERVER_JAR_URL\" ]; then curl -fsSL -o \"$SERVER_JAR\" \"$SERVER_JAR_URL\"; fi\necho eula=true > eula.txt"}
+        }),
+        serde_json::json!({
+            "name": "Terraria", "description": "Terraria dedicated server; upload the server build into the workspace first",
+            "author": "voltpanel", "category": "game", "runtime_hint": "mono",
+            "startup": "${input.SERVER_BIN} -port ${workspace.port} -autocreate 2 -worldname ${input.WORLD}",
+            "stop": "exit",
+            "variables": [
+                {"name": "Server Binary", "description": "Launcher inside the workspace", "env_var": "SERVER_BIN", "default_value": "./TerrariaServer.bin.x86_64", "required": true, "kind": {"type": "path", "max_len": 255}},
+                {"name": "World Name", "description": "World file", "env_var": "WORLD", "default_value": "world", "required": true, "kind": {"type": "text", "max_len": 64, "pattern": "^[A-Za-z0-9_-]+$"}}
+            ],
+            "install": {"script": "if [ -f \"$SERVER_BIN\" ]; then chmod +x \"$SERVER_BIN\"; fi"}
+        }),
+        serde_json::json!({
+            "name": "Static Site", "description": "Serve a static site directory over HTTP",
+            "author": "voltpanel", "category": "web", "runtime_hint": "python",
+            "startup": "python3 -m http.server ${workspace.port} --bind 0.0.0.0 --directory ${input.WEB_ROOT}",
+            "stop": "^C",
+            "variables": [
+                {"name": "Web Root", "description": "Directory served to visitors", "env_var": "WEB_ROOT", "default_value": "public", "required": true, "kind": {"type": "path", "max_len": 255}}
+            ],
+            "install": {"script": "mkdir -p \"$WEB_ROOT\"\nif [ ! -f \"$WEB_ROOT/index.html\" ]; then echo '<h1>VoltPanel</h1>' > \"$WEB_ROOT/index.html\"; fi"}
+        }),
+        serde_json::json!({
+            "name": "Redis", "description": "Redis in-memory store bound to the workspace port",
+            "author": "voltpanel", "category": "database", "runtime_hint": "redis",
+            "startup": "redis-server --port ${workspace.port} --bind 0.0.0.0 --dir . --save ''",
+            "stop": "shutdown",
+            "variables": []
+        }),
     ];
-    for (blueprint, _slug) in blueprints {
+    for blueprint in blueprints {
         let name = blueprint["name"].as_str().unwrap().to_string();
         let description = blueprint["description"].as_str().unwrap_or("").to_string();
         let author = blueprint["author"]
@@ -459,28 +493,14 @@ fn seed_blueprints(db: &db::Db) -> Result<()> {
             .as_str()
             .unwrap_or("generic")
             .to_string();
-        let image = blueprint["docker_image"]
+        let runtime_hint = blueprint["runtime_hint"]
             .as_str()
-            .unwrap_or("linux-native")
+            .unwrap_or("native")
             .to_string();
         let startup = blueprint["startup"].as_str().unwrap_or("").to_string();
         let stop = blueprint["stop"].as_str().unwrap_or("stop").to_string();
-        let vars: Vec<crate::models::BlueprintInput> = blueprint["variables"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|v| crate::models::BlueprintInput {
-                        name: v["name"].as_str().unwrap_or("").to_string(),
-                        description: v["description"].as_str().unwrap_or("").to_string(),
-                        env_var: v["env_var"].as_str().unwrap_or("").to_string(),
-                        default_value: v["default_value"].as_str().unwrap_or("").to_string(),
-                        user_viewable: v["user_viewable"].as_bool().unwrap_or(true),
-                        user_editable: v["user_editable"].as_bool().unwrap_or(true),
-                        rules: v["rules"].as_str().unwrap_or("").to_string(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let vars: Vec<crate::models::BlueprintInput> =
+            serde_json::from_value(blueprint["variables"].clone()).unwrap_or_default();
         let install = blueprint["install"]["script"]
             .as_str()
             .map(|s| s.to_string());
@@ -491,9 +511,8 @@ fn seed_blueprints(db: &db::Db) -> Result<()> {
             &description,
             &author,
             &category,
-            &image,
+            &runtime_hint,
             &startup,
-            None,
             None,
             install.as_deref(),
             &vars,

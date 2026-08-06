@@ -2,3 +2,4 @@
 pub mod isolation;
 pub mod node_daemon;
 pub mod node_protocol;
+pub mod tls;

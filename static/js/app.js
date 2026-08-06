@@ -16,8 +16,10 @@ const I18N = {
     start: "Start", restart: "Restart", stop: "Stop", kill: "Kill", save: "Save", cancel: "Cancel", create: "Create",
     delete: "Delete", edit: "Edit", download: "Download", upload: "Upload", copy: "Copy", rename: "Rename",
     console: "Terminal", files: "Storage", databases: "Data Lab", backups: "Vault", schedules: "Flows",
+    sites: "Sites", domain: "Domain", enabled: "Enabled", ssl: "TLS",
     users: "Team", blueprints: "Blueprint Studio", system: "Observatory", create_server: "New Workspace", create_user: "New Member",
     suspend: "Suspend", unsuspend: "Unsuspend", reinstall: "Rebuild",
+    metrics: "Metrics",
     login: "Sign in", username: "Username", password: "Password", remember: "Remember me",
     welcome: "Linux-native workload control plane", no_servers: "No workspaces yet",
     all_servers: "Workspace Fleet", notifications: "Signals", api_keys: "Access Tokens",
@@ -33,8 +35,10 @@ const I18N = {
     start: "Mulai", restart: "Ulang", stop: "Hentikan", kill: "Paksa", save: "Simpan", cancel: "Batal", create: "Buat",
     delete: "Hapus", edit: "Ubah", download: "Unduh", upload: "Unggah", copy: "Salin", rename: "Ganti nama",
     console: "Terminal", files: "Penyimpanan", databases: "Lab Data", backups: "Vault", schedules: "Flow",
+    sites: "Situs", domain: "Domain", enabled: "Aktif", ssl: "TLS",
     users: "Tim", blueprints: "Studio Blueprint", system: "Observatorium", create_server: "Workspace Baru", create_user: "Anggota Baru",
     suspend: "Nonaktifkan", unsuspend: "Aktifkan", reinstall: "Bangun Ulang",
+    metrics: "Metrik",
     login: "Masuk", username: "Nama pengguna", password: "Kata sandi", remember: "Ingat saya",
     welcome: "Control plane workload Linux-native", no_servers: "Belum ada workspace",
     all_servers: "Fleet Workspace", notifications: "Sinyal", api_keys: "Token Akses",
@@ -349,6 +353,8 @@ async function renderServerPage(id, tab) {
     ["console", ic("terminal", 15) + t("console")], ["files", ic("folder", 15) + t("files")],
     ["settings", ic("settings", 15) + t("settings")], ["databases", ic("database", 15) + t("databases")],
     ["backups", ic("archive", 15) + t("backups")], ["schedules", ic("clock", 15) + t("schedules")],
+    ["sites", ic("globe", 15) + t("sites")],
+    ["metrics", ic("activity", 15) + t("metrics")],
   ];
   state.page = "server";
   const nav = tabs.map(([tt, label]) => `<a href="#/server/${id}/${tt}" class="${tab === tt ? "active" : ""}">${label}</a>`).join("");
@@ -385,6 +391,8 @@ async function renderServerPage(id, tab) {
     databases: () => renderDatabases(id),
     backups: () => renderBackups(id),
     schedules: () => renderSchedules(id),
+    sites: () => renderSites(id),
+    metrics: () => renderMetrics(id),
   };
   (render[tab] || render.console)();
   poll(async () => {
@@ -521,12 +529,42 @@ function fileUpload(id) { const picker = $("#file-picker"); picker.onchange = as
 /* ---------- server settings ---------- */
 function renderServerSettings(id, data) {
   const s = data.server;
+  const varInput = (v) => {
+    const k = v.kind || { type: "text" };
+    const dis = v.user_editable ? "" : "disabled";
+    const val = esc(v.value);
+    if (k.type === "choice") {
+      const opts = (k.options || []).map((o) => `<option value="${esc(o)}"${o === v.value ? " selected" : ""}>${esc(o)}</option>`).join("");
+      return `<select data-var="${esc(v.env_var)}" ${dis}>${opts}</select>`;
+    }
+    if (k.type === "bool") {
+      const on = String(v.value).toLowerCase() === "true";
+      return `<label class="check-row"><input type="checkbox" data-var="${esc(v.env_var)}" data-bool="1"${on ? " checked" : ""} ${dis}><span class="check-box">${ic("check", 13, 2.4)}</span></label>`;
+    }
+    const attrs = [];
+    let type = "text";
+    if (k.type === "number") {
+      type = "number";
+      if (k.min !== undefined && k.min !== null) attrs.push(`min="${esc(String(k.min))}"`);
+      if (k.max !== undefined && k.max !== null) attrs.push(`max="${esc(String(k.max))}"`);
+    } else if (k.type === "url") {
+      type = "url";
+    }
+    if (k.max_len) attrs.push(`maxlength="${esc(String(k.max_len))}"`);
+    if (k.pattern) attrs.push(`pattern="${esc(k.pattern)}"`);
+    if (v.required) attrs.push("required");
+    return `<div class="field-input">${ic("pencil", 14)}<input type="${type}" data-var="${esc(v.env_var)}" value="${val}" ${attrs.join(" ")} ${dis}></div>`;
+  };
+  const kindLabel = (k) => {
+    if (!k || k.type === "text") return "";
+    return `<span class="badge">${esc(k.type)}</span>`;
+  };
   const vars = (data.variables || []).map((v) => `<div class="field">
-    <label>${esc(v.name)} <code>${esc(v.env_var)}</code> ${v.user_editable ? "" : '<span class="badge">locked</span>'}</label>
-    <div class="field-input">${ic("pencil", 14)}<input data-var="${esc(v.env_var)}" value="${esc(v.value)}" ${v.user_editable ? "" : "disabled"}></div>
+    <label>${esc(v.name)} <code>${esc(v.env_var)}</code> ${kindLabel(v.kind)}${v.required ? '<span class="badge">required</span>' : ""}${v.user_editable ? "" : '<span class="badge">locked</span>'}</label>
+    ${varInput(v)}
     <small>${esc(v.description)}</small>
   </div>`).join("");
-  const subUsers = (data.subusers || []).map((su) => `<div class="file-row"><span class="avatar mini">${esc(su.username[0] || "?").toUpperCase()}</span><b>${esc(su.username)}</b><span class="f-meta">${(su.permissions || []).join(", ") || "all"}</span><span class="f-actions"><button class="icon-btn sm danger" onclick="subDel('${id}',${su.id})">${ic("trash", 15)}</button></span></div>`).join("");
+  const subUsers = (data.subusers || []).map((su) => `<div class="file-row"><span class="avatar mini">${esc(su.username[0] || "?").toUpperCase()}</span><b>${esc(su.username)}</b><span class="badge">${esc(su.role || "custom")}</span><span class="f-meta">${(su.permissions || []).join(", ") || t("none")}</span><span class="f-actions"><button class="icon-btn sm danger" onclick="subDel('${id}',${su.id})">${ic("trash", 15)}</button></span></div>`).join("");
   $("#tab-body").innerHTML = `
     <div class="grid cols-2">
       <div class="card"><h3>${ic("terminal", 15)} Launch Plan</h3><div class="code-block">${esc(data.resolved_launch)}</div>
@@ -545,7 +583,7 @@ function renderServerSettings(id, data) {
     <div class="card"><h3>${ic("sliders", 15)} Variables</h3>${vars || `<div class="muted">${t("none")}</div>`}<button class="btn primary" onclick="saveVars('${id}')">${ic("save", 14)}<span>${t("save")} Variables</span></button></div>
     <div class="grid cols-2">
       <div class="card"><h3>${ic("users", 15)} Subusers</h3>${subUsers || `<div class="muted">${t("none")}</div>`}
-        <div class="row" style="margin-top:10px"><input id="sub-user-id" placeholder="user id" style="width:90px"><button class="btn sm" onclick="subAdd('${id}')">${ic("plus", 13)}<span>${t("create")}</span></button></div>
+        <div class="row" style="margin-top:10px"><input id="sub-user-id" placeholder="user id" style="width:90px"><select id="sub-role">${["viewer", "operator", "developer", "manager"].map((r) => `<option value="${r}"${r === "operator" ? " selected" : ""}>${r}</option>`).join("")}</select><button class="btn sm" onclick="subAdd('${id}')">${ic("plus", 13)}<span>${t("create")}</span></button></div>
       </div>
       <div class="card"><h3>${ic("alert", 15)} Danger Zone</h3>
         <div class="row" style="flex-wrap:wrap;gap:8px">
@@ -561,11 +599,11 @@ async function saveRuntime(id) { const runtime_hint = $("#s-runtime").value; try
 async function saveToggle(id, field, val) { try { await api(`/servers/${id}`, { method: "PATCH", body: JSON.stringify({ [field]: val }) }); toast(t("saved"), "success"); } catch (e) { toast(e.message, "error"); } }
 async function saveVars(id) {
   const variables = {};
-  $$("[data-var]").forEach((inp) => { variables[inp.dataset.var] = inp.value; });
+  $$("[data-var]").forEach((inp) => { variables[inp.dataset.var] = inp.dataset.bool ? String(inp.checked) : inp.value; });
   try { await api(`/servers/${id}/variables`, { method: "POST", body: JSON.stringify({ variables }) }); toast(t("saved"), "success"); }
   catch (e) { toast(e.message, "error"); }
 }
-async function subAdd(id) { const user_id = +$("#sub-user-id").value; if (!user_id) return; try { await api(`/servers/${id}/subusers`, { method: "POST", body: JSON.stringify({ user_id, permissions: ["start", "stop", "console", "files"] }) }); toast(t("created"), "success"); location.reload(); } catch (e) { toast(e.message, "error"); } }
+async function subAdd(id) { const user_id = +$("#sub-user-id").value; if (!user_id) return; const role = $("#sub-role").value; try { await api(`/servers/${id}/subusers`, { method: "POST", body: JSON.stringify({ user_id, role }) }); toast(t("created"), "success"); location.reload(); } catch (e) { toast(e.message, "error"); } }
 async function subDel(id, sub_id) { if (!await vpConfirm(t("confirm_delete"))) return; try { await fetch(`/api/servers/${id}/subusers/${sub_id}`, { method: "DELETE" }); location.reload(); } catch (e) { toast(e.message, "error"); } }
 async function install(id) { try { await api(`/servers/${id}/install`, { method: "POST", body: JSON.stringify({}) }); toast("Install queued", "success"); } catch (e) { toast(e.message, "error"); } }
 async function suspend(id) { try { await api(`/servers/${id}/suspend`, { method: "POST" }); toast(t("saved"), "success"); } catch (e) { toast(e.message, "error"); } }
@@ -652,6 +690,78 @@ async function schCreate(id) { const name = $("#sch-name").value; const cron = $
 async function schToggle(id, on) { try { await api(`/schedules/${id}/toggle/${on}`, { method: "POST" }); await schLoad(state.server?.id); } catch (e) { toast(e.message, "error"); } }
 async function schRun(id) { try { await api(`/schedules/${id}/run`, { method: "POST" }); toast("Triggered", "success"); } catch (e) { toast(e.message, "error"); } }
 async function schDel(id) { if (!await vpConfirm(t("confirm_delete"))) return; try { await fetch(`/api/schedules/${id}`, { method: "DELETE" }); await schLoad(state.server?.id); } catch (e) { toast(e.message, "error"); } }
+/* ---------- sites ---------- */
+async function renderSites(id) {
+  $("#tab-body").innerHTML = `<div class="card"><h3>${ic("globe", 15)} ${t("sites")} <span class="badge">vhost</span></h3>
+    <div class="row" style="margin-bottom:12px"><button class="btn primary" onclick="siteOpen('${id}')">${ic("plus", 14)}<span>${t("create")}</span></button><span class="muted" style="font-size:12px">domain → static dir or proxy upstream</span></div>
+    <div id="site-list"><div class="empty">${ic("globe", 40)}<p>${t("loading")}</p></div></div>
+  </div>`;
+  await siteLoad(id);
+}
+async function siteLoad(id) {
+  try {
+    const res = await api(`/servers/${id}/sites`);
+    const sites = res.data || [];
+    $("#site-list").innerHTML = sites.length ? `<div class="file-list">${sites.map((s) => `<div class="file-row"><span class="f-icon">${ic("globe", 16)}</span><div><b>${esc(s.domain)}</b><div class="f-meta">${s.proxy_type === "proxy" ? `proxy → ${esc(s.upstream)}` : `static · ${esc(s.root_dir)}`}${s.port ? ` · :${s.port}` : ""}</div></div><span class="pill ${s.enabled ? "running" : "offline"}"><i></i>${s.enabled ? "on" : "off"}</span><span class="f-meta">${s.ssl ? "TLS" : "—"}${s.force_https ? " · force https" : ""}</span><span class="f-actions">
+      <button class="icon-btn sm" title="${s.enabled ? "Disable" : "Enable"}" onclick="siteToggle('${id}',${s.id})">${s.enabled ? ic("pause", 14) : ic("play", 14)}</button>
+      <button class="icon-btn sm" title="Edit" onclick="siteOpen('${id}',${s.id})">${ic("pencil", 14)}</button>
+      <button class="icon-btn sm danger" title="Delete" onclick="siteDel('${id}',${s.id},'${esc(s.domain)}')">${ic("trash", 14)}</button>
+    </span></div>`).join("")}</div>` : `<div class="empty">${ic("globe", 40)}<p>${t("none")}</p></div>`;
+  } catch (e) { toast(e.message, "error"); }
+}
+async function siteOpen(id, siteId) {
+  let site = null;
+  if (siteId) {
+    try { site = (await api(`/servers/${id}/sites/${siteId}`)).data; } catch (e) { toast(e.message, "error"); return; }
+  }
+  const proxy = !!site && site.proxy_type === "proxy";
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `<div class="modal-card">
+    <div class="modal-head"><b>${ic("globe", 16)} <span class="modal-title">${site ? `Edit ${esc(site.domain)}` : "New site"}</span></b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
+    <div class="field"><label>${t("domain")} *</label><div class="field-input">${ic("globe", 14)}<input id="site-domain" value="${site ? esc(site.domain) : ""}" placeholder="example.com" spellcheck="false"></div></div>
+    <div class="field"><label>Type</label><select id="site-type" onchange="siteType()"><option value="static"${proxy ? "" : " selected"}>static — serve a root dir</option><option value="proxy"${proxy ? " selected" : ""}>proxy — reverse to an upstream</option></select></div>
+    <div class="field"><label id="site-target-label">${proxy ? "Upstream" : "Root dir"} <code>${proxy ? "http(s)://host:port" : "/path"}</code></label><div class="field-input">${ic(proxy ? "link" : "folder", 14)}<input id="site-target" value="${site ? esc(proxy ? site.upstream : site.root_dir) : ""}" placeholder="${proxy ? "http://localhost:3000" : "/"}" spellcheck="false"></div></div>
+    <div class="field"><label>Port <small>optional listen port</small></label><div class="field-input">${ic("server", 14)}<input id="site-port" inputmode="numeric" value="${site && site.port ? site.port : ""}" placeholder="auto"></div></div>
+    <div class="field-row" style="padding:0 22px;justify-content:space-between">
+      <label class="check-row"><input type="checkbox" id="site-ssl" ${site && site.ssl ? "checked" : ""}><span class="check-box">${ic("check", 12)}</span>${t("ssl")}</label>
+      <label class="check-row"><input type="checkbox" id="site-force" ${site && site.force_https ? "checked" : ""}><span class="check-box">${ic("check", 12)}</span>Force HTTPS</label>
+      <label class="check-row"><input type="checkbox" id="site-enabled" ${!site || site.enabled ? "checked" : ""}><span class="check-box">${ic("check", 12)}</span>${t("enabled")}</label>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">${t("cancel")}</button><button class="btn primary" onclick="siteSave('${id}',${site ? site.id : "null"})">${ic("check", 14)}<span>${t("save")}</span></button></div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+function siteType() {
+  const proxy = $("#site-type").value === "proxy";
+  $("#site-target-label").innerHTML = proxy ? "Upstream <code>http(s)://host:port</code>" : "Root dir <code>/path</code>";
+  $("#site-target").placeholder = proxy ? "http://localhost:3000" : "/";
+}
+async function siteSave(id, siteId) {
+  const domain = $("#site-domain").value.trim();
+  if (!domain) { toast("Domain is required", "error"); return; }
+  const proxy = $("#site-type").value === "proxy";
+  const target = $("#site-target").value.trim();
+  const port = $("#site-port").value.trim();
+  const payload = {
+    domain,
+    proxy_type: proxy ? "proxy" : "static",
+    root_dir: proxy ? "/" : (target || "/"),
+    upstream: proxy ? target : "",
+    port: port ? +port : null,
+    ssl: $("#site-ssl").checked,
+    force_https: $("#site-force").checked,
+    enabled: $("#site-enabled").checked,
+  };
+  try {
+    await api(`/servers/${id}/sites${siteId ? `/${siteId}` : ""}`, { method: siteId ? "PATCH" : "POST", body: JSON.stringify(payload) });
+    $(".modal")?.remove();
+    toast(siteId ? t("saved") : t("created"), "success");
+    await siteLoad(id);
+  } catch (e) { toast(e.message, "error"); }
+}
+async function siteToggle(id, siteId) { try { await api(`/servers/${id}/sites/${siteId}/toggle`, { method: "POST" }); await siteLoad(id); } catch (e) { toast(e.message, "error"); } }
+async function siteDel(id, siteId, domain) { if (!await vpConfirm(`${t("confirm_delete")} ${domain}?`)) return; try { await api(`/servers/${id}/sites/${siteId}`, { method: "DELETE" }); toast(t("deleted"), "success"); await siteLoad(id); } catch (e) { toast(e.message, "error"); } }
 
 /* ---------- metric sparkline ---------- */
 function pushMetric(id, st) {
@@ -671,6 +781,74 @@ function sparkSvg(data, color = "var(--accent)") {
   const max = Math.max(...data, 1);
   const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${h - (v / max) * (h - 4) - 2}`).join(" ");
   return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polygon class="fill" points="0,${h} ${pts} ${w},${h}"/><polyline points="${pts}" style="stroke:${color};fill:none;stroke-width:1.6"/></svg>`;
+}
+
+/* ---------- workspace metrics ---------- */
+const METRIC_WINDOWS = [["1h", "Last hour"], ["6h", "6 hours"], ["24h", "24 hours"], ["7d", "7 days"]];
+function renderMetrics(id) {
+  const body = $("#tab-body");
+  body.innerHTML = `
+    <div class="space-between metrics-head">
+      <div class="range-select" role="group" aria-label="Time range">
+        ${METRIC_WINDOWS.map(([w, l]) => `<button class="btn sm ${w === "1h" ? "primary" : ""}" data-w="${w}" onclick="loadMetrics(${id},'${w}')">${l}</button>`).join("")}
+      </div>
+      <span class="muted" id="m-updated">${t("loading")}</span>
+    </div>
+    <div id="metrics-body"><div class="empty">${ic("activity", 40)}<p>${t("loading")}</p></div></div>`;
+  loadMetrics(id, "1h");
+}
+async function loadMetrics(id, win) {
+  const body = $("#metrics-body");
+  if (!body) return;
+  $$("#tab-body .range-select .btn").forEach(b => b.classList.toggle("primary", b.dataset.w === win));
+  try {
+    const r = await api(`/servers/${id}/metrics?window=${encodeURIComponent(win)}&points=120`);
+    const data = r.data || r;
+    const summary = data.summary || {};
+    const series = data.series || [];
+    if (!series.length) {
+      body.innerHTML = `<div class="empty">${ic("activity", 40)}<p>No telemetry yet — start the workspace and samples will appear here.</p></div>`;
+      return;
+    }
+    const num = (v, d = 0) => typeof v === "number" ? v : d;
+    const cpu = series.map(s => num(s.cpu_percent));
+    const mem = series.map(s => num(s.memory_bytes));
+    const disk = series.map(s => num(s.disk_bytes));
+    const rx = series.map(s => num(s.rx_bytes));
+    const tx = series.map(s => num(s.tx_bytes));
+    const peak = (a) => a.length ? Math.max(...a) : 0;
+    $("#m-updated").textContent = `${data.points || series.length} points · window ${data.window || win}`;
+    body.innerHTML = `
+      <div class="server-stats metrics-summary">
+        <div class="stat"><span class="st-label">CPU avg / peak</span><span class="st-val">${num(summary.cpu_avg).toFixed(1)}% / ${num(summary.cpu_peak).toFixed(1)}%</span></div>
+        <div class="stat"><span class="st-label">Memory avg / peak</span><span class="st-val">${fmtBytes(summary.memory_avg)} / ${fmtBytes(summary.memory_peak)}</span></div>
+        <div class="stat"><span class="st-label">Disk peak</span><span class="st-val">${fmtBytes(summary.disk_peak)}</span></div>
+        <div class="stat"><span class="st-label">Net ↓ / ↑</span><span class="st-val">${fmtBytes(summary.rx_total)} / ${fmtBytes(summary.tx_total)}</span></div>
+        <div class="stat"><span class="st-label">Samples</span><span class="st-val">${num(summary.samples)}</span></div>
+      </div>
+      <div class="metrics-grid">
+        <div class="card metric-card"><div class="metric-card-head"><h3>${ic("cpu", 15)} CPU</h3><span class="muted">peak ${Math.round(peak(cpu))}%</span></div><div class="sparkline">${metricSvg([{ data: cpu, color: "var(--accent)" }], 100)}</div></div>
+        <div class="card metric-card"><div class="metric-card-head"><h3>${ic("memory", 15)} Memory</h3><span class="muted">peak ${fmtBytes(peak(mem))}</span></div><div class="sparkline">${metricSvg([{ data: mem, color: "var(--purple)" }])}</div></div>
+        <div class="card metric-card"><div class="metric-card-head"><h3>${ic("globe", 15)} Network</h3><span class="muted">rx ${fmtBytes(peak(rx))} · tx ${fmtBytes(peak(tx))}</span></div><div class="sparkline">${metricSvg([{ data: rx, color: "var(--accent)" }, { data: tx, color: "var(--purple)" }])}</div></div>
+        <div class="card metric-card"><div class="metric-card-head"><h3>${ic("harddisk", 15)} Storage</h3><span class="muted">peak ${fmtBytes(peak(disk))}</span></div><div class="sparkline">${metricSvg([{ data: disk, color: "var(--yellow)" }])}</div></div>
+      </div>`;
+  } catch (e) {
+    body.innerHTML = `<div class="empty">${ic("xcircle", 40)}<p>${esc(e.message)}</p></div>`;
+  }
+}
+function metricSvg(series, ceil) {
+  const n = Math.max(...series.map(s => s.data.length));
+  if (!n) return "<div class='muted'>—</div>";
+  const w = 600, h = 64;
+  const max = ceil || Math.max(1, ...series.flatMap(s => s.data));
+  const pts = (d) => d.map((v, i) => `${(i / Math.max(d.length - 1, 1)) * w},${h - (v / max) * (h - 6) - 3}`).join(" ");
+  let out = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`;
+  series.forEach((s, idx) => {
+    const p = pts(s.data);
+    if (idx === 0) out += `<polygon class="fill" points="0,${h} ${p} ${w},${h}"/>`;
+    out += `<polyline points="${p}" style="stroke:${s.color};fill:none;stroke-width:1.6"/>`;
+  });
+  return out + "</svg>";
 }
 
 /* ============================================================
@@ -741,34 +919,181 @@ async function confirm2fa(secret) {
 /* ============================================================
    SETTINGS
    ============================================================ */
+/* ---------- scoped API keys + webhooks ---------- */
+const CAPS = [
+  ["control.start", "Start the workload"], ["control.stop", "Gracefully stop the workload"], ["control.restart", "Restart the workload"], ["control.kill", "Force-kill the workload"],
+  ["console.read", "Read console output and logs"], ["console.write", "Send commands to the console"],
+  ["files.read", "Browse and download files"], ["files.write", "Create, edit and delete files"],
+  ["backups.read", "List and download backups"], ["backups.write", "Create, restore and delete backups"],
+  ["schedule.read", "View schedules"], ["schedule.write", "Create and modify schedules"],
+  ["database.read", "Read embedded databases"], ["database.write", "Modify embedded databases"],
+  ["startup.update", "Change launch inputs"], ["startup.install", "Run the blueprint install step"], ["startup.secrets", "Reveal hidden launch inputs"],
+  ["subusers.read", "View team members"], ["subusers.write", "Manage team members"],
+];
+const WH_EVENTS = ["server.start", "server.stop", "server.crash", "server.install", "backup.complete", "backup.failed", "schedule.run", "site.updated"];
+const WH_PILL = { delivered: "success", failed: "error", pending: "info" };
+
 async function renderSettings() {
+  const webhooks = state.user.root_admin ? `<div class="card"><div class="card-head"><h3>${ic("send", 15)} Webhooks <span class="badge">admin</span></h3><button class="btn primary sm" onclick="whNew()">${ic("plus", 14)}<span>New webhook</span></button></div><div id="wh-list"><div class="empty">${ic("send", 40)}<p>${t("loading")}</p></div></div></div>` : "";
   document.getElementById("app").innerHTML = shell("settings", t("settings"), `
     <div class="grid cols-2">
-      <div class="card"><h3>${ic("key", 15)} ${t("api_keys")}</h3><div id="keys-list"><div class="empty">${ic("key", 40)}<p>${t("loading")}</p></div></div>
-        <div class="field-row" style="margin-top:12px"><input id="key-name" placeholder="key name"><button class="btn primary" onclick="keyCreate()">${ic("plus", 14)}<span>${t("create")}</span></button></div>
-      </div>
+      <div class="card"><div class="card-head"><h3>${ic("key", 15)} ${t("api_keys")}</h3><button class="btn primary sm" onclick="keyNew()">${ic("plus", 14)}<span>${t("create")}</span></button></div><div id="keys-list"><div class="empty">${ic("key", 40)}<p>${t("loading")}</p></div></div></div>
       <div class="card"><h3>${ic("bell", 15)} ${t("notifications")}</h3><div id="notif-list"><div class="empty">${ic("bell", 40)}<p>${t("loading")}</p></div></div></div>
-    </div>`);
-  await keyLoad(); await notifLoad();
+    </div>${webhooks}`);
+  await Promise.all([keyLoad(), notifLoad(), state.user.root_admin ? whLoad() : Promise.resolve()]);
+}
+
+function keyNew() {
+  const modal = document.createElement("div"); modal.className = "modal";
+  modal.innerHTML = `<div class="modal-card big"><div class="modal-head"><b>${ic("key", 15)} New API key</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
+    <div style="padding:0 22px">
+      <div class="field"><label>Name</label><input id="k-name" placeholder="ci-deploy" autocomplete="off"></div>
+      <div class="field"><label>Capabilities</label>
+        <label class="check-row" style="margin-bottom:8px"><input type="checkbox" id="k-all"><span class="check-box">${ic("check", 13, 2.4)}</span><span>Full access (all capabilities)</span></label>
+        <div class="cap-grid">${CAPS.map(([c, d]) => `<label class="check-row" title="${esc(d)}"><input type="checkbox" value="${c}"><span class="check-box">${ic("check", 13, 2.4)}</span><span>${esc(c)}</span></label>`).join("")}</div>
+      </div>
+      <div class="field"><label>Server access</label><select id="k-server"><option value="">All servers</option></select></div>
+      <div class="field"><label>Expiry</label><select id="k-ttl"><option value="">Never expires</option><option value="7">7 days</option><option value="30">30 days</option><option value="90">90 days</option><option value="365">1 year</option></select></div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">${t("cancel")}</button><button class="btn primary" onclick="keyCreate()">${ic("plus", 14)}<span>${t("create")}</span></button></div></div>`;
+  document.body.appendChild(modal);
+  $("#k-all").addEventListener("change", (e) => { const on = e.target.checked; $$(".cap-grid input").forEach((cb) => { cb.checked = on; }); });
+  api("/servers").then((r) => { const sel = $("#k-server"); (r.data || []).forEach((s) => { const o = document.createElement("option"); o.value = s.id; o.textContent = `${s.name} (#${s.id})`; sel.appendChild(o); }); }).catch(() => {});
+  $("#k-name").focus();
+}
+async function keyCreate() {
+  const name = $("#k-name").value.trim(); if (!name) return;
+  if (!$("#k-all").checked && !$$(".cap-grid input:checked").length) { toast("Select at least one capability (or Full access)", "warn"); return; }
+  const capabilities = $("#k-all").checked ? ["*"] : $$(".cap-grid input:checked").map((cb) => cb.value);
+  const server_ids = $("#k-server").value ? [+$("#k-server").value] : [];
+  const ttl_days = $("#k-ttl").value ? +$("#k-ttl").value : null;
+  try {
+    const res = await api("/keys", { method: "POST", body: JSON.stringify({ name, capabilities, server_ids, ttl_days }) });
+    $(".modal")?.remove(); keyLoad();
+    const modal = document.createElement("div"); modal.className = "modal";
+    modal.innerHTML = `<div class="modal-card"><div class="modal-head"><b>${ic("key", 15)} Token created</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
+      <div style="padding:16px 20px"><p class="muted">Shown once only — copy it now, it cannot be recovered:</p><div class="code-block" id="k-token">${esc(res.token)}</div><button class="btn primary block" style="margin-top:10px" onclick="navigator.clipboard.writeText(document.getElementById('k-token').textContent);toast('Copied','success')">${ic("copy", 14)}<span>Copy token</span></button></div>
+      <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">Done</button></div></div>`;
+    document.body.appendChild(modal);
+  } catch (e) { toast(e.message, "error"); }
 }
 async function keyLoad() {
   try {
     const res = await api("/keys");
     const keys = res.data || [];
-    $("#keys-list").innerHTML = keys.length ? `<div class="file-list">${keys.map((k) => `<div class="file-row"><span class="f-icon">${ic("key", 16)}</span><b>${esc(k.name)}</b><span class="f-meta">${esc(k.scopes)}</span><span class="f-meta">${esc(k.last_used || "never")}</span><span class="f-actions"><button class="icon-btn sm danger" onclick="keyDel(${k.id})">${ic("trash", 15)}</button></span></div>`).join("")}</div>` : `<div class="empty">${ic("key", 40)}<p>${t("none")}</p></div>`;
+    const el = $("#keys-list"); if (!el) return;
+    el.innerHTML = keys.length ? `<div class="file-list">${keys.map((k) => {
+      const scope = k.capabilities.includes("*") ? `<span class="badge accent">full access</span>` : k.capabilities.length ? k.capabilities.map((c) => `<span class="badge">${esc(c)}</span>`).join("") : `<span class="badge">no scope</span>`;
+      const servers = k.server_ids.length ? `servers ${k.server_ids.map((i) => `#${i}`).join(", ")}` : "all servers";
+      return `<div class="cred-row${k.revoked ? " revoked" : ""}">
+        <span class="cred-ico">${ic("key", 16)}</span>
+        <div class="cred-main">
+          <div class="cred-title"><b>${esc(k.name)}</b>${k.revoked ? `<span class="pill error plain">revoked</span>` : `<span class="pill running"><i></i>active</span>`}</div>
+          <div class="cred-meta"><span class="badge">${esc(servers)}</span><span class="badge">expires ${k.expires_at ? esc(fmtDate(k.expires_at)) : "never"}</span>${scope}</div>
+        </div>
+        <span class="f-actions">${k.revoked ? "" : `<button class="icon-btn sm" title="Revoke key" onclick="keyRevoke(${k.id})">${ic("pause", 14)}</button>`}<button class="icon-btn sm danger" title="${t("delete")}" onclick="keyDel(${k.id})">${ic("trash", 14)}</button></span>
+        <div class="cred-side"><span class="muted">last used ${k.last_used ? esc(fmtDate(k.last_used)) : "never"}</span></div>
+      </div>`; }).join("")}</div>` : `<div class="empty">${ic("key", 40)}<p>${t("none")}</p></div>`;
   } catch (e) { toast(e.message, "error"); }
 }
-async function keyCreate() {
-  const name = $("#key-name").value.trim(); if (!name) return;
-  try { const res = await api("/keys", { method: "POST", body: JSON.stringify({ name }) });
-    const modal = document.createElement("div"); modal.className = "modal";
-    modal.innerHTML = `<div class="modal-card"><div class="modal-head"><b>${ic("key", 15)} Token created</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
-      <div style="padding:16px 20px"><p class="muted">Show once only — copy now:</p><div class="code-block">${esc(res.token)}</div></div>
-      <div class="modal-foot"><button class="btn primary" onclick="this.closest('.modal').remove()">OK</button></div></div>`;
-    document.body.appendChild(modal); keyLoad();
+async function keyRevoke(id) {
+  if (!await vpConfirm("Revoke this key? It stops working immediately, but stays listed for audit.")) return;
+  try { await api(`/keys/${id}/revoke`, { method: "POST" }); toast("Key revoked", "success"); keyLoad(); } catch (e) { toast(e.message, "error"); }
+}
+async function keyDel(id) { if (!await vpConfirm(t("confirm_delete"))) return; try { await api(`/keys/${id}`, { method: "DELETE" }); keyLoad(); } catch (e) { toast(e.message, "error"); } }
+
+function whForm(w) {
+  const modal = document.createElement("div"); modal.className = "modal";
+  const evs = (w?.events || ["*"]).includes("*") ? ["*"] : (w?.events || ["*"]);
+  const serverVal = w?.server_id ?? "";
+  modal.innerHTML = `<div class="modal-card"><div class="modal-head"><b>${ic("send", 15)} ${w ? "Edit webhook" : "New webhook"}</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
+    <div style="padding:0 22px">
+      <div class="field"><label>Name</label><input id="wh-name" value="${esc(w?.name || "")}" placeholder="deploy-notify"></div>
+      <div class="field"><label>URL</label><input id="wh-url" value="${esc(w?.url || "")}" placeholder="https://hooks.example.com/voltpanel"></div>
+      <div class="field"><label>Events</label>
+        <label class="check-row" style="margin-bottom:8px"><input type="checkbox" id="wh-all"${evs.includes("*") ? " checked" : ""}><span class="check-box">${ic("check", 13, 2.4)}</span><span>All events</span></label>
+        <div class="cap-grid">${WH_EVENTS.map((e) => `<label class="check-row"><input type="checkbox" value="${e}"${evs.includes(e) ? " checked" : ""}><span class="check-box">${ic("check", 13, 2.4)}</span><span>${esc(e)}</span></label>`).join("")}</div>
+      </div>
+      <div class="field"><label>Server</label><select id="wh-server"><option value="">All servers (global)</option></select></div>
+      <div class="field"><label>Signing secret</label><input id="wh-secret" placeholder="${w ? "leave blank to keep current" : "leave blank to auto-generate"}" autocomplete="off"><small class="muted">Signs the X-Volt-Timestamp / X-Volt-Signature HMAC headers</small></div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">${t("cancel")}</button><button class="btn primary" onclick="whSave(${w?.id || 0})">${ic("save", 14)}<span>${w ? "Save changes" : t("create")}</span></button></div></div>`;
+  document.body.appendChild(modal);
+  $("#wh-all").addEventListener("change", (e) => { const on = e.target.checked; $$(".cap-grid input").forEach((cb) => { cb.checked = on; }); });
+  api("/servers").then((r) => { const sel = $("#wh-server"); (r.data || []).forEach((s) => { const o = document.createElement("option"); o.value = s.id; o.textContent = `${s.name} (#${s.id})`; sel.appendChild(o); }); sel.value = String(serverVal); }).catch(() => {});
+  $("#wh-name").focus();
+}
+function whNew() { whForm(null); }
+function whEdit(id) { api(`/webhooks/${id}`).then((r) => whForm(r.data)).catch((e) => toast(e.message, "error")); }
+async function whSave(id) {
+  const name = $("#wh-name").value.trim(); if (!name) return;
+  const url = $("#wh-url").value.trim(); if (!url) return;
+  const events = $("#wh-all").checked ? ["*"] : $$(".cap-grid input:checked").map((cb) => cb.value);
+  const server_id = $("#wh-server").value ? +$("#wh-server").value : null;
+  const body = { name, url, events, server_id };
+  const secret = $("#wh-secret").value.trim();
+  if (secret) body.secret = secret;
+  try {
+    if (id) {
+      await api(`/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+      $(".modal")?.remove(); whLoad(); toast("Webhook updated", "success");
+    } else {
+      const res = await api("/webhooks", { method: "POST", body: JSON.stringify(body) });
+      $(".modal")?.remove(); whLoad();
+      const modal = document.createElement("div"); modal.className = "modal";
+      modal.innerHTML = `<div class="modal-card"><div class="modal-head"><b>${ic("send", 15)} Webhook created</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
+        <div style="padding:16px 20px"><p class="muted">Signing secret — shown once only, copy it now:</p><div class="code-block" id="wh-secret-out">${esc(res.data?.secret || "")}</div><button class="btn primary block" style="margin-top:10px" onclick="navigator.clipboard.writeText(document.getElementById('wh-secret-out').textContent);toast('Copied','success')">${ic("copy", 14)}<span>Copy secret</span></button></div>
+        <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">Done</button></div></div>`;
+      document.body.appendChild(modal);
+    }
   } catch (e) { toast(e.message, "error"); }
 }
-async function keyDel(id) { if (!await vpConfirm(t("confirm_delete"))) return; try { await fetch(`/api/keys/${id}`, { method: "DELETE" }); keyLoad(); } catch (e) { toast(e.message, "error"); } }
+async function whToggle(id) { try { await api(`/webhooks/${id}/toggle`, { method: "POST" }); whLoad(); } catch (e) { toast(e.message, "error"); } }
+async function whTest(id) {
+  try { const r = await api(`/webhooks/${id}/test`, { method: "POST" }); toast(`Test ping enqueued${r.data?.event ? " (" + r.data.event + ")" : ""}`, "success"); whLoad(); }
+  catch (e) { toast(e.message, "error"); }
+}
+async function whDel(id) { if (!await vpConfirm("Delete this webhook? Deliveries stop immediately.")) return; try { await api(`/webhooks/${id}`, { method: "DELETE" }); whLoad(); toast(t("deleted"), "success"); } catch (e) { toast(e.message, "error"); } }
+async function whDeliveries(id) {
+  const modal = document.createElement("div"); modal.className = "modal";
+  modal.innerHTML = `<div class="modal-card big"><div class="modal-head"><b>${ic("activity", 15)} Webhook deliveries</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div><div id="wh-deliveries"><div class="empty">${ic("activity", 40)}<p>${t("loading")}</p></div></div></div>`;
+  document.body.appendChild(modal);
+  try {
+    const res = await api(`/webhooks/${id}/deliveries?limit=50`);
+    const rows = res.data || [];
+    const box = $("#wh-deliveries");
+    box.innerHTML = rows.length ? `<div class="file-list">${rows.map((d) => `<div class="cred-row">
+      <span class="cred-ico">${ic("send", 15)}</span>
+      <div class="cred-main">
+        <div class="cred-title"><code>${esc(d.event)}</code><span class="pill ${WH_PILL[d.status] || ""}"><i></i>${esc(d.status)}</span>${d.response_code ? `<span class="badge">HTTP ${d.response_code}</span>` : ""}<span class="badge">attempt ${d.attempt}</span></div>
+        <div class="cred-meta"><span class="muted">created ${fmtDate(d.created_at)}${d.delivered_at ? ` · delivered ${esc(fmtDate(d.delivered_at))}` : ""}${d.next_attempt_at ? ` · retry ${esc(new Date(d.next_attempt_at * 1000).toLocaleString())}` : ""}</span></div>
+        ${d.error ? `<div class="cred-error">${esc(d.error)}</div>` : ""}
+      </div></div>`).join("")}</div>` : `<div class="empty">${ic("activity", 40)}<p>No deliveries yet</p></div>`;
+  } catch (e) { $("#wh-deliveries").innerHTML = `<div class="empty">${ic("alert", 40)}<p>${esc(e.message)}</p></div>`; }
+}
+async function whLoad() {
+  try {
+    const res = await api("/webhooks");
+    const whs = res.data || [];
+    const el = $("#wh-list"); if (!el) return;
+    el.innerHTML = whs.length ? `<div class="file-list">${whs.map((w) => {
+      const evs = w.events.includes("*") ? `<span class="badge accent">all events</span>` : w.events.map((e) => `<span class="badge">${esc(e)}</span>`).join("");
+      return `<div class="cred-row">
+        <span class="cred-ico">${ic("send", 16)}</span>
+        <div class="cred-main">
+          <div class="cred-title"><b>${esc(w.name)}</b><span class="pill ${w.enabled ? "running" : "offline"}"><i></i>${w.enabled ? "enabled" : "disabled"}</span>${w.failure_count ? `<span class="pill error plain">${w.failure_count} failures</span>` : ""}</div>
+          <div class="cred-meta"><code class="cred-url">${esc(w.url)}</code>${evs}<span class="badge">${w.server_id ? `server #${w.server_id}` : "all servers"}</span>${w.last_status ? `<span class="badge">last: ${esc(w.last_status)}</span>` : ""}</div>
+        </div>
+        <span class="f-actions">
+          <button class="icon-btn sm" title="Toggle webhook" onclick="whToggle(${w.id})">${w.enabled ? ic("pause", 14) : ic("play", 14)}</button>
+          <button class="icon-btn sm" title="Send test ping" onclick="whTest(${w.id})">${ic("zap", 14)}</button>
+          <button class="icon-btn sm" title="Deliveries" onclick="whDeliveries(${w.id})">${ic("activity", 14)}</button>
+          <button class="icon-btn sm" title="${t("edit")}" onclick="whEdit(${w.id})">${ic("pencil", 14)}</button>
+          <button class="icon-btn sm danger" title="${t("delete")}" onclick="whDel(${w.id})">${ic("trash", 14)}</button>
+        </span>
+      </div>`; }).join("")}</div>` : `<div class="empty">${ic("send", 40)}<p>No webhooks yet</p></div>`;
+  } catch (e) { toast(e.message, "error"); }
+}
 async function notifLoad() {
   try {
     const res = await api("/notifications");
@@ -877,13 +1202,121 @@ async function adminBlueprints() {
   $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">VOLT SPECIFICATION</span><h2>Blueprint Studio</h2><p>Compose portable launch plans for games, sites, bots, and long-running services.</p></div><button class="btn primary sm" onclick="adminNewBlueprint()">${ic("plus",14)}<span>New blueprint</span></button></section><div id="a-blueprints" class="blueprint-grid"></div>`;
   try {
     const res = await api("/blueprints"); const blueprints = res.data || res;
-    $("#a-blueprints").innerHTML = blueprints.length ? blueprints.map((definition) => {const count=definition.variables?.length||0;const kind=String(definition.category||"").toLowerCase();const symbol=kind==="database"?"database":kind==="web"?"globe":kind==="game"?"zap":kind==="generic"?"terminal":"blueprint";return `<article class="blueprint-card"><div class="blueprint-card-head"><span class="blueprint-symbol">${ic(symbol,20)}</span><div><h3>${esc(definition.name)}</h3><span>${esc(definition.category)} · VoltSpec</span></div></div><p>${esc(definition.description || "Reusable isolated workload plan")}</p><div class="blueprint-command"><span>Launch</span><code title="${esc(definition.startup || "operator-defined")}">${esc(definition.startup || "operator-defined")}</code></div><div class="blueprint-card-foot"><span>${count} ${count===1?'input':'inputs'}</span><div class="actions"><button class="icon-btn sm" title="Export VoltSpec" onclick="adminBlueprintExport(${definition.id})">${ic("download",15)}</button><button class="icon-btn sm danger" title="Delete blueprint" onclick="adminDeleteBlueprint(${definition.id})">${ic("trash",15)}</button></div></div></article>`}).join("") : `<div class="context-empty">${ic("blueprint",28)}<div><b>No blueprints yet</b><span>Create the first portable VoltSpec launch plan.</span></div></div>`;
+    $("#a-blueprints").innerHTML = blueprints.length ? blueprints.map((definition) => {const count=definition.variables?.length||0;const kind=String(definition.category||"").toLowerCase();const symbol=kind==="database"?"database":kind==="web"?"globe":kind==="game"?"zap":kind==="generic"?"terminal":"blueprint";return `<article class="blueprint-card"><div class="blueprint-card-head"><span class="blueprint-symbol">${ic(symbol,20)}</span><div><h3>${esc(definition.name)}</h3><span>${esc(definition.category)} · VoltSpec</span></div></div><p>${esc(definition.description || "Reusable isolated workload plan")}</p><div class="blueprint-command"><span>Launch</span><code title="${esc(definition.startup || "operator-defined")}">${esc(definition.startup || "operator-defined")}</code></div><div class="blueprint-card-foot"><span>${count} ${count===1?'input':'inputs'}</span><div class="actions"><button class="icon-btn sm" title="Versions & drift" onclick="bpInspect(${definition.id})">${ic("clock",15)}</button><button class="icon-btn sm" title="Export VoltSpec" onclick="adminBlueprintExport(${definition.id})">${ic("download",15)}</button><button class="icon-btn sm danger" title="Delete blueprint" onclick="adminDeleteBlueprint(${definition.id})">${ic("trash",15)}</button></div></div></article>`}).join("") : `<div class="context-empty">${ic("blueprint",28)}<div><b>No blueprints yet</b><span>Create the first portable VoltSpec launch plan.</span></div></div>`;
   } catch (e) { toast(e.message,"error"); }
 }
 async function adminBlueprintExport(id){try{const r=await api(`/blueprints/${id}/export`);await navigator.clipboard?.writeText(r.json);toast("VoltSpec copied","success")}catch(e){toast(e.message,"error")}}
 async function adminDeleteBlueprint(id){if(!await vpConfirm(`Delete blueprint ${id}?`))return;try{await api(`/blueprints/${id}`,{method:"DELETE"});adminBlueprints()}catch(e){toast(e.message,"error")}}
-function adminNewBlueprint(){const modal=document.createElement("div");modal.className="modal";modal.innerHTML=`<div class="modal-card"><div class="modal-head"><b>${ic("box",15)} New VoltSpec blueprint</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x",16)}</button></div><div class="field"><label>Name</label><input id="nb-name" placeholder="Velocity Proxy"></div><div class="field"><label>Category</label><input id="nb-category" value="application"></div><div class="field"><label>Runtime hint</label><input id="nb-runtime" value="linux-native"></div><div class="field"><label>Launch plan</label><input id="nb-launch" placeholder="java -jar app.jar"></div><div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">Cancel</button><button class="btn primary" onclick="adminCreateBlueprint()">${ic("plus",14)}<span>Create blueprint</span></button></div></div>`;document.body.appendChild(modal)}
-async function adminCreateBlueprint(){try{await api("/blueprints",{method:"POST",body:JSON.stringify({name:$("#nb-name").value,category:$("#nb-category").value,docker_image:$("#nb-runtime").value,startup:$("#nb-launch").value})});$(".modal")?.remove();adminBlueprints();toast("Blueprint created","success")}catch(e){toast(e.message,"error")}}
+function adminNewBlueprint(){const modal=document.createElement("div");modal.className="modal";modal.innerHTML=`<div class="modal-card"><div class="modal-head"><b>${ic("box",15)} New VoltSpec blueprint</b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x",16)}</button></div><div class="field"><label>Name</label><input id="nb-name" placeholder="Velocity Proxy"></div><div class="field"><label>Category</label><input id="nb-category" value="application"></div><div class="field"><label>Runtime hint</label><input id="nb-runtime" value="native"></div><div class="field"><label>Launch plan</label><input id="nb-launch" placeholder="java -jar app.jar"></div><div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">Cancel</button><button class="btn primary" onclick="adminCreateBlueprint()">${ic("plus",14)}<span>Create blueprint</span></button></div></div>`;document.body.appendChild(modal)}
+async function adminCreateBlueprint(){try{await api("/blueprints",{method:"POST",body:JSON.stringify({name:$("#nb-name").value,category:$("#nb-category").value,runtime_hint:$("#nb-runtime").value,startup:$("#nb-launch").value})});$(".modal")?.remove();adminBlueprints();toast("Blueprint created","success")}catch(e){toast(e.message,"error")}}
+/* ---------- blueprint studio: versions, drift & pinning ---------- */
+let bpModal = { id: 0, current: 1, revs: [] };
+async function bpInspect(id) {
+  bpModal = { id, current: 1, revs: [] };
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `<div class="modal-card big bp-modal">
+    <div class="modal-head"><b>${ic("clock", 16)} <span id="bp-title">Blueprint #${id}</span> <span class="badge">versions & drift</span></b><button class="icon-btn" onclick="this.closest('.modal').remove()">${ic("x", 16)}</button></div>
+    <div class="bp-modal-body">
+      <div class="bp-pane">
+        <div class="bp-pane-head"><b>Revisions</b><button class="icon-btn sm" title="refresh" onclick="bpLoadRevisions(${id})">${ic("refresh_ccw", 14)}</button></div>
+        <div id="bp-rev-list" class="bp-list"><div class="empty">${ic("clock", 32)}<p>${t("loading")}</p></div></div>
+      </div>
+      <div class="bp-pane bp-pane-snap">
+        <div class="bp-pane-head"><b>Snapshot</b><span id="bp-snap-meta" class="muted"></span></div>
+        <pre id="bp-snap" class="bp-snap-pre">Select a revision to inspect its snapshot JSON.</pre>
+      </div>
+      <div class="bp-pane">
+        <div class="bp-pane-head"><b>Drift</b><button class="icon-btn sm" title="refresh" onclick="bpLoadDrift(${id})">${ic("refresh_ccw", 14)}</button></div>
+        <div id="bp-drift-list" class="bp-list"><div class="empty">${ic("link", 32)}<p>${t("loading")}</p></div></div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" onclick="this.closest('.modal').remove()">${t("cancel")}</button></div>
+  </div>`;
+  document.body.appendChild(modal);
+  const meta = api(`/blueprints/${id}`).catch(() => null);
+  await bpLoadRevisions(id);
+  await bpLoadDrift(id);
+  const bp = await meta;
+  if (bp?.name) { const h = $("#bp-title"); if (h) h.textContent = bp.name; }
+}
+async function bpLoadRevisions(id) {
+  const box = $("#bp-rev-list");
+  if (!box) return;
+  try {
+    const res = await api(`/blueprints/${id}/revisions`);
+    const revs = res.data || [];
+    bpModal.revs = revs;
+    bpModal.current = revs[0]?.version ?? bpModal.current;
+    if (!revs.length) { box.innerHTML = `<div class="context-empty">${ic("clock", 22)}<div><b>No revisions yet</b><span>Every update snapshots the previous state; the first revision appears after an edit.</span></div></div>`; return; }
+    box.innerHTML = revs.map((r) => `<div class="bp-rev${r.version === bpModal.current ? " current" : ""}" onclick="bpRevDetail(${id}, ${r.version}, this)">
+      <div class="bp-rev-top"><b>v${r.version}</b>${r.version === bpModal.current ? `<span class="pill running plain">current</span>` : ""}<span class="bp-rev-time">${fmtDate(r.created_at)}</span></div>
+      <div class="bp-rev-meta"><span>${esc(r.author || "—")}</span><code title="${esc(r.digest)}">${esc(r.digest.slice(0, 10))}…</code></div>
+      ${r.note ? `<div class="bp-rev-note">${esc(r.note)}</div>` : ""}
+      <div class="bp-rev-actions"><button class="btn xs danger" onclick="event.stopPropagation();bpRollback(${id}, ${r.version})">${ic("refresh", 12)}<span>Roll back</span></button></div>
+    </div>`).join("");
+    bpRevDetail(id, revs[0].version, box.querySelector(".bp-rev"));
+  } catch (e) { box.innerHTML = `<div class="context-empty">${ic("alert", 22)}<div><b>Could not load revisions</b><span>${esc(e.message)}</span></div></div>`; }
+}
+async function bpRevDetail(id, version, el) {
+  el?.classList.add("active");
+  $$(".bp-rev.active").forEach((b) => { if (b !== el) b.classList.remove("active"); });
+  const pre = $("#bp-snap");
+  if (!pre) return;
+  pre.textContent = "Loading v" + version + "…";
+  try {
+    const res = await api(`/blueprints/${id}/revisions/${version}`);
+    const json = JSON.stringify(res.data, null, 2);
+    pre.textContent = json;
+    const meta = $("#bp-snap-meta");
+    if (meta) meta.textContent = `v${version} · ${json.length} bytes`;
+  } catch (e) { pre.textContent = "Error: " + e.message; }
+}
+async function bpRollback(id, version) {
+  if (!await vpConfirm(`Roll blueprint #${id} back to revision v${version}? The current state is snapshotted first, so this rollback is itself undoable.`, "Roll back blueprint")) return;
+  try {
+    const res = await api(`/blueprints/${id}/rollback`, { method: "POST", body: JSON.stringify({ version }) });
+    const now = res.data?.version ?? version;
+    bpModal.current = now;
+    toast(`Rolled back to v${version} — blueprint now at v${now}`, "success");
+    await Promise.all([bpLoadRevisions(id), bpLoadDrift(id)]);
+  } catch (e) { toast(e.message, "error"); }
+}
+async function bpLoadDrift(id) {
+  const box = $("#bp-drift-list");
+  if (!box) return;
+  try {
+    const res = await api(`/blueprints/${id}/drift`);
+    const rows = res.data || [];
+    if (!rows.length) { box.innerHTML = `<div class="context-empty">${ic("check", 22)}<div><b>No drift detected</b><span>Every pinned server is on the current revision, or no server uses this blueprint.</span></div></div>`; return; }
+    const opts = bpModal.revs.length ? bpModal.revs.map((r) => `<option value="${r.version}"${r.version === bpModal.current ? " selected" : ""}>v${r.version}${r.version === bpModal.current ? " · current" : ""}</option>`).join("") : "";
+    box.innerHTML = rows.map((d) => {
+      const unpinned = d.pinned_version === 0;
+      return `<div class="bp-drift-row">
+        <div class="bp-drift-name"><b>${esc(d.server_name)}</b><span class="muted">#${d.server_id}</span></div>
+        <div class="bp-drift-state">${unpinned ? `<span class="pill plain">unpinned</span>` : `<span class="pill warn"><i></i>v${d.pinned_version} → v${d.current_version}</span>`}</div>
+        <div class="bp-drift-fields">${unpinned ? `<span class="muted">not diffed against a pinned revision</span>` : d.fields.map((f) => `<code>${esc(f)}</code>`).join("") || `<span class="muted">in sync</span>`}</div>
+        <div class="bp-drift-actions">
+          <select class="bp-pin-select" data-server="${d.server_id}">${opts || `<option value="${d.current_version}">v${d.current_version}</option>`}</select>
+          <button class="btn xs ghost" onclick="bpPin(this, ${id})">${ic("link", 12)}<span>Pin</span></button>
+          ${unpinned ? "" : `<button class="icon-btn sm danger" title="Unpin server" onclick="bpUnpin(${d.server_id}, ${id})">${ic("x", 13)}</button>`}
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) { box.innerHTML = `<div class="context-empty">${ic("alert", 22)}<div><b>Could not load drift</b><span>${esc(e.message)}</span></div></div>`; }
+}
+async function bpPin(btn, bpId) {
+  const sel = btn.closest(".bp-drift-actions").querySelector(".bp-pin-select");
+  const serverId = +sel.dataset.server, version = +sel.value;
+  if (!await vpConfirm(`Pin server #${serverId} to revision v${version}? Its blueprint_version is set to ${version}; future edits will report drift against this revision.`, "Pin server")) return;
+  try { await api(`/servers/${serverId}/blueprint/pin`, { method: "POST", body: JSON.stringify({ version }) }); toast(`Server #${serverId} pinned to v${version}`, "success"); bpLoadDrift(bpId); }
+  catch (e) { toast(e.message, "error"); }
+}
+async function bpUnpin(serverId, bpId) {
+  if (!await vpConfirm(`Unpin server #${serverId}? It will no longer be diffed against any revision.`, "Unpin server")) return;
+  try { await api(`/servers/${serverId}/blueprint/pin`, { method: "POST", body: JSON.stringify({ version: 0 }) }); toast(`Server #${serverId} unpinned`, "success"); bpLoadDrift(bpId); }
+  catch (e) { toast(e.message, "error"); }
+}
 
 async function adminNodes() {
   $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">EXECUTION FABRIC</span><h2>Agent mesh</h2><p>Capacity, isolation, placement, and health across every execution host.</p></div><button class="btn primary" onclick="adminNewNode()">${ic("plus",14)}<span>Attach agent</span></button></section><div id="a-nodes" class="node-grid"></div>`;

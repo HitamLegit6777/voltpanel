@@ -1,7 +1,9 @@
 //! Console endpoints: history, SSE live stream, clear, send command.
 use super::{ok, ApiError, ApiResult, AppState, AuthUser};
+use crate::capability::Capability;
 use crate::models::{self, User};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::Sse;
 use axum::Json;
@@ -25,7 +27,7 @@ pub async fn history(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let server = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "console.read")?;
+    super::require_capability(&state, &u, id, Capability::ConsoleRead)?;
     let lines = if server.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &server.node)?;
         state
@@ -34,7 +36,13 @@ pub async fn history(
             .await?
             .lines
     } else {
-        state.hub.history(id)
+        state
+            .hub
+            .history(id, 0)
+            .0
+            .into_iter()
+            .map(|(_, l)| l)
+            .collect::<Vec<_>>()
     };
     Ok(Json(serde_json::json!({ "data": lines })))
 }
@@ -45,7 +53,7 @@ pub async fn clear(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let server = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "console.write")?;
+    super::require_capability(&state, &u, id, Capability::ConsoleWrite)?;
     if server.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &server.node)?;
         state.node_client.clear_console(&node, &server.uuid).await?;
@@ -55,14 +63,18 @@ pub async fn clear(
     Ok(ok(serde_json::json!({"ok":true,"node":server.node})))
 }
 
-/// Live console stream over SSE. Emits the full buffer first, then live lines.
+/// Live console stream over SSE. Replays buffered lines after the client's
+/// `Last-Event-ID` (or `?since=`), then live lines. A truncated replay is
+/// announced with a `truncated` event so the client can rebuild its view.
 pub async fn stream(
     State(state): State<AppState>,
     AuthUser(u): AuthUser,
     Path(id): Path<i64>,
+    headers: HeaderMap,
+    Query(q): Query<StreamQuery>,
 ) -> ApiResult<Sse<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>> {
     let server = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "console.read")?;
+    super::require_capability(&state, &u, id, Capability::ConsoleRead)?;
     if server.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &server.node)?;
         let client = state.node_client.clone();
@@ -85,14 +97,44 @@ pub async fn stream(
         return Ok(Sse::new(stream)
             .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))));
     }
+    // Last-Event-ID wins over ?since=; both are optional (fresh client starts at 0).
+    let resume = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .or_else(|| q.since.as_deref().and_then(|s| s.trim().parse::<u64>().ok()));
+    let after_seq = resume.unwrap_or(0);
+    // Subscribe before snapshotting so lines arriving in between are not lost.
     let mut rx = state.hub.subscribe(id);
-    let hist = state.hub.history(id);
+    let (hist, truncated) = state.hub.history(id, after_seq);
+    // Live events whose seq the replay already covered are skipped (no dupes).
+    let last_replayed = hist.last().map(|(s, _)| *s).unwrap_or(after_seq);
     let local = async_stream::stream! {
-        for line in hist { yield Ok(Event::default().event("console").data(line)); }
-        loop { match rx.recv().await { Ok(line)=>yield Ok(Event::default().event("console").data(line)), Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>continue, Err(tokio::sync::broadcast::error::RecvError::Closed)=>break } }
+        if truncated && resume.is_some() {
+            yield Ok(Event::default().event("truncated").data("1"));
+        }
+        for (seq, line) in hist {
+            yield Ok(Event::default().event("console").id(seq.to_string()).data(line));
+        }
+        loop {
+            match rx.recv().await {
+                Ok((seq, text)) if seq > last_replayed => {
+                    yield Ok(Event::default().event("console").id(seq.to_string()).data(text));
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
     };
     let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = Box::pin(local);
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))))
+}
+
+#[derive(Deserialize)]
+pub struct StreamQuery {
+    /// Optional resume point (?since=123); the Last-Event-ID header takes priority.
+    since: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -107,7 +149,7 @@ pub async fn send_command(
     Json(req): Json<CommandReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "console.write")?;
+    super::require_capability(&state, &u, id, Capability::ConsoleWrite)?;
     if s.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &s.node)?;
         state
@@ -129,7 +171,7 @@ pub async fn log_download(
     Path(id): Path<i64>,
 ) -> ApiResult<axum::response::Response> {
     let server = access_ok(&state, &u, id)?;
-    super::require_server_permission(&state, &u, id, "console.read")?;
+    super::require_capability(&state, &u, id, Capability::ConsoleRead)?;
     let content = if server.node != "local" {
         let node = crate::nodes::get_by_name(&state.db, &server.node)?;
         state

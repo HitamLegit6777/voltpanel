@@ -16,6 +16,13 @@ listen = "127.0.0.1:8080"
 base_path = "/"
 session_ttl_hours = 24
 max_body_mb = 64
+# Serve HTTPS with a self-signed certificate stored in <data_dir>/tls.
+# Use this when the panel has no domain name: nodes pin the certificate
+# fingerprint printed at startup instead of validating a public chain.
+tls_self_signed = false
+# Extra hostnames/IPs to include in that certificate (the local hostname and
+# loopback addresses are always included).
+tls_extra_sans = []
 
 [paths]
 servers_dir = "servers"

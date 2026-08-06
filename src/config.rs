@@ -28,13 +28,21 @@ pub struct Web {
     pub base_path: String,
     pub session_ttl_hours: u64,
     pub max_body_mb: u64,
+    /// Serve HTTPS with a self-signed certificate generated under
+    /// `<data_dir>/tls`. Meant for deployments with no domain name, where a
+    /// node pins the panel's fingerprint instead of validating a chain.
+    #[serde(default)]
+    pub tls_self_signed: bool,
+    /// Extra hostnames/IPs to place in the self-signed certificate, on top of
+    /// the local hostname and loopback addresses.
+    #[serde(default)]
+    pub tls_extra_sans: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paths {
     pub servers_dir: PathBuf,
     pub backups_dir: PathBuf,
-    #[serde(alias = "eggs_dir")]
     pub blueprints_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub website_dir: PathBuf,
@@ -130,6 +138,8 @@ impl Default for Config {
                 base_path: "/".into(),
                 session_ttl_hours: 24,
                 max_body_mb: 64,
+                tls_self_signed: false,
+                tls_extra_sans: Vec::new(),
             },
             paths: Paths {
                 servers_dir: PathBuf::from("servers"),

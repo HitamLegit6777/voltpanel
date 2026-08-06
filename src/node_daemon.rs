@@ -22,10 +22,22 @@ pub struct DaemonConfig {
     pub listen: String,
     pub data_dir: PathBuf,
     pub panel_url: String,
+    /// URL the panel dials this node on. Its host becomes a certificate SAN so
+    /// the pinned certificate also validates by name, not just by fingerprint.
+    #[serde(default)]
+    pub public_url: String,
     pub node_id: String,
     pub secret: String,
     pub heartbeat_interval_secs: u64,
     pub max_upload_mb: u64,
+    /// Serve the agent API in plaintext. Only sane behind a reverse proxy that
+    /// terminates TLS itself; the panel then has no fingerprint to pin.
+    #[serde(default)]
+    pub plaintext: bool,
+    /// SHA-256 fingerprint of the panel's self-signed certificate, captured at
+    /// `voltd join`. Empty when the panel uses a publicly trusted certificate.
+    #[serde(default)]
+    pub panel_fingerprint: String,
 }
 
 impl Default for DaemonConfig {
@@ -34,10 +46,13 @@ impl Default for DaemonConfig {
             listen: "0.0.0.0:8081".into(),
             data_dir: PathBuf::from("./voltd-data"),
             panel_url: String::new(),
+            public_url: String::new(),
             node_id: String::new(),
             secret: String::new(),
             heartbeat_interval_secs: 15,
             max_upload_mb: 256,
+            plaintext: false,
+            panel_fingerprint: String::new(),
         }
     }
 }
@@ -84,6 +99,9 @@ impl DaemonConfig {
     }
     pub fn meta_dir(&self) -> PathBuf {
         self.data_dir.join("meta")
+    }
+    pub fn tls_dir(&self) -> PathBuf {
+        self.data_dir.join("tls")
     }
 }
 

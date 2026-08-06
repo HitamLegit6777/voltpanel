@@ -4,14 +4,18 @@ pub mod blueprints;
 pub mod console;
 pub mod databases;
 pub mod files;
+pub mod metrics;
 pub mod keys;
 pub mod nodes;
 pub mod schedules;
 pub mod servers;
 pub mod settings;
+pub mod sites;
 pub mod system;
 pub mod users;
+pub mod webhooks;
 
+use crate::capability::Capability;
 use crate::config::Config;
 use crate::db::Db;
 use crate::models::User;
@@ -176,19 +180,13 @@ impl FromRequestParts<AppState> for AuthUser {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
             {
-                let key =
-                    crate::models::get_api_key_by_token(&state.db, &crate::auth::hash_token(raw))?
-                        .ok_or_else(|| ApiError::unauthorized("invalid API key"))?;
-                if key.scopes != "full" && key.scopes != "*" {
-                    return Err(ApiError::forbidden(
-                        "scoped API keys are not supported on this endpoint",
-                    ));
-                }
-                let user = crate::models::get_user(&state.db, key.user_id)?;
+                let (mut user, scope) = crate::services::keys::authenticate(&state.db, raw)
+                    .map_err(ApiError::from)?
+                    .ok_or_else(|| ApiError::unauthorized("invalid API key"))?;
                 if !user.active {
                     return Err(ApiError::forbidden("account disabled"));
                 }
-                crate::models::touch_api_key(&state.db, key.id)?;
+                user.key_scope = Some(scope);
                 return Ok(AuthUser(user));
             }
         }
@@ -230,6 +228,15 @@ impl FromRequestParts<AppState> for AdminUser {
         if !u.root_admin {
             return Err(ApiError::forbidden("admin only"));
         }
+        // Admin routes are not server-scoped, so a key's server_ids/capability
+        // filter cannot narrow them. Only a full-authority key may pass.
+        if let Some(scope) = u.key_scope.as_ref() {
+            if !scope.wildcard || !scope.server_ids.is_empty() {
+                return Err(ApiError::forbidden(
+                    "scoped API keys cannot access admin endpoints",
+                ));
+            }
+        }
         Ok(AdminUser(u))
     }
 }
@@ -245,17 +252,20 @@ pub fn ok<T: serde::Serialize>(v: T) -> Json<serde_json::Value> {
 pub fn data(v: serde_json::Value) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "data": v }))
 }
-pub fn require_server_permission(
+
+/// Enforce a typed capability on a server-scoped route.
+pub fn require_capability(
     state: &AppState,
     user: &User,
     server_id: i64,
-    permission: &str,
+    capability: Capability,
 ) -> ApiResult<()> {
-    if crate::models::user_has_server_permission(&state.db, user, server_id, permission)? {
+    if crate::models::user_has_capability(&state.db, user, server_id, capability)? {
         Ok(())
     } else {
         Err(ApiError::forbidden(format!(
-            "missing server permission: {permission}"
+            "missing server capability: {}",
+            capability.as_str()
         )))
     }
 }

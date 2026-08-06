@@ -1,5 +1,6 @@
 //! Workload blueprint endpoints: CRUD + import/export.
-use super::{data, ok, AdminUser, ApiResult, AppState, AuthUser};
+use super::{data, ok, require_capability, AdminUser, ApiResult, AppState, AuthUser};
+use crate::capability::Capability;
 use crate::models::{self, Blueprint, BlueprintInput};
 use axum::extract::{Path, State};
 use axum::Json;
@@ -27,7 +28,7 @@ pub struct CreateBlueprintReq {
     pub description: Option<String>,
     pub author: Option<String>,
     pub category: Option<String>,
-    pub docker_image: Option<String>,
+    pub runtime_hint: Option<String>,
     pub startup: String,
     pub install_script: Option<String>,
     pub stop_command: Option<String>,
@@ -48,10 +49,9 @@ pub async fn create(
         req.description.as_deref().unwrap_or(""),
         req.author.as_deref().unwrap_or(""),
         req.category.as_deref().unwrap_or("generic"),
-        req.docker_image.as_deref().unwrap_or("alpine:latest"),
+        req.runtime_hint.as_deref().unwrap_or("native"),
         &req.startup,
         req.default_config.as_deref(),
-        None,
         req.install_script.as_deref(),
         req.variables.as_deref().unwrap_or(&[]),
         req.stop_command.as_deref().unwrap_or("stop"),
@@ -65,7 +65,7 @@ pub struct UpdateBlueprintReq {
     pub description: Option<String>,
     pub author: Option<String>,
     pub category: Option<String>,
-    pub docker_image: Option<String>,
+    pub runtime_hint: Option<String>,
     pub startup: Option<String>,
     pub install_script: Option<String>,
     pub stop_command: Option<String>,
@@ -75,10 +75,13 @@ pub struct UpdateBlueprintReq {
 
 pub async fn update(
     State(state): State<AppState>,
-    _a: AdminUser,
+    a: AdminUser,
     Path(id): Path<i64>,
     Json(req): Json<UpdateBlueprintReq>,
 ) -> ApiResult<Json<Blueprint>> {
+    // Preserve history: capture the pre-mutation state as the next revision
+    // before any field below changes, so every update is undoable.
+    crate::services::blueprint::snapshot(&state.db, id, &a.0.username, "")?;
     let mut e = models::get_blueprint(&state.db, id)?;
     if let Some(v) = req.name {
         e.name = v;
@@ -92,8 +95,8 @@ pub async fn update(
     if let Some(v) = req.category {
         e.category = v;
     }
-    if let Some(v) = req.docker_image {
-        e.docker_image = v;
+    if let Some(v) = req.runtime_hint {
+        e.runtime_hint = v;
     }
     if let Some(v) = req.startup {
         e.startup = v;
@@ -142,14 +145,13 @@ pub async fn import(
         &parsed.description,
         &parsed.author,
         &parsed.category,
-        &parsed.docker_image,
+        &parsed.runtime_hint,
         &parsed.startup,
         parsed
             .config
             .as_ref()
             .map(|c| serde_json::to_string(c).unwrap_or_default())
             .as_deref(),
-        None,
         parsed.install.as_ref().map(|i| i.script.clone()).as_deref(),
         &parsed.variables,
         &parsed.stop,
@@ -173,7 +175,7 @@ pub async fn export(
         "description": e.description,
         "author": e.author,
         "category": e.category,
-        "docker_image": e.docker_image,
+        "runtime_hint": e.runtime_hint,
         "startup": e.startup,
         "install": e.install_script.map(|s| serde_json::json!({ "script": s })),
         "variables": e.variables,
@@ -187,11 +189,82 @@ pub async fn categories(
     _u: AuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
     let conn = state.db.lock();
-    let mut stmt = conn.prepare("SELECT DISTINCT category FROM egss ORDER BY category")?;
+    let mut stmt = conn.prepare("SELECT DISTINCT category FROM blueprints ORDER BY category")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
     }
     Ok(data(serde_json::json!(out)))
+}
+
+// ---------------- Versioning & drift ----------------
+
+pub async fn revisions(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let rows = crate::services::blueprint::list_revisions(&state.db, id)?;
+    Ok(data(serde_json::to_value(rows)?))
+}
+
+pub async fn revision_detail(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path((id, version)): Path<(i64, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let snap = crate::services::blueprint::revision_snapshot(&state.db, id, version)?;
+    Ok(data(snap))
+}
+
+#[derive(Deserialize)]
+pub struct RollbackReq {
+    pub version: i64,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+pub async fn rollback(
+    State(state): State<AppState>,
+    a: AdminUser,
+    Path(id): Path<i64>,
+    Json(req): Json<RollbackReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let version = match req.note {
+        Some(note) => crate::services::blueprint::rollback_with_note(
+            &state.db,
+            id,
+            req.version,
+            &a.0.username,
+            &note,
+        )?,
+        None => crate::services::blueprint::rollback(&state.db, id, req.version, &a.0.username)?,
+    };
+    Ok(data(serde_json::json!({ "version": version })))
+}
+
+pub async fn drift(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let rows = crate::services::blueprint::drift_for_blueprint(&state.db, id)?;
+    Ok(data(serde_json::to_value(rows)?))
+}
+
+#[derive(Deserialize)]
+pub struct PinReq {
+    pub version: i64,
+}
+
+pub async fn pin(
+    State(state): State<AppState>,
+    AuthUser(u): AuthUser,
+    Path(server_id): Path<i64>,
+    Json(req): Json<PinReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_capability(&state, &u, server_id, Capability::StartupUpdate)?;
+    crate::services::blueprint::pin_server(&state.db, server_id, req.version)?;
+    Ok(data(serde_json::json!({ "ok": true })))
 }
