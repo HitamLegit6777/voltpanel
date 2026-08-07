@@ -13,7 +13,7 @@ else
   source "$TMP_COMMON"
 fi
 
-DOMAIN=""; IP_ADDRESS=""; EMAIL=""; TLS_MODE=""; CF_CERT=""; CF_KEY=""; PUBLIC=0; LISTEN=""; DATA_DIR=/var/lib/voltpanel; CONFIG_DIR=/etc/voltpanel; INTERACTIVE=auto
+DOMAIN=""; IP_ADDRESS=""; EMAIL=""; TLS_MODE=""; CF_CERT=""; CF_KEY=""; PORT=8080; PORT_SET=0; PUBLIC=0; LISTEN=""; DATA_DIR=/var/lib/voltpanel; CONFIG_DIR=/etc/voltpanel; INTERACTIVE=auto
 ARG_COUNT=$#
 while (($#)); do
   case "$1" in
@@ -23,6 +23,7 @@ while (($#)); do
     --tls) TLS_MODE=${2:?}; shift 2;;
     --cloudflare-cert) CF_CERT=${2:?}; shift 2;;
     --cloudflare-key) CF_KEY=${2:?}; shift 2;;
+    --port) PORT=${2:?}; PORT_SET=1; shift 2;;
     --listen) LISTEN=${2:?}; shift 2;;
     --public) PUBLIC=1; shift;;
     --no-caddy) TLS_MODE=none; shift;;
@@ -40,8 +41,9 @@ Usage: sudo ./install-panel.sh [options]
   --ip-address IP             Public IPv4 or IPv6 for certbot-ip
   --cloudflare-cert PATH      Cloudflare Origin Certificate PEM
   --cloudflare-key PATH       Cloudflare Origin private key
-  --public                    Listen directly on 0.0.0.0:8080
-  --listen ADDRESS            Explicit panel listen address
+  --public                    Listen directly on 0.0.0.0 (no TLS only)
+  --port PORT                 Internal/direct panel port (default 8080)
+  --listen ADDRESS            Explicit listen address (overrides --port)
   --no-caddy                  Alias for --tls none
   --non-interactive           Disable the terminal wizard
   --data-dir PATH             Data directory (default /var/lib/voltpanel)
@@ -79,8 +81,9 @@ if [[ "$INTERACTIVE" == 1 ]]; then
   else
     PUBLIC=1
   fi
+  PORT=$(tui_input "Panel port" "$PORT")
   DATA_DIR=$(tui_input "Data directory" "$DATA_DIR")
-  printf '\n  TLS mode: %s\n  Address:  %s\n  Data:     %s\n' "$TLS_MODE" "${DOMAIN:-${IP_ADDRESS:-(none)}}" "$DATA_DIR" > /dev/tty
+  printf '\n  TLS mode: %s\n  Address:  %s\n  Port:     %s\n  Data:     %s\n' "$TLS_MODE" "${DOMAIN:-${IP_ADDRESS:-(none)}}" "$PORT" "$DATA_DIR" > /dev/tty
   tui_pause
 fi
 
@@ -89,13 +92,16 @@ case "$TLS_MODE" in caddy|certbot|certbot-ip|cloudflare|none) ;; *) die "Invalid
 [[ "$TLS_MODE" == none || "$TLS_MODE" == certbot-ip || -n "$DOMAIN" ]] || die "--domain is required for TLS mode $TLS_MODE"
 [[ "$TLS_MODE" != certbot-ip || -n "$IP_ADDRESS" ]] || die "certbot-ip mode requires --ip-address"
 [[ "$TLS_MODE" != cloudflare || (-n "$CF_CERT" && -n "$CF_KEY") ]] || die "Cloudflare mode requires --cloudflare-cert and --cloudflare-key"
+validate_port "$PORT"
 
 require_root; require_systemd; load_os
 [[ -z "$DOMAIN" ]] || validate_domain "$DOMAIN"; [[ -z "$IP_ADDRESS" ]] || validate_ip "$IP_ADDRESS"
 if [[ -z "$LISTEN" ]]; then
-  if [[ "$TLS_MODE" != none ]]; then LISTEN=127.0.0.1:8080
-  elif [[ "$PUBLIC" == 1 ]]; then LISTEN=0.0.0.0:8080
-  else LISTEN=127.0.0.1:8080; fi
+  if [[ "$TLS_MODE" != none ]]; then LISTEN="127.0.0.1:$PORT"
+  elif [[ "$PUBLIC" == 1 ]]; then LISTEN="0.0.0.0:$PORT"
+  else LISTEN="127.0.0.1:$PORT"; fi
+elif [[ "$PORT_SET" == 1 ]]; then
+  die "Use either --listen or --port, not both"
 fi
 
 install_packages
@@ -206,7 +212,7 @@ case "$TLS_MODE" in
 $DOMAIN {
 $TLS_LINE
     encode zstd gzip
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:$PORT
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -220,9 +226,9 @@ EOF
     run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
     run systemctl reload caddy
     ;;
-  certbot) configure_certbot_proxy panel "$DOMAIN" 127.0.0.1:8080 "$EMAIL" ;;
-  certbot-ip) configure_certbot_ip_proxy panel "$IP_ADDRESS" 127.0.0.1:8080 "$EMAIL" ;;
-  cloudflare) configure_cloudflare_proxy panel "$DOMAIN" 127.0.0.1:8080 "$CF_CERT" "$CF_KEY" ;;
+  certbot) configure_certbot_proxy panel "$DOMAIN" "127.0.0.1:$PORT" "$EMAIL" ;;
+  certbot-ip) configure_certbot_ip_proxy panel "$IP_ADDRESS" "127.0.0.1:$PORT" "$EMAIL" ;;
+  cloudflare) configure_cloudflare_proxy panel "$DOMAIN" "127.0.0.1:$PORT" "$CF_CERT" "$CF_KEY" ;;
 esac
 
 systemctl_reload_start voltpanel

@@ -63,14 +63,17 @@ Public-IP certificates require a directly reachable IPv4/IPv6 and ports 80 and 4
 --ip-address IP          Public IPv4 or IPv6 for certbot-ip
 --cloudflare-cert PATH   Cloudflare Origin Certificate PEM
 --cloudflare-key PATH    Cloudflare Origin private key
---listen ADDRESS         Explicit origin listen address
---public                 Listen directly on 0.0.0.0:8080
+--port PORT              Internal/direct panel port (default 8080)
+--listen ADDRESS         Explicit origin listen address; overrides --port
+--public                 Listen directly on 0.0.0.0 when TLS is disabled
 --no-caddy               Alias for --tls none
 --non-interactive        Disable the TUI wizard
 --data-dir PATH          Panel data directory
 --version VERSION        Install a release tag instead of latest
 --dry-run                Print actions only
 ```
+
+The TUI asks for the panel port. With TLS, this is the loopback origin port behind Caddy/Nginx; users still connect on HTTPS port 443. Without TLS, it is the public port. `--port` and `--listen` are mutually exclusive.
 
 Example:
 
@@ -129,7 +132,8 @@ sudo bash /tmp/install-node.sh --non-interactive \
 --cloudflare-cert PATH   Cloudflare Origin Certificate PEM
 --cloudflare-key PATH    Cloudflare Origin private key
 --public-url URL         URL stored by the panel
---listen ADDRESS         voltd listen address
+--port PORT              Internal/direct node port (default 8081)
+--listen ADDRESS         voltd listen address; overrides --port
 --allow-http             Explicitly permit non-loopback HTTP enrollment
 --no-caddy               Alias for --tls none
 --non-interactive        Disable the TUI wizard
@@ -137,6 +141,8 @@ sudo bash /tmp/install-node.sh --non-interactive \
 --version VERSION        Release tag
 --dry-run                Print actions only
 ```
+
+The node TUI also asks for its port. Reverse proxies automatically target the selected port.
 
 ### Verify node
 

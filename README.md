@@ -90,10 +90,11 @@ The installer installs dependencies and the release binary, creates private data
 ### LAN-only installation
 
 ```bash
-sudo bash /tmp/install-panel.sh --non-interactive --tls none --public
+sudo bash /tmp/install-panel.sh --non-interactive \
+  --tls none --public --port 9090
 ```
 
-Open `http://SERVER_IP:8080`. Public internet deployments should use HTTPS, not direct port 8080.
+Open `http://SERVER_IP:9090`. The TUI also asks for this port. With TLS enabled, the selected port is internal behind Caddy/Nginx while clients connect over HTTPS port 443. Public internet deployments should use HTTPS.
 
 ## Add a node
 

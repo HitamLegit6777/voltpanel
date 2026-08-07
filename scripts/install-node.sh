@@ -13,7 +13,7 @@ else
   source "$TMP_COMMON"
 fi
 
-PANEL_URL=""; TOKEN=""; PUBLIC_URL=""; DOMAIN=""; IP_ADDRESS=""; EMAIL=""; TLS_MODE=""; CF_CERT=""; CF_KEY=""; LISTEN=""; DATA_DIR=/var/lib/voltd; CONFIG_DIR=/etc/voltpanel-node; ALLOW_HTTP=0; INTERACTIVE=auto
+PANEL_URL=""; TOKEN=""; PUBLIC_URL=""; DOMAIN=""; IP_ADDRESS=""; EMAIL=""; TLS_MODE=""; CF_CERT=""; CF_KEY=""; PORT=8081; PORT_SET=0; LISTEN=""; DATA_DIR=/var/lib/voltd; CONFIG_DIR=/etc/voltpanel-node; ALLOW_HTTP=0; INTERACTIVE=auto
 ARG_COUNT=$#
 while (($#)); do
   case "$1" in
@@ -26,6 +26,7 @@ while (($#)); do
     --tls) TLS_MODE=${2:?}; shift 2;;
     --cloudflare-cert) CF_CERT=${2:?}; shift 2;;
     --cloudflare-key) CF_KEY=${2:?}; shift 2;;
+    --port) PORT=${2:?}; PORT_SET=1; shift 2;;
     --listen) LISTEN=${2:?}; shift 2;;
     --data-dir) DATA_DIR=${2:?}; shift 2;;
     --allow-http) ALLOW_HTTP=1; shift;;
@@ -45,7 +46,8 @@ Usage: sudo ./install-node.sh [options]
   --cloudflare-cert PATH      Cloudflare Origin Certificate PEM
   --cloudflare-key PATH       Cloudflare Origin private key
   --public-url URL            Explicit node URL stored in the panel
-  --listen ADDRESS            Agent listen address
+  --port PORT                 Internal/direct node port (default 8081)
+  --listen ADDRESS            Agent listen address (overrides --port)
   --allow-http                Permit plain HTTP enrollment on trusted LAN
   --no-caddy                  Alias for --tls none
   --non-interactive           Disable the terminal wizard
@@ -86,8 +88,9 @@ if [[ "$INTERACTIVE" == 1 ]]; then
   else
     ALLOW_HTTP=1
   fi
+  PORT=$(tui_input "Node port" "$PORT")
   DATA_DIR=$(tui_input "Node data directory" "$DATA_DIR")
-  printf '\n  Panel:    %s\n  TLS mode: %s\n  Address:  %s\n  Data:     %s\n' "$PANEL_URL" "$TLS_MODE" "${DOMAIN:-${IP_ADDRESS:-(none)}}" "$DATA_DIR" > /dev/tty
+  printf '\n  Panel:    %s\n  TLS mode: %s\n  Address:  %s\n  Port:     %s\n  Data:     %s\n' "$PANEL_URL" "$TLS_MODE" "${DOMAIN:-${IP_ADDRESS:-(none)}}" "$PORT" "$DATA_DIR" > /dev/tty
   tui_pause
 fi
 
@@ -96,6 +99,8 @@ case "$TLS_MODE" in caddy|certbot|certbot-ip|cloudflare|none) ;; *) die "Invalid
 [[ "$TLS_MODE" == none || "$TLS_MODE" == certbot-ip || -n "$DOMAIN" ]] || die "--domain is required for TLS mode $TLS_MODE"
 [[ "$TLS_MODE" != certbot-ip || -n "$IP_ADDRESS" ]] || die "certbot-ip mode requires --ip-address"
 [[ "$TLS_MODE" != cloudflare || (-n "$CF_CERT" && -n "$CF_KEY") ]] || die "Cloudflare mode requires --cloudflare-cert and --cloudflare-key"
+validate_port "$PORT"
+[[ -z "$LISTEN" || "$PORT_SET" != 1 ]] || die "Use either --listen or --port, not both"
 
 require_root; require_systemd; load_os
 [[ -n "$PANEL_URL" ]] || die "--panel is required"
@@ -104,10 +109,10 @@ validate_url "$PANEL_URL"
 [[ -z "$DOMAIN" ]] || validate_domain "$DOMAIN"; [[ -z "$IP_ADDRESS" ]] || validate_ip "$IP_ADDRESS"
 
 if [[ "$TLS_MODE" != none ]]; then
-  LISTEN=${LISTEN:-127.0.0.1:8081}
+  LISTEN=${LISTEN:-127.0.0.1:$PORT}
   PUBLIC_URL=${PUBLIC_URL:-https://${DOMAIN:-$IP_ADDRESS}}
 else
-  LISTEN=${LISTEN:-0.0.0.0:8081}
+  LISTEN=${LISTEN:-0.0.0.0:$PORT}
   if [[ -z "$PUBLIC_URL" ]]; then
     IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}')
     PUBLIC_URL="http://${IP:-127.0.0.1}:${LISTEN##*:}"
@@ -175,7 +180,7 @@ case "$TLS_MODE" in
 $DOMAIN {
 $TLS_LINE
     encode zstd gzip
-    reverse_proxy 127.0.0.1:8081
+    reverse_proxy 127.0.0.1:$PORT
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -188,9 +193,9 @@ EOF
     run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
     run systemctl reload caddy
     ;;
-  certbot) configure_certbot_proxy node "$DOMAIN" 127.0.0.1:8081 "$EMAIL" ;;
-  certbot-ip) configure_certbot_ip_proxy node "$IP_ADDRESS" 127.0.0.1:8081 "$EMAIL" ;;
-  cloudflare) configure_cloudflare_proxy node "$DOMAIN" 127.0.0.1:8081 "$CF_CERT" "$CF_KEY" ;;
+  certbot) configure_certbot_proxy node "$DOMAIN" "127.0.0.1:$PORT" "$EMAIL" ;;
+  certbot-ip) configure_certbot_ip_proxy node "$IP_ADDRESS" "127.0.0.1:$PORT" "$EMAIL" ;;
+  cloudflare) configure_cloudflare_proxy node "$DOMAIN" "127.0.0.1:$PORT" "$CF_CERT" "$CF_KEY" ;;
 esac
 
 systemctl_reload_start voltd

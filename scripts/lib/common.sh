@@ -91,6 +91,9 @@ tui_yesno() {
 
 tui_pause() { printf '\nPress Enter to install, or Ctrl+C to cancel...' > /dev/tty; IFS= read -r _ < /dev/tty; printf '\n' > /dev/tty; }
 validate_ip() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || $1 == *:* ]] || die "Invalid IP address: $1"; }
+validate_port() {
+  if [[ ! $1 =~ ^[0-9]+$ ]] || ((10#$1 < 1 || 10#$1 > 65535)); then die "Invalid port: $1 (expected 1-65535)"; fi
+}
 
 load_os() {
   [[ -r /etc/os-release ]] || die "Cannot detect Linux distribution."
