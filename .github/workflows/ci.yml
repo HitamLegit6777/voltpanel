@@ -18,8 +18,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install system checks
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap util-linux iproute2 nftables sqlite3 shellcheck
       - name: Format
         run: cargo fmt --check
       - name: Lint
