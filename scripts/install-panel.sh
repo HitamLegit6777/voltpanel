@@ -103,6 +103,9 @@ if [[ -z "$LISTEN" ]]; then
 elif [[ "$PORT_SET" == 1 ]]; then
   die "Use either --listen or --port, not both"
 fi
+if [[ "$TLS_MODE" != none && "$LISTEN" != 127.0.0.1:* && "$LISTEN" != \[::1\]:* ]]; then
+  die "TLS proxy origin must listen on loopback (127.0.0.1 or [::1])"
+fi
 
 install_packages
 install_binary voltpanel
@@ -159,6 +162,12 @@ enable_websites = false
 enable_audit_log = true
 EOF
 
+if [[ "$DRY_RUN" == 1 ]]; then
+  log "[dry-run] validate $CONFIG_DIR/config.toml with voltpanel"
+else
+  VOLTPANEL_CONFIG="$CONFIG_DIR/config.toml" /usr/local/bin/voltpanel check-config --config "$CONFIG_DIR/config.toml"
+fi
+
 write_file "$CONFIG_DIR/first-run.env" 0600 <<EOF
 VOLTPANEL_ADMIN_PASSWORD=$ADMIN_PASSWORD
 EOF
@@ -204,6 +213,7 @@ elif [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] download voltpanel-manage"
 else curl -fsSL "$VOLTPANEL_RAW/scripts/manage-panel.sh" -o /usr/local/sbin/voltpanel-manage; chmod 0755 /usr/local/sbin/voltpanel-manage
 fi
 
+UPSTREAM=$(proxy_upstream "$LISTEN")
 case "$TLS_MODE" in
   caddy)
     install_caddy
@@ -212,7 +222,7 @@ case "$TLS_MODE" in
 $DOMAIN {
 $TLS_LINE
     encode zstd gzip
-    reverse_proxy 127.0.0.1:$PORT
+    reverse_proxy $UPSTREAM
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -226,16 +236,16 @@ EOF
     run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
     run systemctl reload caddy
     ;;
-  certbot) configure_certbot_proxy panel "$DOMAIN" "127.0.0.1:$PORT" "$EMAIL" ;;
-  certbot-ip) configure_certbot_ip_proxy panel "$IP_ADDRESS" "127.0.0.1:$PORT" "$EMAIL" ;;
-  cloudflare) configure_cloudflare_proxy panel "$DOMAIN" "127.0.0.1:$PORT" "$CF_CERT" "$CF_KEY" ;;
+  certbot) configure_certbot_proxy panel "$DOMAIN" "$UPSTREAM" "$EMAIL" ;;
+  certbot-ip) configure_certbot_ip_proxy panel "$IP_ADDRESS" "$UPSTREAM" "$EMAIL" ;;
+  cloudflare) configure_cloudflare_proxy panel "$DOMAIN" "$UPSTREAM" "$CF_CERT" "$CF_KEY" ;;
 esac
 
 systemctl_reload_start voltpanel
 if [[ "$DRY_RUN" != 1 ]]; then rm -f "$CONFIG_DIR/first-run.env"; fi
 firewall_hint panel
 
-URL="http://$LISTEN"; [[ "$TLS_MODE" == none ]] || URL="https://${DOMAIN:-$IP_ADDRESS}"
+URL="http://$LISTEN"; [[ "$LISTEN" != 0.0.0.0:* ]] || URL="http://$(hostname -I | awk '{print $1}'):${LISTEN##*:}"; [[ "$TLS_MODE" == none ]] || URL="https://${DOMAIN:-$IP_ADDRESS}"
 ok "VoltPanel installed"
 printf '\n  URL:      %s\n  Username: admin\n  Password: %s\n\n' "$URL" "$ADMIN_PASSWORD"
 warn "Save this password now; it is not written to disk after first start. Change it immediately."

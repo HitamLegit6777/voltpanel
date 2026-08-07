@@ -176,3 +176,17 @@ impl Default for Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn load_preserves_public_listen_address() {
+        let mut config = Config::default();
+        config.web.listen = "0.0.0.0:9090".parse().unwrap();
+        let text = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.web.listen, "0.0.0.0:9090".parse().unwrap());
+    }
+}

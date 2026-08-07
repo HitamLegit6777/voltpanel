@@ -123,7 +123,8 @@ pub fn list(db: &Db, user_id: i64) -> Result<Vec<ApiKeyInfo>> {
             last_used: r.get(7)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 /// Soft-revoke: keep the row for audit, stop authenticating it.
@@ -186,13 +187,7 @@ pub fn authenticate(db: &Db, raw: &str) -> Result<Option<(User, KeyScope)>> {
 
 /// A key can only narrow its owner's rights: both the key's scope and the
 /// owner's effective grant must allow the action.
-pub fn enforce(
-    db: &Db,
-    user: &User,
-    scope: &KeyScope,
-    server_id: i64,
-    cap: Capability,
-) -> bool {
+pub fn enforce(db: &Db, user: &User, scope: &KeyScope, server_id: i64, cap: Capability) -> bool {
     scope.allows(server_id, cap)
         && models::user_has_capability(db, user, server_id, cap).unwrap_or(false)
 }

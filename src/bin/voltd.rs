@@ -85,6 +85,21 @@ async fn main() -> Result<()> {
         .init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("--version") | Some("version") => {
+            println!("voltd {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some("check-config") | Some("--check-config") => {
+            let path = config_arg(&args)?;
+            let config = DaemonConfig::load(&path)?;
+            let _: SocketAddr = config.listen.parse().context("invalid listen address")?;
+            println!(
+                "valid config: {} (listen {})",
+                path.display(),
+                config.listen
+            );
+            Ok(())
+        }
         Some("join") => join(&args[2..]).await,
         Some("serve") | None => serve(config_arg(&args)?).await,
         Some("help") | Some("--help") | Some("-h") => {
@@ -96,7 +111,7 @@ async fn main() -> Result<()> {
 }
 
 fn usage() {
-    println!("voltd — VoltPanel execution agent\n\n  voltd join <panel-url> <token> [--public-url URL] [--listen 0.0.0.0:8081] [--data DIR] [--config FILE] [--allow-http] [--no-start]\n  voltd serve [--config FILE]\n\njoin writes secure agent configuration automatically. Non-loopback HTTP enrollment requires --allow-http. --no-start enrolls without starting the agent.");
+    println!("voltd - VoltPanel execution agent\n\n  voltd --version\n  voltd check-config --config FILE\n  voltd join <panel-url> <token> [--public-url URL] [--listen 0.0.0.0:8081] [--data DIR] [--config FILE] [--allow-http] [--no-start]\n  voltd serve [--config FILE]\n\njoin writes secure agent configuration automatically. Non-loopback HTTP enrollment requires --allow-http. --no-start enrolls without starting the agent.");
 }
 
 fn config_arg(args: &[String]) -> Result<PathBuf> {
@@ -151,6 +166,7 @@ async fn join(args: &[String]) -> Result<()> {
     }
     let token = args.get(1).context("missing enrollment token")?.clone();
     let listen = option(args, "--listen").unwrap_or_else(|| "0.0.0.0:8081".into());
+    let listen_addr: SocketAddr = listen.parse().context("invalid listen address")?;
     let data_dir = option(args, "--data")
         .map(PathBuf::from)
         .or_else(|| dirs_home().map(|p| p.join(".local/share/voltd")))
@@ -158,8 +174,7 @@ async fn join(args: &[String]) -> Result<()> {
     let config_path = config_arg(args)?;
     let public_url = option(args, "--public-url").unwrap_or_else(|| {
         let host = local_ip().unwrap_or_else(|| "127.0.0.1".into());
-        let port = listen.rsplit_once(':').map(|(_, p)| p).unwrap_or("8081");
-        format!("http://{host}:{port}")
+        format!("http://{host}:{}", listen_addr.port())
     });
     let plaintext = args.iter().any(|v| v == "--plaintext");
     let panel_fingerprint = option(args, "--panel-fingerprint")

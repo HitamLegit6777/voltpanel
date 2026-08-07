@@ -1,13 +1,13 @@
 //! Workspace management endpoints: lifecycle, launch inputs, team access, and placement.
 use super::{data, ok, AdminUser, ApiError, ApiResult, AppState, AuthUser};
 use crate::capability::{power_capability, Capability, Grant, Role};
-use crate::node_protocol::PowerAction;
 use crate::models::{self, Server, User};
+use crate::node_protocol::PowerAction;
 use crate::services::{self, blueprint};
 use axum::extract::{Path, State};
 use axum::Json;
-use std::str::FromStr;
 use serde::Deserialize;
+use std::str::FromStr;
 
 /// Runtime limit override from the settings table, falling back to config.
 fn limit_override(db: &crate::db::Db, key: &str, fallback: u64) -> u64 {
@@ -61,11 +61,7 @@ pub async fn admin_list_all(
     let servers = models::list_servers(&state.db, None, false)?;
     let mut out = Vec::new();
     for s in &servers {
-        out.push(server_json(
-            &state,
-            s,
-            &admin,
-        ));
+        out.push(server_json(&state, s, &admin));
     }
     Ok(Json(serde_json::json!({ "data": out })))
 }
@@ -485,11 +481,7 @@ pub async fn update(
         bandwidth_rx: 0,
         bandwidth_tx: 0,
     });
-    Ok(Json(server_json(
-        &state,
-        &s,
-        &admin,
-    )))
+    Ok(Json(server_json(&state, &s, &admin)))
 }
 
 #[derive(Deserialize)]
@@ -831,7 +823,9 @@ pub async fn add_subuser(
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
     let grant = Grant::new(role, extra);
     if grant.capabilities().next().is_none() {
-        return Err(ApiError::bad_request("grant must include at least one capability"));
+        return Err(ApiError::bad_request(
+            "grant must include at least one capability",
+        ));
     }
     models::add_subuser(&state.db, id, req.user_id, &grant)?;
     Ok(ok(serde_json::json!({ "ok": true })))

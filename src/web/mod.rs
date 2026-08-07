@@ -2,10 +2,34 @@
 use crate::api::AppState;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse};
-use tower_http::services::ServeDir;
 
-pub fn static_dir() -> ServeDir {
-    ServeDir::new("static").append_index_html_on_directories(true)
+const APP_CSS: &str = include_str!("../../static/css/app.css");
+const ICONS_JS: &str = include_str!("../../static/js/icons.js");
+const APP_JS: &str = include_str!("../../static/js/app.js");
+
+fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        body,
+    )
+}
+
+pub async fn app_css() -> impl IntoResponse {
+    asset("text/css; charset=utf-8", APP_CSS)
+}
+
+pub async fn icons_js() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", ICONS_JS)
+}
+
+pub async fn app_js() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", APP_JS)
 }
 
 pub async fn index(State(_state): State<AppState>) -> impl IntoResponse {

@@ -18,10 +18,10 @@ voltd-manage status|logs|doctor|upgrade
 
 ## Health checks
 
-Panel health:
+Panel health is checked using the listener configured in `/etc/voltpanel/config.toml`:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/api/system/health
+sudo voltpanel-manage status
 ```
 
 Authenticated administrators can inspect `/api/system/isolation` for namespace/cgroup capabilities.

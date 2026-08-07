@@ -114,9 +114,9 @@ impl Capability {
             Capability::BackupsRead | Capability::BackupsWrite => "backups",
             Capability::ScheduleRead | Capability::ScheduleWrite => "schedule",
             Capability::DatabaseRead | Capability::DatabaseWrite => "database",
-            Capability::StartupUpdate
-            | Capability::StartupInstall
-            | Capability::StartupSecrets => "startup",
+            Capability::StartupUpdate | Capability::StartupInstall | Capability::StartupSecrets => {
+                "startup"
+            }
             Capability::SubusersRead | Capability::SubusersWrite => "subusers",
         }
     }

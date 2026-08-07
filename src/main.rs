@@ -24,22 +24,57 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
+fn config_path() -> String {
+    std::env::var("VOLTPANEL_CONFIG").unwrap_or_else(|_| "config.toml".into())
+}
+
+fn load_config() -> anyhow::Result<config::Config> {
+    let configured = std::env::var_os("VOLTPANEL_CONFIG").is_some();
+    let path = config_path();
+    let path = std::path::Path::new(&path);
+    if path.exists() {
+        config::Config::load(path)
+    } else if configured {
+        anyhow::bail!("configured file does not exist: {}", path.display())
+    } else {
+        Ok(config::Config::default())
+    }
+}
+
 pub static SETTINGS: std::sync::LazyLock<config::Config> = std::sync::LazyLock::new(|| {
-    let path = std::env::var("VOLTPANEL_CONFIG").unwrap_or_else(|_| "config.toml".into());
-    config::Config::load(std::path::Path::new(&path)).unwrap_or_else(|e| {
-        tracing::warn!("config load failed ({e}), using defaults");
-        config::Config::default()
-    })
+    load_config().unwrap_or_else(|e| panic!("failed to load {}: {e}", config_path()))
 });
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("--version") | Some("version") => {
+            println!("voltpanel {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("check-config") | Some("--check-config") => {
+            let path = args
+                .windows(2)
+                .find(|pair| pair[0] == "--config")
+                .map(|pair| pair[1].clone())
+                .or_else(|| std::env::var("VOLTPANEL_CONFIG").ok())
+                .unwrap_or_else(|| "config.toml".into());
+            let cfg = config::Config::load(std::path::Path::new(&path))?;
+            println!("valid config: {} (listen {})", path, cfg.web.listen);
+            return Ok(());
+        }
+        Some(other) => {
+            anyhow::bail!("unknown command '{other}' (supported: --version, check-config)")
+        }
+        None => {}
+    }
     unsafe {
         libc::umask(0o077);
     }
     {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::var("VOLTPANEL_CONFIG").unwrap_or_else(|_| "config.toml".into());
+        let path = config_path();
         if std::path::Path::new(&path).exists() {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
@@ -230,7 +265,10 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/servers/:id/sites/:site_id", get(sites::get))
         .route("/api/servers/:id/sites/:site_id", patch(sites::update))
         .route("/api/servers/:id/sites/:site_id", delete(sites::delete))
-        .route("/api/servers/:id/sites/:site_id/toggle", post(sites::toggle))
+        .route(
+            "/api/servers/:id/sites/:site_id/toggle",
+            post(sites::toggle),
+        )
         // ------- metrics -------
         .route("/api/servers/:id/metrics", get(metrics::series))
         .route("/api/servers/:id/metrics/summary", get(metrics::summary))
@@ -368,7 +406,9 @@ fn build_router(state: api::AppState) -> Router {
             delete(users::admin_revoke_session),
         )
         // ------- assets + SPA -------
-        .nest_service("/static", web::static_dir())
+        .route("/static/css/app.css", get(web::app_css))
+        .route("/static/js/icons.js", get(web::icons_js))
+        .route("/static/js/app.js", get(web::app_js))
         .route("/", get(web::index))
         .fallback(get(web::spa_fallback))
         .layer(

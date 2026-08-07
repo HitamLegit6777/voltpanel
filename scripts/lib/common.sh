@@ -140,15 +140,29 @@ release_base_url() {
 }
 
 install_binary() {
-  local binary=$1 target="/usr/local/bin/$1" url temp checksums asset expected actual
-  url=$(release_url "$binary"); asset="${binary}-$(arch_asset)"; temp=$(mktemp); checksums=$(mktemp)
+  local binary=$1 target="/usr/local/bin/$1" url temp_dir temp checksums asset expected actual output
+  url=$(release_url "$binary"); asset="${binary}-$(arch_asset)"; temp_dir=$(mktemp -d); temp="$temp_dir/$asset"; checksums="$temp_dir/SHA256SUMS"
   log "Downloading $binary from $url"
-  if [[ "$DRY_RUN" == "1" ]]; then log "[dry-run] verify SHA256SUMS and install $binary -> $target"; rm -f "$temp" "$checksums"; return; fi
-  curl --fail --location --retry 3 --connect-timeout 15 "$url" -o "$temp" || die "Binary download failed. Check the release and architecture."
-  curl --fail --location --retry 3 --connect-timeout 15 "$(release_base_url)/SHA256SUMS" -o "$checksums" || die "Checksum download failed."
-  expected=$(awk -v asset="$asset" '$2==asset{print $1}' "$checksums"); [[ -n "$expected" ]] || die "No checksum published for $asset"
-  actual=$(sha256sum "$temp" | awk '{print $1}'); [[ "$actual" == "$expected" ]] || die "Checksum mismatch for $asset"
-  install -m 0755 "$temp" "$target"; rm -f "$temp" "$checksums"
+  if [[ "$DRY_RUN" == "1" ]]; then log "[dry-run] verify SHA256SUMS, binary identity, and install $binary -> $target"; rm -rf "$temp_dir"; return; fi
+  curl --fail --location --retry 3 --connect-timeout 15 "$url" -o "$temp" || { rm -rf "$temp_dir"; die "Binary download failed. Check the release and architecture."; }
+  curl --fail --location --retry 3 --connect-timeout 15 "$(release_base_url)/SHA256SUMS" -o "$checksums" || { rm -rf "$temp_dir"; die "Checksum download failed."; }
+  expected=$(awk -v asset="$asset" '$2==asset{print $1}' "$checksums"); [[ -n "$expected" ]] || { rm -rf "$temp_dir"; die "No checksum published for $asset"; }
+  actual=$(sha256sum "$temp" | awk '{print $1}'); [[ "$actual" == "$expected" ]] || { rm -rf "$temp_dir"; die "Checksum mismatch for $asset"; }
+  chmod 0755 "$temp"
+  output=$(cd "$temp_dir" && timeout 5 "$temp" --version 2>&1) || { rm -rf "$temp_dir"; die "$asset failed its version check; the release is incompatible with this installer"; }
+  [[ "$output" == "$binary "* ]] || { rm -rf "$temp_dir"; die "Downloaded asset is not a compatible $binary binary: $output"; }
+  install -m 0755 "$temp" "$target"; rm -rf "$temp_dir"
+  ok "Installed $output"
+}
+
+proxy_upstream() {
+  local listen=$1 port=${1##*:}
+  validate_port "$port"
+  case "$listen" in
+    0.0.0.0:*) printf '127.0.0.1:%s' "$port" ;;
+    \[::\]:*) printf '[::1]:%s' "$port" ;;
+    *) printf '%s' "$listen" ;;
+  esac
 }
 random_secret() { openssl rand -base64 "${1:-36}" | tr -d '\n'; }
 validate_domain() { [[ $1 =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]] || die "Invalid domain: $1"; }

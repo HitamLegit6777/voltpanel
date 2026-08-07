@@ -2,13 +2,13 @@
 use crate::db::Db;
 use crate::models::{self, Blueprint, BlueprintInput, InputKind, Server};
 use anyhow::{anyhow, bail, Result};
-use regex::Regex;
-use std::collections::HashMap;
-use std::sync::LazyLock;
 use chrono::Utc;
+use regex::Regex;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// Resolve blueprint inputs for a workspace, applying owner overrides.
 pub fn resolve_variables(db: &Db, server: &Server) -> Result<Vec<(BlueprintInput, String)>> {
@@ -43,7 +43,10 @@ fn template_context(db: &Db, server: &Server) -> Result<HashMap<String, String>>
     ctx.insert("workspace.uuid".into(), server.uuid.clone());
     ctx.insert("workspace.memory_mb".into(), server.memory_mb.to_string());
     ctx.insert("workspace.disk_mb".into(), server.disk_mb.to_string());
-    ctx.insert("workspace.cpu_percent".into(), server.cpu_percent.to_string());
+    ctx.insert(
+        "workspace.cpu_percent".into(),
+        server.cpu_percent.to_string(),
+    );
     ctx.insert(
         "workspace.port".into(),
         server.port.map(|p| p.to_string()).unwrap_or_default(),
@@ -417,8 +420,7 @@ fn blueprint_row(conn: &rusqlite::Connection, id: i64) -> Result<Option<Blueprin
 pub fn snapshot(db: &Db, blueprint_id: i64, author: &str, note: &str) -> Result<i64> {
     let mut conn = db.lock();
     let tx = conn.transaction()?;
-    let bp = blueprint_row(&tx, blueprint_id)?
-        .ok_or_else(|| anyhow!("blueprint not found"))?;
+    let bp = blueprint_row(&tx, blueprint_id)?.ok_or_else(|| anyhow!("blueprint not found"))?;
     let version: i64 = tx.query_row(
         "SELECT version FROM blueprints WHERE id=?1",
         [blueprint_id],
@@ -471,7 +473,8 @@ pub fn list_revisions(db: &Db, blueprint_id: i64) -> Result<Vec<RevisionMeta>> {
             created_at: r.get(5)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 /// Full snapshot JSON stored for a revision.
@@ -521,8 +524,7 @@ fn rollback_inner(
 ) -> Result<i64> {
     let mut conn = db.lock();
     let tx = conn.transaction()?;
-    let cur = blueprint_row(&tx, blueprint_id)?
-        .ok_or_else(|| anyhow!("blueprint not found"))?;
+    let cur = blueprint_row(&tx, blueprint_id)?.ok_or_else(|| anyhow!("blueprint not found"))?;
     let cur_version: i64 = tx.query_row(
         "SELECT version FROM blueprints WHERE id=?1",
         [blueprint_id],
@@ -636,7 +638,11 @@ pub fn drift_for_blueprint(db: &Db, blueprint_id: i64) -> Result<Vec<Drift>> {
         "SELECT id, name, blueprint_version FROM servers WHERE blueprint_id=?1 AND deleted=0 ORDER BY name",
     )?;
     let rows = stmt.query_map([blueprint_id], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
     })?;
     let mut out = Vec::new();
     for row in rows {

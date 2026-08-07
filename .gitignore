@@ -1,10 +1,10 @@
 /target/
 /dist/
 /data/
+/servers/
 /backups/
 /logs/
 /websites/
-/eggs/
 config.toml
 voltd.toml
 *.db

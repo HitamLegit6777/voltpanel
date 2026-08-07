@@ -27,7 +27,12 @@ struct LineBuf {
 
 impl Default for LineBuf {
     fn default() -> Self {
-        Self { next_seq: 1, last_ok: 0, lines: Vec::new(), partial: false }
+        Self {
+            next_seq: 1,
+            last_ok: 0,
+            lines: Vec::new(),
+            partial: false,
+        }
     }
 }
 
@@ -68,7 +73,7 @@ impl ConsoleHub {
         }
         let parts: Vec<&str> = text.split('\n').collect();
         let complete_count = parts.len() - 1; // '\n'-terminated lines in this chunk
-        // The first part completes the pending partial, keeping its original seq.
+                                              // The first part completes the pending partial, keeping its original seq.
         let mut start = 0;
         if buf.partial {
             let pending_seq = buf.lines.last().map(|(s, _)| *s);
@@ -191,8 +196,8 @@ mod tests {
 
     fn test_hub() -> ConsoleHub {
         let mut cfg = Config::default();
-        cfg.paths.logs_dir = std::env::temp_dir()
-            .join(format!("voltpanel-console-test-{}", std::process::id()));
+        cfg.paths.logs_dir =
+            std::env::temp_dir().join(format!("voltpanel-console-test-{}", std::process::id()));
         ConsoleHub::new(cfg)
     }
 
@@ -253,6 +258,9 @@ mod tests {
         hub.append(1, "bye").await; // new partial, seq 2
         let (lines, truncated) = hub.history(1, 0);
         assert!(!truncated);
-        assert_eq!(lines, vec![(1, "hello".to_string()), (2, "bye".to_string())]);
+        assert_eq!(
+            lines,
+            vec![(1, "hello".to_string()), (2, "bye".to_string())]
+        );
     }
 }

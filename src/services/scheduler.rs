@@ -147,10 +147,7 @@ fn add_policy(
         .ok_or_else(|| anyhow::anyhow!("schedule is not a JSON object"))?;
     obj.insert("max_retries".to_string(), serde_json::json!(max_retries));
     obj.insert("retry_backoff_s".to_string(), serde_json::json!(backoff_s));
-    obj.insert(
-        "only_when_online".to_string(),
-        serde_json::json!(owo != 0),
-    );
+    obj.insert("only_when_online".to_string(), serde_json::json!(owo != 0));
     Ok(())
 }
 
@@ -312,7 +309,11 @@ impl Scheduler {
         attempt: i64,
         pol: &RetryPolicy,
     ) -> Result<()> {
-        if !should_run(true, pol.only_when_online, self.is_online(sch.server_id).await) {
+        if !should_run(
+            true,
+            pol.only_when_online,
+            self.is_online(sch.server_id).await,
+        ) {
             self.finish_run(run_id, "skipped", "workspace offline", true)?;
             self.notifier.notify(
                 "info",

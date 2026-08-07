@@ -72,9 +72,7 @@ impl NodeClient {
         }
         let cfg = crate::tls::pinned_client_config(&fp)
             .with_context(|| format!("node '{}' has an invalid TLS fingerprint", node.name))?;
-        let client = builder()
-            .use_preconfigured_tls((*cfg).clone())
-            .build()?;
+        let client = builder().use_preconfigured_tls((*cfg).clone()).build()?;
         self.pinned.insert(fp, client.clone());
         Ok(client)
     }

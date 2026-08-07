@@ -95,8 +95,8 @@ pub fn validate_hostname(raw: &str) -> Result<String> {
 
 /// Validate a reverse-proxy target: parseable `http(s)://host:port`.
 pub fn validate_upstream(raw: &str) -> Result<()> {
-    let u = Url::parse(raw)
-        .map_err(|_| anyhow!("upstream must be a valid http(s)://host:port URL"))?;
+    let u =
+        Url::parse(raw).map_err(|_| anyhow!("upstream must be a valid http(s)://host:port URL"))?;
     if u.scheme() != "http" && u.scheme() != "https" {
         bail!("upstream must use http or https");
     }
@@ -157,7 +157,8 @@ pub fn list(db: &Db, server_id: i64) -> Result<Vec<Site>> {
         "SELECT {COLUMNS} FROM websites WHERE server_id=?1 ORDER BY id"
     ))?;
     let rows = stmt.query_map([server_id], site_from_row)?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 pub fn get(db: &Db, server_id: i64, id: i64) -> Result<Option<Site>> {
@@ -410,7 +411,10 @@ mod tests {
             "foo.*.com",
             "*.foo.*.com",
         ] {
-            assert!(validate_hostname(bad).is_err(), "{bad:?} should be rejected");
+            assert!(
+                validate_hostname(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 
@@ -443,7 +447,10 @@ mod tests {
             "not a url",
             "http://example.com:99999",
         ] {
-            assert!(validate_upstream(bad).is_err(), "{bad:?} should be rejected");
+            assert!(
+                validate_upstream(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 
@@ -453,7 +460,10 @@ mod tests {
             assert!(validate_root_dir(ok).is_ok(), "{ok:?} should be accepted");
         }
         for bad in ["../etc", "/../etc", "a/../../b", ".."] {
-            assert!(validate_root_dir(bad).is_err(), "{bad:?} should be rejected");
+            assert!(
+                validate_root_dir(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 

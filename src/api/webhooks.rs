@@ -1,6 +1,6 @@
 //! Webhook endpoints: subscriptions and delivery history.
 
-use super::{data, ok, ApiError, ApiResult, AdminUser, AppState};
+use super::{data, ok, AdminUser, ApiError, ApiResult, AppState};
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
@@ -134,5 +134,7 @@ pub async fn test(
         "sent_at": chrono::Utc::now().to_rfc3339(),
     });
     webhooks::enqueue_one(&state.db, wh.id, webhooks::TEST_EVENT, payload)?;
-    Ok(data(json!({ "enqueued": 1, "event": webhooks::TEST_EVENT })))
+    Ok(data(
+        json!({ "enqueued": 1, "event": webhooks::TEST_EVENT }),
+    ))
 }

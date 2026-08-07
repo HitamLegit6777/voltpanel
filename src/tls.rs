@@ -283,7 +283,10 @@ impl ServerCertVerifier for PinnedVerifier {
 pub fn pinned_client_config(fingerprint: &str) -> Result<Arc<rustls::ClientConfig>> {
     let fingerprint = normalize_fingerprint(fingerprint);
     if fingerprint.len() != 64 {
-        bail!("expected a 64-character hex SHA-256 fingerprint, got {} characters", fingerprint.len());
+        bail!(
+            "expected a 64-character hex SHA-256 fingerprint, got {} characters",
+            fingerprint.len()
+        );
     }
     let provider = provider();
     let cfg = rustls::ClientConfig::builder_with_provider(provider.clone())

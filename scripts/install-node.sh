@@ -118,6 +118,9 @@ else
     PUBLIC_URL="http://${IP:-127.0.0.1}:${LISTEN##*:}"
   fi
 fi
+if [[ "$TLS_MODE" != none && "$LISTEN" != 127.0.0.1:* && "$LISTEN" != \[::1\]:* ]]; then
+  die "TLS proxy origin must listen on loopback (127.0.0.1 or [::1])"
+fi
 validate_url "$PUBLIC_URL"
 
 if [[ $PANEL_URL != https://* && "$PANEL_URL" != http://127.0.0.1* && "$PANEL_URL" != http://localhost* && "$ALLOW_HTTP" != 1 ]]; then
@@ -129,8 +132,14 @@ install_binary voltd
 run install -d -m 0700 "$DATA_DIR" "$DATA_DIR/servers" "$DATA_DIR/logs" "$DATA_DIR/meta" "$CONFIG_DIR"
 
 JOIN_ARGS=(join "$PANEL_URL" "$TOKEN" --public-url "$PUBLIC_URL" --listen "$LISTEN" --data "$DATA_DIR" --config "$CONFIG_DIR/voltd.toml" --no-start)
+JOIN_ARGS+=(--plaintext)
 [[ "$ALLOW_HTTP" == 1 ]] && JOIN_ARGS+=(--allow-http)
 if [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] /usr/local/bin/voltd ${JOIN_ARGS[*]}"; else /usr/local/bin/voltd "${JOIN_ARGS[@]}"; fi
+if [[ "$DRY_RUN" == 1 ]]; then
+  log "[dry-run] validate $CONFIG_DIR/voltd.toml with voltd"
+else
+  /usr/local/bin/voltd check-config --config "$CONFIG_DIR/voltd.toml"
+fi
 
 write_file /etc/systemd/system/voltd.service 0644 <<EOF
 [Unit]
@@ -172,6 +181,7 @@ elif [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] download voltd-manage"
 else curl -fsSL "$VOLTPANEL_RAW/scripts/manage-node.sh" -o /usr/local/sbin/voltd-manage; chmod 0755 /usr/local/sbin/voltd-manage
 fi
 
+UPSTREAM=$(proxy_upstream "$LISTEN")
 case "$TLS_MODE" in
   caddy)
     install_caddy
@@ -180,7 +190,7 @@ case "$TLS_MODE" in
 $DOMAIN {
 $TLS_LINE
     encode zstd gzip
-    reverse_proxy 127.0.0.1:$PORT
+    reverse_proxy $UPSTREAM
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -193,9 +203,9 @@ EOF
     run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
     run systemctl reload caddy
     ;;
-  certbot) configure_certbot_proxy node "$DOMAIN" "127.0.0.1:$PORT" "$EMAIL" ;;
-  certbot-ip) configure_certbot_ip_proxy node "$IP_ADDRESS" "127.0.0.1:$PORT" "$EMAIL" ;;
-  cloudflare) configure_cloudflare_proxy node "$DOMAIN" "127.0.0.1:$PORT" "$CF_CERT" "$CF_KEY" ;;
+  certbot) configure_certbot_proxy node "$DOMAIN" "$UPSTREAM" "$EMAIL" ;;
+  certbot-ip) configure_certbot_ip_proxy node "$IP_ADDRESS" "$UPSTREAM" "$EMAIL" ;;
+  cloudflare) configure_cloudflare_proxy node "$DOMAIN" "$UPSTREAM" "$CF_CERT" "$CF_KEY" ;;
 esac
 
 systemctl_reload_start voltd

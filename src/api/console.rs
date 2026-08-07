@@ -102,7 +102,11 @@ pub async fn stream(
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
-        .or_else(|| q.since.as_deref().and_then(|s| s.trim().parse::<u64>().ok()));
+        .or_else(|| {
+            q.since
+                .as_deref()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        });
     let after_seq = resume.unwrap_or(0);
     // Subscribe before snapshotting so lines arriving in between are not lost.
     let mut rx = state.hub.subscribe(id);

@@ -22,8 +22,8 @@ pub async fn create(
     Json(req): Json<SiteInput>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_capability(&state, &u, id, Capability::FilesWrite)?;
-    let site = websites::create(&state.db, id, &req)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let site =
+        websites::create(&state.db, id, &req).map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(data(serde_json::json!(site)))
 }
 

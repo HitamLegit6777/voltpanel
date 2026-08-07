@@ -125,7 +125,8 @@ pub fn validate_events(events: &[String]) -> Result<()> {
 
 /// HMAC-SHA256 over `"{ts}.{body}"`, hex-encoded.
 pub fn sign(secret: &str, body: &str, ts: i64) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(format!("{ts}.{body}").as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -158,22 +159,31 @@ pub fn list(db: &Db) -> Result<Vec<Webhook>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(&format!("SELECT {WH_COLS} FROM webhooks ORDER BY name"))?;
     let rows = stmt.query_map([], row_to_webhook)?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 pub fn get(db: &Db, id: i64) -> Result<Webhook> {
     let conn = db.lock();
-    conn.query_row(&format!("SELECT {WH_COLS} FROM webhooks WHERE id=?1"), [id], row_to_webhook)
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => anyhow!("webhook not found"),
-            other => other.into(),
-        })
+    conn.query_row(
+        &format!("SELECT {WH_COLS} FROM webhooks WHERE id=?1"),
+        [id],
+        row_to_webhook,
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => anyhow!("webhook not found"),
+        other => other.into(),
+    })
 }
 
 pub fn update(db: &Db, id: i64, patch: WebhookPatch) -> Result<Webhook> {
     let conn = db.lock();
     let wh = conn
-        .query_row(&format!("SELECT {WH_COLS} FROM webhooks WHERE id=?1"), [id], row_to_webhook)
+        .query_row(
+            &format!("SELECT {WH_COLS} FROM webhooks WHERE id=?1"),
+            [id],
+            row_to_webhook,
+        )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => anyhow!("webhook not found"),
             other => other.into(),
@@ -183,15 +193,30 @@ pub fn update(db: &Db, id: i64, patch: WebhookPatch) -> Result<Webhook> {
     }
     let name = patch.name.unwrap_or(&wh.name);
     let url = patch.url.unwrap_or(&wh.url);
-    let events: Vec<String> = patch.events.map(|e| e.to_vec()).unwrap_or_else(|| wh.events.clone());
-    let secret = patch.secret.map(str::to_string).unwrap_or_else(|| wh.secret.clone());
+    let events: Vec<String> = patch
+        .events
+        .map(|e| e.to_vec())
+        .unwrap_or_else(|| wh.events.clone());
+    let secret = patch
+        .secret
+        .map(str::to_string)
+        .unwrap_or_else(|| wh.secret.clone());
     let server_id = patch.server_id.unwrap_or(wh.server_id);
     let enabled = patch.enabled.unwrap_or(wh.enabled);
     let events_json = serde_json::to_string(&events)?;
     conn.execute(
         "UPDATE webhooks SET name=?1, url=?2, events=?3, secret=?4, server_id=?5, \
          enabled=?6, updated_at=?7 WHERE id=?8",
-        params![name, url, events_json, secret, server_id, enabled as i64, Utc::now().to_rfc3339(), id],
+        params![
+            name,
+            url,
+            events_json,
+            secret,
+            server_id,
+            enabled as i64,
+            Utc::now().to_rfc3339(),
+            id
+        ],
     )?;
     drop(conn);
     get(db, id)
@@ -244,7 +269,11 @@ pub fn emit(db: &Db, event: &str, server_id: Option<i64>, payload: Value) -> usi
         }
     };
     let rows = match sel.query_map([], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?))
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<i64>>(2)?,
+        ))
     }) {
         Ok(rows) => rows,
         Err(e) => {
@@ -262,7 +291,10 @@ pub fn emit(db: &Db, event: &str, server_id: Option<i64>, payload: Value) -> usi
         if !patterns.iter().any(|p| event_matches(p, event)) {
             continue;
         }
-        if insert.execute(params![wid, event, payload, next_at, created_at]).is_ok() {
+        if insert
+            .execute(params![wid, event, payload, next_at, created_at])
+            .is_ok()
+        {
             enqueued += 1;
         }
     }
@@ -278,7 +310,13 @@ pub fn enqueue_one(db: &Db, webhook_id: i64, event: &str, payload: Value) -> Res
     conn.execute(
         "INSERT INTO webhook_deliveries (webhook_id, event, payload, attempt, status, \
          next_attempt_at, created_at) VALUES (?1, ?2, ?3, 0, 'pending', ?4, ?5)",
-        params![webhook_id, event, payload.to_string(), now.timestamp(), now.to_rfc3339()],
+        params![
+            webhook_id,
+            event,
+            payload.to_string(),
+            now.timestamp(),
+            now.to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -334,7 +372,11 @@ pub async fn dispatch_due(db: &Db, client: &reqwest::Client, limit: usize) -> us
             }
         };
         let rows = match stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         }) {
             Ok(rows) => rows,
             Err(e) => {
@@ -342,7 +384,9 @@ pub async fn dispatch_due(db: &Db, client: &reqwest::Client, limit: usize) -> us
                 return 0;
             }
         };
-        rows.flatten().map(|(id, url, secret)| (id, (url, secret))).collect()
+        rows.flatten()
+            .map(|(id, url, secret)| (id, (url, secret)))
+            .collect()
     };
 
     let mut processed = 0usize;
@@ -407,7 +451,13 @@ pub async fn dispatch_due(db: &Db, client: &reqwest::Client, limit: usize) -> us
                     let _ = conn.execute(
                         "UPDATE webhook_deliveries SET status='failed', attempt=?1, \
                          response_code=?2, error=?3, delivered_at=?4 WHERE id=?5",
-                        params![new_attempt, code, error, Utc::now().to_rfc3339(), delivery_id],
+                        params![
+                            new_attempt,
+                            code,
+                            error,
+                            Utc::now().to_rfc3339(),
+                            delivery_id
+                        ],
                     );
                 } else {
                     let next = Utc::now().timestamp() + backoff_s;
@@ -450,7 +500,8 @@ pub fn deliveries(db: &Db, webhook_id: i64, limit: i64) -> Result<Vec<Delivery>>
             delivered_at: r.get(10)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -490,7 +541,10 @@ mod tests {
         assert!(validate_events(&["server.*".to_string()]).is_ok());
         assert!(validate_events(&["*".to_string(), "backup.failed".to_string()]).is_ok());
         assert!(validate_events(&["bogus.event".to_string()]).is_err());
-        let mixed = ["server.*", "nope.*"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mixed = ["server.*", "nope.*"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
         assert!(validate_events(&mixed).is_err());
     }
 }

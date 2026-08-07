@@ -176,11 +176,7 @@ pub fn summary(db: &Db, server_id: i64, since_ts: i64) -> Result<Summary> {
             0.0
         },
         cpu_peak,
-        memory_avg: if count > 0 {
-            mem_sum / count as u64
-        } else {
-            0
-        },
+        memory_avg: if count > 0 { mem_sum / count as u64 } else { 0 },
         memory_peak: mem_peak,
         disk_peak,
         // rx/tx are cumulative counters: total transferred = MAX - MIN (a reset
@@ -370,7 +366,12 @@ mod tests {
     fn range_orders_asc_and_downsamples() {
         let db = TestDb::new();
         for i in 0..500 {
-            record(&db.db, db.sid, &s(i, i as f64, i as u64, i as u64, i as u64, i as u64)).unwrap();
+            record(
+                &db.db,
+                db.sid,
+                &s(i, i as f64, i as u64, i as u64, i as u64, i as u64),
+            )
+            .unwrap();
         }
         let out = range(&db.db, db.sid, 0, 999, 120).unwrap();
         assert!(out.len() <= 120);

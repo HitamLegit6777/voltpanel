@@ -6,14 +6,13 @@
 sudo voltpanel-manage upgrade
 ```
 
-The command:
+The command downloads and verifies the release, validates the existing config with the new binary, creates a panel database/files backup, then replaces and restarts the service. If startup fails, it restores and restarts the previous binary automatically. Database migrations still require the matching database backup for a manual downgrade.
 
-1. Downloads the latest binary
-2. Creates a panel database/files backup
-3. Stops the service
-4. Replaces the binary
-5. Starts the service
-6. Runs migrations automatically during startup
+Pin a specific release when required:
+
+```bash
+sudo voltpanel-manage upgrade v0.1.1
+```
 
 After upgrade:
 
@@ -30,6 +29,8 @@ Mark the node non-schedulable and enter maintenance mode, then:
 sudo voltd-manage upgrade
 sudo voltd-manage doctor
 ```
+
+The node manager validates its config before replacement and restores the previous binary automatically if the upgraded service fails to start. A release can be pinned with `sudo voltd-manage upgrade v0.1.1`.
 
 Running workloads are tied to the execution-agent lifecycle. Plan a maintenance window or transfer workloads first.
 

@@ -275,8 +275,9 @@ pub fn get_blueprint(db: &Db, id: i64) -> Result<Blueprint> {
 
 pub fn list_blueprints(db: &Db) -> Result<Vec<Blueprint>> {
     let conn = db.lock();
-    let mut stmt =
-        conn.prepare(&format!("SELECT {BLUEPRINT_COLS} FROM blueprints ORDER BY name"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BLUEPRINT_COLS} FROM blueprints ORDER BY name"
+    ))?;
     let rows = stmt.query_map([], blueprint_from_row)?;
     let mut out = Vec::new();
     for e in rows {
@@ -1443,7 +1444,9 @@ mod tests {
     #[test]
     fn session_user_keeps_full_owner_grant() {
         let t = TestDb::new();
-        let g = server_grant(&t.db, &t.owner(), t.server_id).unwrap().unwrap();
+        let g = server_grant(&t.db, &t.owner(), t.server_id)
+            .unwrap()
+            .unwrap();
         assert!(g.contains(Capability::ControlStart));
         assert!(g.contains(Capability::FilesWrite));
     }
@@ -1467,9 +1470,7 @@ mod tests {
         u.key_scope = Some(scope(vec![], true, vec![t.server_id]));
         let allowed = server_grant(&t.db, &u, t.server_id).unwrap().unwrap();
         assert!(allowed.contains(Capability::ControlStart));
-        let denied = server_grant(&t.db, &u, t.other_server_id)
-            .unwrap()
-            .unwrap();
+        let denied = server_grant(&t.db, &u, t.other_server_id).unwrap().unwrap();
         assert_eq!(denied.capabilities().count(), 0);
         assert!(!denied.contains(Capability::ConsoleRead));
     }
@@ -1493,7 +1494,9 @@ mod tests {
         let t = TestDb::new();
         let mut u = t.owner();
         u.key_scope = Some(scope(vec![], true, vec![]));
-        let session = server_grant(&t.db, &t.owner(), t.server_id).unwrap().unwrap();
+        let session = server_grant(&t.db, &t.owner(), t.server_id)
+            .unwrap()
+            .unwrap();
         let keyed = server_grant(&t.db, &u, t.server_id).unwrap().unwrap();
         assert_eq!(
             session.capabilities().collect::<Vec<_>>(),
@@ -1524,6 +1527,8 @@ mod tests {
         drop(conn);
         let mut stranger = get_user(&t.db, sid).unwrap();
         stranger.key_scope = Some(scope(vec![], true, vec![]));
-        assert!(server_grant(&t.db, &stranger, t.server_id).unwrap().is_none());
+        assert!(server_grant(&t.db, &stranger, t.server_id)
+            .unwrap()
+            .is_none());
     }
 }
