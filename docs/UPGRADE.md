@@ -57,16 +57,29 @@ sudo systemctl start voltpanel
 
 Database migrations are forward-only. Restoring the matching pre-upgrade database is required when rolling back across a schema migration.
 
-## Uninstall panel
+## Installer management modes
 
-Create a final backup, then:
+The panel installer can also manage an existing installation:
+
+```bash
+sudo bash /tmp/install-panel.sh --reinstall
+sudo bash /tmp/install-panel.sh --reset-password admin
+sudo bash /tmp/install-panel.sh --uninstall
+sudo bash /tmp/install-panel.sh --uninstall --purge
+```
+
+`--reinstall` replaces and restarts the binary/service while preserving configuration, database, workloads, and credentials. Plain `--uninstall` removes the application, service, management helper, and reverse-proxy artifacts but preserves configuration and data for a later reinstall. Only `--uninstall --purge` permanently removes configuration and the configured data directory.
+
+## Uninstall panel with the management helper
+
+The installed management helper retains its explicit purge workflow. Create a final backup, then:
 
 ```bash
 sudo voltpanel-manage backup
 sudo voltpanel-manage uninstall --purge
 ```
 
-`--purge` removes config and data. Without a separate backup, deletion is permanent.
+This removes config and data. Without a separate backup, deletion is permanent.
 
 ## Uninstall node
 

@@ -3,6 +3,23 @@ set -Eeuo pipefail
 
 REPO=${VOLTPANEL_REPO:-HitamLegit6777/voltpanel}
 CONFIG_PATH=${VOLTD_CONFIG:-/etc/voltpanel-node/voltd.toml}
+SCRIPT_PATH=${BASH_SOURCE[0]:-$0}
+SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+
+# Prefer the shared helper library (repo checkout, or installed copy managed by
+# install-node.sh); fall back to self-contained copies when running standalone.
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/lib/common.sh"
+elif [[ -f /usr/share/voltpanel-node/common.sh ]]; then
+  # shellcheck disable=SC1091
+  source /usr/share/voltpanel-node/common.sh
+else
+  require_root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || { printf 'Run as root.\n' >&2; exit 1; }; }
+  # The purge safety guard lives only in lib/common.sh. Never purge without
+  # it: silently skipping the check would make `uninstall --purge` dangerous.
+  unsafe_purge_path() { printf 'Missing lib/common.sh; refusing to purge without the safety guard.\n' >&2; exit 1; }
+fi
 
 arch() {
   case "$(uname -m)" in
@@ -11,13 +28,13 @@ arch() {
     *) printf 'unsupported architecture\n' >&2; exit 1 ;;
   esac
 }
-require_root() { [[ $EUID -eq 0 ]] || { printf 'Run as root.\n' >&2; exit 1; }; }
 config_value() {
   local key=$1
+  [[ -r "$CONFIG_PATH" ]] || return 0
   awk -F= -v key="$key" '$1 ~ "^[[:space:]]*" key "[[:space:]]*$" { value=$2; sub(/^[[:space:]]*/, "", value); sub(/[[:space:]]*$/, "", value); gsub(/^"|"$/, "", value); print value; exit }' "$CONFIG_PATH"
 }
 download_release() {
-  local version=$1 output=$2 sums=$3 asset base expected actual identity
+  local version=$1 output=$2 sums=$3 asset base expected actual identity status
   asset="voltd-$(arch)"
   if [[ "$version" == latest ]]; then base="https://github.com/$REPO/releases/latest/download"; else base="https://github.com/$REPO/releases/download/$version"; fi
   curl --fail --location --retry 3 --connect-timeout 15 "$base/$asset" -o "$output"
@@ -26,38 +43,70 @@ download_release() {
   actual=$(sha256sum "$output" | awk '{print $1}')
   [[ -n "$expected" && "$expected" == "$actual" ]] || { printf 'Checksum mismatch for %s\n' "$asset" >&2; exit 1; }
   chmod 0755 "$output"
-  identity=$(timeout 5 "$output" --version 2>&1) || { printf 'Downloaded binary failed version check\n' >&2; exit 1; }
+  identity=$(timeout 5 "$output" --version 2>&1) || { status=$?; printf 'Downloaded binary failed version check (exit %s): %s\n' "$status" "${identity:-no output}" >&2; exit 1; }
   [[ "$identity" == "voltd "* ]] || { printf 'Unexpected binary identity: %s\n' "$identity" >&2; exit 1; }
   printf 'Downloaded %s\n' "$identity"
 }
 upgrade() {
   require_root
   local version=${1:-latest} temp sums previous
-  temp=$(mktemp); sums=$(mktemp); previous=$(mktemp)
+  temp=$(mktemp /usr/local/bin/.voltd.upgrade.XXXXXX); sums=$(mktemp); previous=$(mktemp)
   trap 'rm -f "$temp" "$sums" "$previous"' RETURN
   download_release "$version" "$temp" "$sums"
   "$temp" check-config --config "$CONFIG_PATH"
   cp --preserve=mode,ownership,timestamps /usr/local/bin/voltd "$previous"
   systemctl stop voltd
+  # Disable Restart=on-failure during the swap so a crash of the freshly
+  # installed binary cannot make systemd relaunch it mid-rollback.
+  systemctl set-property --runtime voltd Restart=no || true
   install -m755 "$temp" /usr/local/bin/voltd
   if ! systemctl start voltd || ! systemctl is-active --quiet voltd; then
     printf 'Upgrade failed; restoring previous binary.\n' >&2
     install -m755 "$previous" /usr/local/bin/voltd
+    systemctl set-property --runtime voltd Restart=on-failure || true
     systemctl restart voltd
     exit 1
   fi
+  systemctl set-property --runtime voltd Restart=on-failure || true
   systemctl --no-pager --full status voltd
 }
+# Signed GET /v1/health: the agent requires HMAC auth on every route, so a bare
+# curl can never confirm readiness. The manager signs with the config secret.
+agent_health_check() {
+  local listen=$1 node_id secret scheme port host payload ts nonce sig
+  node_id=$(config_value node_id)
+  secret=$(config_value secret)
+  [[ -n "$node_id" && -n "$secret" ]] || return 1
+  scheme=https; [[ $(config_value plaintext) == true ]] && scheme=http
+  port=${listen##*:}
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  host=127.0.0.1; [[ "$listen" == \[* ]] && host='[::1]'
+  ts=$(date +%s)
+  nonce=$(openssl rand -hex 16)
+  payload="GET
+/v1/health
+$ts
+$nonce
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  sig=$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$secret" 2>/dev/null | awk '{print $NF}')
+  [[ -n "$sig" ]] || return 1
+  curl -kfsS -o /dev/null \
+    -H "x-volt-node: $node_id" \
+    -H "x-volt-timestamp: $ts" \
+    -H "x-volt-nonce: $nonce" \
+    -H "x-volt-signature: $sig" \
+    "$scheme://$host:$port/v1/health"
+}
 doctor() {
-  local failures=0 cmd listen scheme
+  local failures=0 cmd listen
   for cmd in bwrap setpriv nft ip; do if command -v "$cmd" >/dev/null; then printf 'ok: %s\n' "$cmd"; else printf 'missing: %s\n' "$cmd"; failures=$((failures+1)); fi; done
   if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then printf 'ok: cgroup v2\n'; else printf 'missing: cgroup v2\n'; failures=$((failures+1)); fi
   if systemctl is-active --quiet voltd; then printf 'ok: service\n'; else printf 'failed: service\n'; failures=$((failures+1)); fi
   [[ -r "$CONFIG_PATH" ]] || { printf 'missing: %s\n' "$CONFIG_PATH"; failures=$((failures+1)); }
   if [[ -r "$CONFIG_PATH" ]]; then
     stat -c '%a %n' "$CONFIG_PATH" 2>/dev/null || failures=$((failures+1))
-    listen=$(config_value listen); scheme=https; [[ $(config_value plaintext) == true ]] && scheme=http
-    if curl -kfsS "$scheme://127.0.0.1:${listen##*:}/v1/health" >/dev/null; then printf 'ok: local health endpoint\n'; else printf 'failed: local health endpoint\n'; failures=$((failures+1)); fi
+    listen=$(config_value listen)
+    if agent_health_check "$listen" >/dev/null; then printf 'ok: local health endpoint\n'; else printf 'failed: local health endpoint\n'; failures=$((failures+1)); fi
   fi
   journalctl -u voltd -n 30 --no-pager || true
   return "$failures"
@@ -68,6 +117,28 @@ case ${1:-help} in
   logs) journalctl -u voltd -f ;;
   upgrade) upgrade "${2:-latest}" ;;
   doctor) doctor ;;
-  uninstall) require_root; [[ ${2:-} == --purge ]] || { printf 'Use: %s uninstall --purge\n' "$0"; exit 1; }; data=$(config_value data_dir); systemctl disable --now voltd || true; rm -f /etc/systemd/system/voltd.service /usr/local/bin/voltd /usr/local/sbin/voltd-manage; rm -rf /etc/voltpanel-node "$data"; systemctl daemon-reload ;;
+  uninstall)
+    require_root
+    [[ ${2:-} == --purge ]] || { printf 'Use: %s uninstall --purge\n' "$0"; exit 1; }
+    data=$(config_value data_dir)
+    [[ -n "$data" ]] || data=/var/lib/voltd
+    systemctl disable --now voltd >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/voltd.service /usr/local/bin/voltd /usr/local/sbin/voltd-manage /usr/share/voltpanel-node/common.sh
+    rm -rf -- /etc/voltpanel-node
+    if [[ -n "$data" ]] && unsafe_purge_path "$data"; then
+      printf 'Refusing to purge unsafe data path: %s\n' "$data" >&2
+      exit 1
+    fi
+    [[ -n "$data" ]] && rm -rf -- "$data"
+    if declare -F cleanup_proxy_artifacts >/dev/null; then
+      cleanup_proxy_artifacts node
+    else
+      rm -f /etc/caddy/conf.d/voltpanel-node.caddy /etc/nginx/conf.d/voltpanel-node.conf \
+        /etc/systemd/system/voltpanel-certbot-node.service /etc/systemd/system/voltpanel-certbot-node.timer \
+        /etc/letsencrypt/renewal-hooks/deploy/voltpanel-node-nginx \
+        /etc/voltpanel/tls/node-cloudflare.pem /etc/voltpanel/tls/node-cloudflare.key
+    fi
+    systemctl daemon-reload
+    ;;
   *) printf 'Usage: %s {status|logs|upgrade [VERSION]|doctor|uninstall --purge}\n' "$0" ;;
 esac

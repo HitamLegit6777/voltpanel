@@ -21,7 +21,7 @@ body:
     id: component
     attributes:
       label: Area
-      options: [Panel, Node daemon, Isolation, Multi-node, UI/UX, Installer, Documentation, Egg ecosystem]
+      options: [Panel, Node daemon, Isolation, Multi-node, UI/UX, Installer, Documentation, Blueprint ecosystem]
   - type: textarea
     id: security
     attributes:

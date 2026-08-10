@@ -52,6 +52,8 @@ curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scrip
 sudo bash /tmp/install-panel.sh
 ```
 
+On an existing installation, running the same command without arguments opens a management menu for reinstall, password reset, safe uninstall, or full purge. Reinstall and safe uninstall preserve `/etc/voltpanel` and the configured data directory.
+
 Available HTTPS modes:
 
 - **Caddy automatic HTTPS** — recommended for a public hostname.
@@ -108,7 +110,129 @@ curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scrip
 sudo bash /tmp/install-node.sh
 ```
 
-The node wizard provides the same Caddy, domain Certbot, public-IP Certbot, Cloudflare, and LAN-only modes. For a trusted private LAN without TLS, the wizard enables HTTP enrollment explicitly; automated installs must pass `--allow-http`.
+The node wizard provides the same Caddy, domain Certbot, public-IP Certbot, and Cloudflare modes. Enrollment requires TLS end to end: the panel refuses plaintext transport and fingerprint-less enrollments, so `--allow-http` no longer permits plaintext enrollment (it only fits loopback-local development).
+
+## VoltSpec Registry
+
+Blueprint Studio ships a package registry: publish the latest revision of a
+local blueprint as a signed package, then install it on this panel or fetch it
+from a remote panel's registry URL. Publishing and installing are admin
+actions; the catalog is readable by any authenticated user.
+
+### Signing
+
+Packages are signed with ed25519 when a publisher key is configured. The key
+is a hex-encoded 32-byte seed stored in the settings table (never in
+`config.toml`), so it can be rotated at runtime:
+
+```bash
+# Generate a fresh key (prints the public key + fingerprint)
+curl -s -X POST -H "Content-Type: application/json" \
+  -H "Cookie: session=<cookie>" \
+  -d '{"key": null}' \
+  http://panel:8080/api/settings/registry/signing-key
+
+# Set a specific key (64 hex chars)
+curl -s -X POST -H "Content-Type: application/json" \
+  -H "Cookie: session=<cookie>" \
+  -d '{"key": "<64-hex-seed>"}' \
+  http://panel:8080/api/settings/registry/signing-key
+
+# Disable signing (packages then publish unsigned)
+curl -s -X POST -H "Content-Type: application/json" \
+  -H "Cookie: session=<cookie>" \
+  -d '{"key": ""}' \
+  http://panel:8080/api/settings/registry/signing-key
+
+# Current signing posture (any authenticated user)
+curl -s -H "Cookie: session=<cookie>" http://panel:8080/api/settings/registry
+```
+
+The signature covers the canonical JSON of the whole package except the
+`signature` field itself, so it is portable across machines. Import rejects a
+signed package whose signature does not verify; unsigned packages install with
+a visible warning. Consumers can pin a publisher by the fingerprint shown in
+the UI and in the registry list response.
+
+### API
+
+```bash
+# Catalog: packages, local installs, signing posture
+curl -s -H "Cookie: session=<cookie>" http://panel:8080/api/blueprints/registry
+
+# Publish the latest revision of blueprint #3 (signed if a key is set)
+curl -s -X POST -H "Content-Type: application/json" \
+  -H "Cookie: session=<cookie>" \
+  -d '{"id": 3}' \
+  http://panel:8080/api/blueprints/registry/publish
+
+# Install a package published on this panel by id+version
+curl -s -X POST -H "Content-Type: application/json" \
+  -H "Cookie: session=<cookie>" \
+  -d '{"id": "velocity-proxy", "version": 2}' \
+  http://panel:8080/api/blueprints/registry/import
+
+# Install from a remote panel's registry package URL (SSRF-guarded fetch:
+# private/loopback/link-local destinations are refused, redirects re-validated,
+# response capped at 1 MiB; the provenance sidecar is written temp-then-renamed)
+curl -s -X POST -H "Content-Type: application/json" \
+  -H "Cookie: session=<cookie>" \
+  -d '{"url": "https://registry.example.com/registry/packages/velocity-proxy@2.json"}' \
+  http://panel:8080/api/blueprints/registry/import
+```
+
+Installed packages record provenance (package id, version, source URL when
+fetched remotely, and the verified signature) in a JSON sidecar under the
+registry directory — `<data_dir>/blueprints/registry/provenance/<uuid>.json` —
+so every local blueprint's origin stays auditable. Published packages live at
+`<data_dir>/blueprints/registry/packages/<id>@<version>.json`.
+
+### CLI
+
+`scripts/voltspec.sh` wraps the registry API for scripting and operator use —
+no backend changes, just curl + jq. It authenticates with an API token
+(`vp_...`) via the `Authorization: Bearer` header:
+
+```bash
+export VOLTPANEL_URL=http://panel:8080      # default http://127.0.0.1:8080
+export VOLTPANEL_API_KEY=vp_...             # required for every command
+
+# Signing posture (public key + fingerprint)
+./scripts/voltspec.sh status
+
+# Rotate the publisher key at runtime
+./scripts/voltspec.sh key generate          # prints the seed exactly once — store it
+./scripts/voltspec.sh key set <64-hex-seed>
+./scripts/voltspec.sh key clear             # packages then publish unsigned
+
+# Catalog: published packages, local installs, signing posture
+./scripts/voltspec.sh list
+
+# Publish the latest revision of blueprint #3 (signed when a key is set)
+./scripts/voltspec.sh publish 3
+
+# Install a package; omit @version to install the newest
+./scripts/voltspec.sh install velocity-proxy@2
+./scripts/voltspec.sh install paper
+
+# Fetch a raw package document (signature-verified before serving)
+./scripts/voltspec.sh package velocity-proxy 2
+
+# Download a package document to a file (default <id>@<version>.json in cwd;
+# -o overrides the destination)
+./scripts/voltspec.sh fetch velocity-proxy 2
+./scripts/voltspec.sh fetch velocity-proxy 2 -o /tmp/vp.json
+
+# Inspect the fetched document with jq, then import it as a local blueprint
+jq . velocity-proxy@2.json
+./scripts/voltspec.sh install velocity-proxy@2
+```
+
+Every command exits non-zero on a request or API error and prints the
+server's `.error` message from the JSON envelope. The API key and the hex seed
+are never echoed by the script. `fetch`'s output path, like the API key and
+request bodies, is handed to curl through its stdin config file (`-K -`) —
+never as a command-line argument — so it stays out of `ps`/`proc` output.
 
 
 ## Management commands
@@ -166,7 +290,7 @@ Panel↔node requests use HMAC-SHA256 signatures, body hashes, timestamps and on
 Each workload runs with:
 
 - Private mount, PID, IPC, UTS and network namespaces
-- Collision-free private host UID/GID
+- Collision-checked private host UID/GID allocation
 - Empty capability bounding set and `no_new_privs`
 - Read-only runtime mounts and one writable server root
 - Private veth and nftables policy

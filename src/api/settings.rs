@@ -1,17 +1,22 @@
 //! Panel settings endpoints + audit logs.
-use super::{data, ok, AdminUser, ApiResult, AppState, AuthUser};
-use crate::config::Config;
+use super::{data, ok, AdminUser, ApiError, ApiResult, AppState, AuthUser};
 use crate::models;
+use crate::db::blocking;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
+// ---- DB execution off the async worker ----
+//
+// Handlers must not run SQLite work on a Tokio worker thread. Module-owned
+// SQL rides `Db::call(|conn| ...)`; pool-based `models` functions (they do
+// their own `pool.get()` and cannot run inside a `db.call` closure without a
+// nested checkout) ride `blocking(...)` on Tokio's blocking pool. One rule:
+// never hold a pooled connection across an `.await`.
+
 /// Public panel settings (no secrets).
-pub async fn public(
-    State(state): State<AppState>,
-    _u: AuthUser,
-) -> ApiResult<Json<serde_json::Value>> {
+pub async fn public(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({
         "instance_name": state.cfg.general.instance_name,
         "locale": state.cfg.general.locale,
@@ -30,34 +35,6 @@ pub async fn public(
     })))
 }
 
-/// Read-only settings exposed to any logged-in user.
-pub async fn get(
-    State(state): State<AppState>,
-    _u: AuthUser,
-) -> ApiResult<Json<serde_json::Value>> {
-    let settings = models::all_settings(&state.db)?;
-    Ok(data(json!(settings)))
-}
-
-#[derive(Deserialize)]
-pub struct SetReq {
-    pub key: String,
-    pub value: String,
-}
-
-pub async fn set(
-    State(state): State<AppState>,
-    _a: AdminUser,
-    Json(req): Json<SetReq>,
-) -> ApiResult<Json<serde_json::Value>> {
-    models::set_setting(&state.db, &req.key, &req.value)?;
-    Ok(ok(json!({ "ok": true })))
-}
-
-pub async fn config_view(State(state): State<AppState>, _a: AdminUser) -> ApiResult<Json<Config>> {
-    Ok(Json(state.cfg.clone()))
-}
-
 #[derive(Deserialize)]
 pub struct LimitsReq {
     pub default_memory_mb: Option<u64>,
@@ -73,21 +50,70 @@ pub async fn update_limits(
     _a: AdminUser,
     Json(req): Json<LimitsReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if let Some(v) = req.default_memory_mb {
-        models::set_setting(&state.db, "limits.default_memory_mb", &v.to_string())?;
+    let stored = blocking(state.db.clone(), move |db| {
+        Ok([
+            models::get_setting(&db, "limits.default_memory_mb").ok().flatten(),
+            models::get_setting(&db, "limits.default_disk_mb").ok().flatten(),
+            models::get_setting(&db, "limits.default_cpu_percent").ok().flatten(),
+            models::get_setting(&db, "limits.max_memory_mb").ok().flatten(),
+            models::get_setting(&db, "limits.max_servers_per_user").ok().flatten(),
+        ])
+    })
+    .await
+    .unwrap_or_default();
+    let [s_mem, s_disk, s_cpu, s_max_mem, s_max_servers] = stored;
+    let current = |v: Option<String>, fallback: u64| -> u64 {
+        v.and_then(|value| value.parse().ok()).unwrap_or(fallback)
+    };
+    let default_memory = req
+        .default_memory_mb
+        .unwrap_or_else(|| current(s_mem, state.cfg.limits.default_memory_mb));
+    let default_disk = req
+        .default_disk_mb
+        .unwrap_or_else(|| current(s_disk, state.cfg.limits.default_disk_mb));
+    let default_cpu = req
+        .default_cpu_percent
+        .unwrap_or_else(|| current(s_cpu, state.cfg.limits.default_cpu_percent));
+    let max_memory = req
+        .max_memory_mb
+        .unwrap_or_else(|| current(s_max_mem, state.cfg.limits.max_memory_mb));
+    let max_servers = req
+        .max_servers_per_user
+        .unwrap_or_else(|| current(s_max_servers, state.cfg.limits.max_servers_per_user));
+    if default_memory == 0
+        || default_memory > max_memory
+        || default_disk == 0
+        || !(1..=10_000).contains(&default_cpu)
+        || max_servers == 0
+    {
+        return Err(ApiError::bad_request("invalid resource limit combination"));
     }
-    if let Some(v) = req.default_disk_mb {
-        models::set_setting(&state.db, "limits.default_disk_mb", &v.to_string())?;
-    }
-    if let Some(v) = req.default_cpu_percent {
-        models::set_setting(&state.db, "limits.default_cpu_percent", &v.to_string())?;
-    }
-    if let Some(v) = req.max_memory_mb {
-        models::set_setting(&state.db, "limits.max_memory_mb", &v.to_string())?;
-    }
-    if let Some(v) = req.max_servers_per_user {
-        models::set_setting(&state.db, "limits.max_servers_per_user", &v.to_string())?;
-    }
+    let (dm, dd, dc, mm, ms) = (
+        req.default_memory_mb,
+        req.default_disk_mb,
+        req.default_cpu_percent,
+        req.max_memory_mb,
+        req.max_servers_per_user,
+    );
+    blocking(state.db.clone(), move |db| {
+        if let Some(v) = dm {
+            models::set_setting(&db, "limits.default_memory_mb", &v.to_string())?;
+        }
+        if let Some(v) = dd {
+            models::set_setting(&db, "limits.default_disk_mb", &v.to_string())?;
+        }
+        if let Some(v) = dc {
+            models::set_setting(&db, "limits.default_cpu_percent", &v.to_string())?;
+        }
+        if let Some(v) = mm {
+            models::set_setting(&db, "limits.max_memory_mb", &v.to_string())?;
+        }
+        if let Some(v) = ms {
+            models::set_setting(&db, "limits.max_servers_per_user", &v.to_string())?;
+        }
+        Ok(())
+    })
+    .await?;
     Ok(ok(json!({ "ok": true })))
 }
 
@@ -97,7 +123,10 @@ pub async fn audit_logs(
     State(state): State<AppState>,
     _a: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let logs = models::list_audit_logs(&state.db, 500)?;
+    let logs = blocking(state.db.clone(), move |db| {
+        models::list_audit_logs(&db, 500)
+    })
+    .await?;
     Ok(data(serde_json::to_value(logs)?))
 }
 
@@ -105,15 +134,351 @@ pub async fn audit_logs(
 
 pub async fn notifications(
     State(state): State<AppState>,
-    _u: AuthUser,
+    _a: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(data(json!(state.notifier.history())))
 }
 
 pub async fn notifications_clear(
     State(state): State<AppState>,
-    _u: AuthUser,
+    _a: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
     state.notifier.clear();
     Ok(ok(json!({ "ok": true })))
+}
+
+// ---------------- VoltSpec Registry signing ----------------
+
+/// Signing posture of the VoltSpec registry. The public key is exactly that —
+/// public — so any authenticated user may read it; only the key itself is
+/// private to the settings table.
+pub async fn registry_signing_status(
+    State(state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    use crate::services::blueprint as bp;
+    let seed = blocking(state.db.clone(), move |db| {
+        models::get_setting(&db, "registry.signing_key")
+    })
+    .await?
+    .filter(|s| !s.trim().is_empty());
+    let Some(seed) = seed else {
+        return Ok(Json(json!({
+            "enabled": false,
+            "public_key": serde_json::Value::Null,
+            "fingerprint": serde_json::Value::Null,
+        })));
+    };
+    let key = bp::signing_key_from_hex(&seed).map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("registry signing key is misconfigured: {e}"),
+        )
+    })?;
+    let pk = bp::public_key_hex(&key);
+    Ok(Json(json!({
+        "enabled": true,
+        "public_key": pk,
+        "fingerprint": bp::public_key_fingerprint(&pk),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct RegistrySigningKeyReq {
+    /// Hex-encoded 32-byte ed25519 seed to set. `null` generates a fresh key;
+    /// an empty string disables signing.
+    pub key: Option<String>,
+}
+
+/// POST /api/settings/registry/signing-key — set, generate, or clear the
+/// publisher signing key. The key is stored in the settings table (never in
+/// config), so it can be rotated at runtime without a restart.
+///
+/// When the request generates a fresh key (`key: null`), the seed is returned
+/// in the response exactly once; it is never persisted anywhere but the
+/// settings table and is never echoed again. Subsequent status calls return
+/// only the public key and fingerprint.
+pub async fn registry_set_signing_key(
+    State(state): State<AppState>,
+    a: AdminUser,
+    Json(req): Json<RegistrySigningKeyReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    use crate::services::blueprint as bp;
+    let (seed, generated, cleared) = match req.key {
+        Some(k) if k.trim().is_empty() => (String::new(), false, true),
+        Some(k) => {
+            let k = k.trim().to_string();
+            bp::signing_key_from_hex(&k).map_err(|e| ApiError::bad_request(e.to_string()))?;
+            (k, false, false)
+        }
+        None => {
+            let mut csprng = rand::rngs::OsRng;
+            (
+                hex::encode(ed25519_dalek::SigningKey::generate(&mut csprng).to_bytes()),
+                true,
+                false,
+            )
+        }
+    };
+    let seed_store = seed.clone();
+    let admin_id = a.0.id;
+    blocking(state.db.clone(), move |db| {
+        models::set_setting(&db, "registry.signing_key", &seed_store)?;
+        models::audit(
+            &db,
+            Some(admin_id),
+            "registry.signing_key",
+            if cleared { "cleared" } else { "set" },
+            "",
+            "",
+        )?;
+        Ok(())
+    })
+    .await?;
+    let key = bp::signing_key_from_hex(&seed).ok();
+    let pk = key.as_ref().map(bp::public_key_hex);
+    let mut out = json!({
+        "enabled": !cleared,
+        "generated": generated,
+        "cleared": cleared,
+        "public_key": pk,
+        "fingerprint": pk.as_deref().map(bp::public_key_fingerprint).unwrap_or_default(),
+    });
+    if generated {
+        // One-shot backup channel: the seed is private material that exists
+        // only in the settings table, so this response is the sole chance to
+        // capture it. Never include it on set/clear or status paths.
+        out["seed"] = json!(seed);
+        out["store_this_seed_now"] =
+            json!("Store this seed now; it will never be returned again.");
+    }
+    Ok(Json(out))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::{get, post};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_state() -> (tempfile::TempDir, AppState) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::db::open(tmp.path().join("t.db").to_str().unwrap()).unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.paths.logs_dir = tmp.path().join("logs");
+        cfg.paths.servers_dir = tmp.path().join("servers");
+        let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
+        let procs = Arc::new(crate::services::proc::ProcManager::new(db.clone(), hub.clone()));
+        let state = AppState {
+            db,
+            cfg,
+            procs,
+            hub,
+            notifier: Arc::new(crate::services::proc::Notifier::new()),
+            monitor: Arc::new(crate::services::Monitor::new()),
+            node_client: Arc::new(crate::services::node::NodeClient::new().unwrap()),
+            node_nonces: Arc::new(crate::services::node::NonceCache::default()),
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        (tmp, state)
+    }
+
+    /// A root-admin user with a live session cookie.
+    fn seed_admin(state: &AppState) -> (i64, String) {
+        let user_id =
+            models::create_user(&state.db, "admin", "admin@x.io", "h", true, "en", "dark").unwrap();
+        let (raw, _) = crate::auth::create_session(
+            &state.db,
+            &state.cfg,
+            user_id,
+            "test-agent",
+            "127.0.0.1",
+            false,
+        )
+        .unwrap();
+        (user_id, format!("vp_session={raw}"))
+    }
+
+    fn router(state: AppState) -> axum::Router {
+        axum::Router::new()
+            .route("/api/settings/registry", get(registry_signing_status))
+            .route(
+                "/api/settings/registry/signing-key",
+                post(registry_set_signing_key),
+            )
+            .with_state(state)
+    }
+
+    async fn request(
+        state: AppState,
+        method: &str,
+        uri: &str,
+        cookie: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri).header("cookie", cookie);
+        let payload = body.map(|b| b.to_string());
+        if payload.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let req = builder.body(Body::from(payload.unwrap_or_default())).unwrap();
+        let response = router(state).oneshot(req).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let value = if bytes.is_empty() {
+            serde_json::json!(null)
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::json!(null))
+        };
+        (status, value)
+    }
+
+    fn is_32byte_hex(s: &str) -> bool {
+        hex::decode(s).map(|b| b.len() == 32).unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn generate_returns_seed_exactly_once_then_status_omits_it() {
+        let (_tmp, state) = test_state();
+        let (_admin_id, cookie) = seed_admin(&state);
+
+        let (status, body) = request(
+            state.clone(),
+            "POST",
+            "/api/settings/registry/signing-key",
+            &cookie,
+            Some(json!({ "key": null })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["generated"], true);
+        assert_eq!(body["cleared"], false);
+        assert_eq!(body["enabled"], true);
+        let seed = body["seed"].as_str().expect("seed returned on generate");
+        assert!(is_32byte_hex(seed), "seed must be 32 bytes of hex");
+        assert!(
+            body["store_this_seed_now"]
+                .as_str()
+                .is_some_and(|w| !w.is_empty()),
+            "prominent one-shot warning field present"
+        );
+        assert!(
+            body["public_key"].as_str().is_some_and(|p| !p.is_empty()),
+            "public key still returned alongside the seed"
+        );
+
+        // Status after generate: public key + fingerprint only, never the seed.
+        let (status, body) = request(
+            state.clone(),
+            "GET",
+            "/api/settings/registry",
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["enabled"], true);
+        assert!(body.get("seed").is_none(), "status must never expose the seed");
+        assert!(
+            body.get("store_this_seed_now").is_none(),
+            "warning is generate-response-only"
+        );
+        assert!(
+            body["fingerprint"].as_str().is_some_and(|f| !f.is_empty()),
+            "fingerprint returned for the generated key"
+        );
+
+        // The seed is private material in the settings table only — reachable
+        // from storage, never from the API surface.
+        let stored = models::get_setting(&state.db, "registry.signing_key").unwrap();
+        assert_eq!(stored.as_deref(), Some(seed));
+
+        // Audit records the action, never the seed.
+        let logs = models::list_audit_logs(&state.db, 50).unwrap();
+        assert!(
+            logs.iter()
+                .all(|l| !format!("{} {} {}", l.target, l.ip, l.details).contains(seed)),
+            "audit entry must not contain the seed"
+        );
+        assert!(logs.iter().any(|l| l.action == "registry.signing_key"));
+
+        // A second generate mints a fresh key and returns its seed once too.
+        let (_status, body) = request(
+            state.clone(),
+            "POST",
+            "/api/settings/registry/signing-key",
+            &cookie,
+            Some(json!({ "key": null })),
+        )
+        .await;
+        let seed2 = body["seed"].as_str().expect("seed returned on every generate");
+        assert_ne!(seed, seed2, "generating again must rotate the key");
+    }
+
+    #[tokio::test]
+    async fn set_and_clear_keep_their_shape() {
+        let (_tmp, state) = test_state();
+        let (_admin_id, cookie) = seed_admin(&state);
+
+        // Set an explicit key: no seed echo, no warning.
+        let known = hex::encode([7u8; 32]);
+        let (status, body) = request(
+            state.clone(),
+            "POST",
+            "/api/settings/registry/signing-key",
+            &cookie,
+            Some(json!({ "key": known })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["generated"], false);
+        assert_eq!(body["cleared"], false);
+        assert_eq!(body["enabled"], true);
+        assert!(body.get("seed").is_none(), "set must not echo the seed");
+        assert!(body.get("store_this_seed_now").is_none());
+        assert!(
+            body["public_key"].as_str().is_some_and(|p| !p.is_empty()),
+            "public key derived from the explicit seed"
+        );
+
+        // Invalid hex is rejected before any mutation.
+        let (status, _body) = request(
+            state.clone(),
+            "POST",
+            "/api/settings/registry/signing-key",
+            &cookie,
+            Some(json!({ "key": "zz" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let stored = models::get_setting(&state.db, "registry.signing_key").unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some(known.as_str()),
+            "bad set must not clobber the existing key"
+        );
+
+        // Clear: signing disabled, still no seed anywhere.
+        let (status, body) = request(
+            state.clone(),
+            "POST",
+            "/api/settings/registry/signing-key",
+            &cookie,
+            Some(json!({ "key": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cleared"], true);
+        assert_eq!(body["enabled"], false);
+        assert!(body.get("seed").is_none(), "clear must not carry a seed");
+
+        let (status, body) =
+            request(state.clone(), "GET", "/api/settings/registry", &cookie, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["enabled"], false);
+        assert!(body["public_key"].is_null());
+    }
 }

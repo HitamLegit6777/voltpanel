@@ -4,7 +4,15 @@ set -Eeuo pipefail
 VOLTPANEL_REPO="${VOLTPANEL_REPO:-HitamLegit6777/voltpanel}"
 VOLTPANEL_VERSION="${VOLTPANEL_VERSION:-latest}"
 VOLTPANEL_GITHUB="https://github.com/${VOLTPANEL_REPO}"
-export VOLTPANEL_RAW="https://raw.githubusercontent.com/${VOLTPANEL_REPO}/main"
+refresh_raw_base() {
+  if [[ -z "${VOLTPANEL_VERSION:-}" || "$VOLTPANEL_VERSION" == latest ]]; then
+    VOLTPANEL_RAW="https://raw.githubusercontent.com/${VOLTPANEL_REPO}/main"
+  else
+    VOLTPANEL_RAW="https://raw.githubusercontent.com/${VOLTPANEL_REPO}/${VOLTPANEL_VERSION}"
+  fi
+  export VOLTPANEL_RAW
+}
+refresh_raw_base
 COLOR="${NO_COLOR:-}"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -18,6 +26,23 @@ log() { printf '%s[voltpanel]%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
 ok() { printf '%s[ok]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 warn() { printf '%s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 die() { printf '%s[error]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+# Resolve the floating `latest` marker to the concrete release tag so the
+# binary and the helper scripts fetched alongside it always come from the SAME
+# release instead of drifting between a tag and the main branch. Idempotent:
+# installers call it again after parsing --version; it is a no-op once the
+# version is pinned.
+resolve_release_tag() {
+  [[ "${VOLTPANEL_VERSION:-latest}" == latest ]] || return 0
+  if [[ "$DRY_RUN" == "1" ]]; then log "[dry-run] resolve latest release tag for $VOLTPANEL_REPO"; return 0; fi
+  local tag
+  tag=$(curl -fsSL --retry 3 --connect-timeout 15 "https://api.github.com/repos/${VOLTPANEL_REPO}/releases/latest" 2>/dev/null \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+  [[ -n "$tag" ]] || die "Cannot resolve the latest release tag for $VOLTPANEL_REPO"
+  VOLTPANEL_VERSION=$tag
+  export VOLTPANEL_VERSION
+  refresh_raw_base
+}
+
 
 run() {
   if [[ "$DRY_RUN" == "1" ]]; then printf '[dry-run]'; printf ' %q' "$@"; printf '\n'; else "$@"; fi
@@ -90,9 +115,84 @@ tui_yesno() {
 }
 
 tui_pause() { printf '\nPress Enter to install, or Ctrl+C to cancel...' > /dev/tty; IFS= read -r _ < /dev/tty; printf '\n' > /dev/tty; }
-validate_ip() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || $1 == *:* ]] || die "Invalid IP address: $1"; }
+valid_ipv4() {
+  local a=$1 b
+  [[ "$a" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for b in "${BASH_REMATCH[@]:1}"; do ((10#${b} <= 255)) || return 1; done
+  return 0
+}
+
+valid_ipv6() {
+  local addr=$1 left right n hex oct
+  [[ -n "$addr" && "$addr" == *:* ]] || return 1
+  [[ "$addr" == *[!0-9A-Fa-f:.]* ]] && return 1
+  [[ "$addr" == *%* ]] && return 1
+  [[ "$addr" =~ ^: && "$addr" != ::* ]] && return 1
+  [[ "$addr" =~ :$ && "$addr" != *:: ]] && return 1
+  local stripped=${addr//::/}
+  (( (${#addr} - ${#stripped}) / 2 > 1 )) && return 1
+  if [[ "$addr" == *.* ]]; then
+    if [[ "$addr" =~ (.*):([0-9]{1,3}(\.[0-9]{1,3}){3})$ ]]; then
+      local octets=${BASH_REMATCH[2]}
+      IFS=. read -r -a octs <<<"$octets"
+      for oct in "${octs[@]}"; do ((10#$oct <= 255)) || return 1; done
+      addr="${BASH_REMATCH[1]}:0:0"
+    else
+      return 1
+    fi
+  fi
+  if [[ "$addr" == *::* ]]; then
+    left="${addr%%::*}"; right="${addr##*::}"
+  else
+    left="$addr"; right=""
+  fi
+  n=0
+  if [[ -n "$left" ]]; then
+    IFS=':' read -r -a parts <<<"$left"
+    for hex in "${parts[@]}"; do [[ "$hex" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1; n=$((n + 1)); done
+  fi
+  if [[ -n "$right" ]]; then
+    IFS=':' read -r -a parts <<<"$right"
+    for hex in "${parts[@]}"; do [[ "$hex" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1; n=$((n + 1)); done
+  fi
+  if [[ "$addr" == *::* ]]; then
+    ((n <= 7)) || return 1
+  else
+    ((n == 8)) || return 1
+  fi
+  return 0
+}
+
+validate_ip() {
+  local addr=$1 len
+  # Strip surrounding brackets (bracketed IPv6 literal form) before checking.
+  if [[ "${addr#\[}" != "$addr" && "${addr%\]}" != "$addr" ]]; then
+    len=${#addr}
+    addr=${addr:1:len-2}
+  fi
+  valid_ipv4 "$addr" || valid_ipv6 "$addr" || die "Invalid IP address: $1"
+}
+
+# Render a host (domain or raw IP) in URL/nginx host form: IPv6 gets brackets.
+host_for_url() {
+  local h=$1
+  if [[ "${h#\[}" != "$h" && "${h%\]}" != "$h" ]]; then printf '%s' "$h"
+  elif [[ "$h" == *:* ]]; then printf '[%s]' "$h"
+  else printf '%s' "$h"; fi
+}
 validate_port() {
   if [[ ! $1 =~ ^[0-9]+$ ]] || ((10#$1 < 1 || 10#$1 > 65535)); then die "Invalid port: $1 (expected 1-65535)"; fi
+}
+
+validate_listen() {
+  local listen=$1 host port
+  [[ "$listen" == *:* ]] || die "Invalid listen address: $listen (expected HOST:PORT)"
+  host=${listen%:*}; port=${listen##*:}
+  validate_port "$port"
+  if [[ "$host" == *:* && ( "${host#\[}" == "$host" || "${host%\]}" == "$host" ) ]]; then
+    die "Invalid listen address: IPv6 hosts must be bracketed, e.g. [::1]:$port"
+  fi
+  validate_ip "$host"
 }
 
 load_os() {
@@ -140,19 +240,42 @@ release_base_url() {
 }
 
 install_binary() {
-  local binary=$1 target="/usr/local/bin/$1" url temp_dir temp checksums asset expected actual output
-  url=$(release_url "$binary"); asset="${binary}-$(arch_asset)"; temp_dir=$(mktemp -d); temp="$temp_dir/$asset"; checksums="$temp_dir/SHA256SUMS"
+  local binary=$1 target="/usr/local/bin/$1" url temp checksums asset expected actual output status
+  url=$(release_url "$binary"); asset="${binary}-$(arch_asset)"
   log "Downloading $binary from $url"
-  if [[ "$DRY_RUN" == "1" ]]; then log "[dry-run] verify SHA256SUMS, binary identity, and install $binary -> $target"; rm -rf "$temp_dir"; return; fi
-  curl --fail --location --retry 3 --connect-timeout 15 "$url" -o "$temp" || { rm -rf "$temp_dir"; die "Binary download failed. Check the release and architecture."; }
-  curl --fail --location --retry 3 --connect-timeout 15 "$(release_base_url)/SHA256SUMS" -o "$checksums" || { rm -rf "$temp_dir"; die "Checksum download failed."; }
-  expected=$(awk -v asset="$asset" '$2==asset{print $1}' "$checksums"); [[ -n "$expected" ]] || { rm -rf "$temp_dir"; die "No checksum published for $asset"; }
-  actual=$(sha256sum "$temp" | awk '{print $1}'); [[ "$actual" == "$expected" ]] || { rm -rf "$temp_dir"; die "Checksum mismatch for $asset"; }
+  if [[ "$DRY_RUN" == "1" ]]; then log "[dry-run] verify SHA256SUMS, binary identity, and install $binary -> $target"; return; fi
+  # Identity checks execute the artifact. Stage it beside the final target
+  # because /tmp is commonly mounted noexec on hardened hosts.
+  temp=$(mktemp "/usr/local/bin/.${binary}.install.XXXXXX")
+  checksums=$(mktemp)
+  curl --fail --location --retry 3 --connect-timeout 15 "$url" -o "$temp" || { rm -f "$temp" "$checksums"; die "Binary download failed. Check the release and architecture."; }
+  curl --fail --location --retry 3 --connect-timeout 15 "$(release_base_url)/SHA256SUMS" -o "$checksums" || { rm -f "$temp" "$checksums"; die "Checksum download failed."; }
+  expected=$(awk -v asset="$asset" '$2==asset{print $1}' "$checksums"); [[ -n "$expected" ]] || { rm -f "$temp" "$checksums"; die "No checksum published for $asset"; }
+  actual=$(sha256sum "$temp" | awk '{print $1}'); [[ "$actual" == "$expected" ]] || { rm -f "$temp" "$checksums"; die "Checksum mismatch for $asset"; }
   chmod 0755 "$temp"
-  output=$(cd "$temp_dir" && timeout 5 "$temp" --version 2>&1) || { rm -rf "$temp_dir"; die "$asset failed its version check; the release is incompatible with this installer"; }
-  [[ "$output" == "$binary "* ]] || { rm -rf "$temp_dir"; die "Downloaded asset is not a compatible $binary binary: $output"; }
-  install -m 0755 "$temp" "$target"; rm -rf "$temp_dir"
+  output=$(timeout 5 "$temp" --version 2>&1) || { status=$?; rm -f "$temp" "$checksums"; die "$asset failed its version check (exit $status): ${output:-no output}"; }
+  [[ "$output" == "$binary "* ]] || { rm -f "$temp" "$checksums"; die "Downloaded asset is not a compatible $binary binary: $output"; }
+  chown 0:0 "$temp"
+  chmod 0755 "$temp"
+  mv -f "$temp" "$target"
+  rm -f "$checksums"
   ok "Installed $output"
+}
+
+reset_panel_password() {
+  local config=${1:-/etc/voltpanel/config.toml} username=${2:-admin} password confirm
+  [[ "$DRY_RUN" == 1 ]] && { log "[dry-run] reset password for $username using $config"; return; }
+  [[ -r "$config" ]] || die "Missing panel config: $config"
+  [[ -x /usr/local/bin/voltpanel ]] || die "Missing panel binary: /usr/local/bin/voltpanel"
+  [[ -r /dev/tty && -w /dev/tty ]] || die "An interactive terminal is required."
+  IFS= read -r -s -p "New password for $username: " password < /dev/tty
+  printf '\n' > /dev/tty
+  IFS= read -r -s -p "Confirm new password: " confirm < /dev/tty
+  printf '\n' > /dev/tty
+  [[ "$password" == "$confirm" ]] || die "Passwords do not match."
+  printf '%s' "$password" | VOLTPANEL_CONFIG="$config" \
+    /usr/local/bin/voltpanel reset-password "$username" --password-stdin
+  unset password confirm
 }
 
 proxy_upstream() {
@@ -161,12 +284,41 @@ proxy_upstream() {
   case "$listen" in
     0.0.0.0:*) printf '127.0.0.1:%s' "$port" ;;
     \[::\]:*) printf '[::1]:%s' "$port" ;;
+    \[*\]:*) printf '%s' "$listen" ;;
     *) printf '%s' "$listen" ;;
   esac
 }
 random_secret() { openssl rand -base64 "${1:-36}" | tr -d '\n'; }
 validate_domain() { [[ $1 =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$ ]] || die "Invalid domain: $1"; }
-validate_url() { [[ $1 =~ ^https?://[^[:space:]]+$ ]] || die "Invalid URL: $1"; }
+validate_url() {
+  local url=$1 scheme rest hostport host port tail colons
+  [[ "$url" =~ ^https?://.+$ ]] || die "Invalid URL: $url"
+  scheme=${url%%://*}
+  rest=${url#*://}
+  hostport=${rest%%/*}
+  [[ -n "$hostport" && "$hostport" != *[[:space:]]* && "$hostport" != *@* ]] || die "Invalid URL: $url"
+  if [[ "$hostport" == \[*\]* ]]; then
+    host=${hostport%%\]*}; host=${host#\[}
+    valid_ipv6 "$host" || die "Invalid IPv6 address in URL: $url"
+    tail=${hostport#*\]}
+    if [[ -n "$tail" ]]; then
+      [[ "$tail" =~ ^:[0-9]+$ ]] || die "Invalid port in URL: $url"
+      port=${tail#:}; validate_port "$port"
+    fi
+  elif [[ "$hostport" == *:* ]]; then
+    colons=${hostport//[^:]/}
+    if (( ${#colons} > 1 )); then die "Invalid URL: IPv6 addresses must be bracketed, e.g. https://[$hostport]/ ($url)"; fi
+    host=${hostport%:*}; port=${hostport#*:}
+    validate_port "$port"
+    if valid_ipv4 "$host" || valid_hostname "$host"; then :; else die "Invalid host in URL: $url"; fi
+  else
+    host=$hostport
+    if valid_ipv4 "$host" || valid_hostname "$host"; then :; else die "Invalid host in URL: $url"; fi
+  fi
+}
+valid_hostname() {
+  [[ $1 =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ && ${#1} -le 253 ]]
+}
 
 install_caddy() {
   if command -v caddy >/dev/null; then return; fi
@@ -191,14 +343,43 @@ write_file() {
   cat > "$path"
   chmod "$mode" "$path"
 }
+unsafe_purge_path() {
+  local path=$1 root canonical
+  # Canonicalize so `..`, `//`, trailing slashes and `/.` tricks cannot smuggle
+  # rm -rf past the guard. -s keeps symlinks unexpanded so protected names
+  # like /bin (a symlink to /usr/bin on merged-usr distros) stay exact.
+  # Fail closed: if realpath (coreutils) is missing or errors, `canonical`
+  # would stay unnormalized and a `..`-traversal path could slip past the
+  # prefix guard below. No rm -rf proceeds without a canonical result.
+  if [[ -n "$path" ]] && ! canonical=$(realpath -ms -- "$path" 2>/dev/null); then
+    die "coreutils realpath is required to canonicalize '$path' before purge; refusing to continue"
+  fi
+  [[ -n "$canonical" && "$canonical" != / ]] || return 0
+  # Home and root's home are never safe, nor is anything under them.
+  case "$canonical" in
+    /home|/home/*|/root|/root/*) return 0 ;;
+  esac
+  # Protected system roots plus the default data-dir parent (/var/lib). A path
+  # is unsafe when it is one of these or an ancestor of one: purging it would
+  # take the system root with it. Exact-prefix containment only, so a real data
+  # dir like /var/lib/voltpanel still purges cleanly.
+  local roots=(/bin /boot /dev /etc /lib /lib64 /opt /proc /run /sbin /srv /sys /tmp /usr /var /var/lib)
+  for root in "${roots[@]}"; do
+    [[ "$canonical" == "$root" || "$root" == "$canonical"/* ]] && return 0
+  done
+  return 1
+}
 
 firewall_hint() {
-  local role=$1
+  local role=$1 mode=${2:-}
   if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
     if [[ "$role" == panel ]]; then
-      run ufw allow 80/tcp; run ufw allow 443/tcp; run ufw allow 20000:30000/tcp; run ufw allow 20000:30000/udp
+      run ufw allow 80/tcp; run ufw allow 443/tcp
+    elif [[ "$mode" != none ]]; then
+      run ufw allow 80/tcp; run ufw allow 443/tcp
+      warn "UFW is active. Allow the node's allocated game ports from trusted sources."
     else
-      warn "UFW is active. Allow the node HTTPS endpoint and allocated game ports from trusted sources."
+      warn "UFW is active. Allow the node's allocated game ports from trusted sources, or run behind a reverse proxy."
     fi
   fi
 }
@@ -271,11 +452,16 @@ EOF
   run systemctl reload nginx
   local certbot_args=(--nginx --non-interactive --agree-tos --redirect -d "$domain")
   if [[ -n "$email" ]]; then certbot_args+=(--email "$email"); else certbot_args+=(--register-unsafely-without-email); fi
-  run certbot "${certbot_args[@]}"
+  if [[ -d "/etc/letsencrypt/live/$domain" ]]; then
+    log "Certificate for $domain already present; skipping issuance"
+  else
+    run certbot "${certbot_args[@]}"
+  fi
 }
 
 configure_certbot_ip_proxy() {
-  local name=$1 ip=$2 upstream=$3 email=$4 webroot=/var/lib/voltpanel/acme
+  local name=$1 ip=$2 upstream=$3 email=$4 webroot=/var/lib/voltpanel/acme server_host
+  server_host=$(host_for_url "$ip")
   validate_ip "$ip"
   install_certbot_ip
   require_certbot_ip_support
@@ -284,7 +470,7 @@ configure_certbot_ip_proxy() {
 server {
     listen 80;
     listen [::]:80;
-    server_name $ip;
+    server_name $server_host;
 
     location ^~ /.well-known/acme-challenge/ { root $webroot; }
     location / { return 308 https://\$host\$request_uri; }
@@ -300,7 +486,7 @@ EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name $ip;
+    server_name $server_host;
     location ^~ /.well-known/acme-challenge/ { root $webroot; }
     location / { return 308 https://\$host\$request_uri; }
 }
@@ -308,7 +494,7 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    server_name $ip;
+    server_name $server_host;
     client_max_body_size 256m;
     ssl_certificate /etc/letsencrypt/live/$ip/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$ip/privkey.pem;
@@ -377,7 +563,7 @@ $domain {
     encode zstd gzip
     reverse_proxy $upstream
     header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
@@ -385,17 +571,93 @@ $domain {
 }
 EOF
   configure_caddy_import
-  run systemctl enable --now caddy
   run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-  run systemctl reload caddy
+  if systemctl is-active --quiet caddy 2>/dev/null; then run systemctl reload caddy; else run systemctl enable --now caddy; fi
 }
 
 systemctl_reload_start() {
-  local service=$1
+  local service=$1 probe=${2:-}
   run systemctl daemon-reload
   run systemctl enable --now "$service"
   if [[ "$DRY_RUN" != "1" ]]; then
-    sleep 2
-    systemctl is-active --quiet "$service" || { systemctl status "$service" --no-pager || true; journalctl -u "$service" -n 80 --no-pager || true; die "$service failed to start"; }
+    local i code
+    for ((i = 0; i < 30; i++)); do
+      if systemctl is-active --quiet "$service" 2>/dev/null; then
+        if [[ -n "$probe" ]]; then
+          if declare -F "$probe" >/dev/null 2>&1; then
+            "$probe" && return 0
+          else
+            code=$(curl -sS -o /dev/null -m 2 -w '%{http_code}' "$probe" 2>/dev/null) || { sleep 1; continue; }
+            [[ "$code" =~ ^[0-9]{3}$ ]] && return 0
+          fi
+        else
+          return 0
+        fi
+      fi
+      sleep 1
+    done
+    systemctl status "$service" --no-pager || true
+    journalctl -u "$service" -n 80 --no-pager || true
+    die "$service failed to become ready"
+  fi
+}
+
+# Signed GET /v1/health for a voltd agent. The agent requires HMAC auth on every
+# route, so a bare curl can never confirm readiness; this signs with the shared
+# secret from the agent config and reports the listener ready on ANY HTTP
+# response (a 401/403 still proves the socket accepts). Reads flat TOML keys
+# (node_id, secret, listen, plaintext) from the agent config file.
+node_health_probe() {
+  local config=${1:-} listen=${2:-} node_id secret plaintext scheme port host ts nonce sig payload code
+  [[ -n "$config" ]] || config=${VOLTD_CONFIG:-/etc/voltpanel-node/voltd.toml}
+  [[ -r "$config" ]] || return 1
+  kv() {
+    awk -F= -v key="$1" '$1 ~ "^[[:space:]]*" key "[[:space:]]*$" { value=$2; sub(/^[[:space:]]*/, "", value); sub(/[[:space:]]*$/, "", value); gsub(/^"|"$/, "", value); print value; exit }' "$config"
+  }
+  node_id=$(kv node_id); secret=$(kv secret); plaintext=$(kv plaintext)
+  [[ -n "$node_id" && -n "$secret" ]] || return 1
+  [[ -n "$listen" ]] || listen=$(kv listen)
+  [[ -n "$listen" ]] || return 1
+  port=${listen##*:}
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  host=127.0.0.1; [[ "$listen" == \[* ]] && host='[::1]'
+  scheme=https; [[ "$plaintext" == true ]] && scheme=http
+  ts=$(date +%s)
+  nonce=$(openssl rand -hex 16)
+  payload="GET
+/v1/health
+$ts
+$nonce
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  sig=$(printf '%s' "$payload" | openssl dgst -sha256 -hmac "$secret" 2>/dev/null | awk '{print $NF}')
+  [[ -n "$sig" ]] || return 1
+  code=$(curl -ksS -o /dev/null -m 3 -w '%{http_code}' \
+    -H "x-volt-node: $node_id" \
+    -H "x-volt-timestamp: $ts" \
+    -H "x-volt-nonce: $nonce" \
+    -H "x-volt-signature: $sig" \
+    "$scheme://$host:$port/v1/health" 2>/dev/null) || return 1
+  [[ "$code" =~ ^[0-9]{3}$ ]]
+}
+
+# Remove every stale reverse-proxy artifact belonging to a named install
+# (caddy conf, nginx conf, certbot systemd unit/timer, renewal hook, Cloudflare
+# TLS files) so re-running the installer with a different TLS mode leaves no
+# orphaned site, timer, or key material behind. Idempotent; dry-run safe.
+cleanup_proxy_artifacts() {
+  local name=$1 u had_nginx='' had_caddy='' had_unit=''
+  if [[ -e "/etc/nginx/conf.d/voltpanel-${name}.conf" ]]; then had_nginx=1; run rm -f "/etc/nginx/conf.d/voltpanel-${name}.conf"; fi
+  if [[ -e "/etc/caddy/conf.d/voltpanel-${name}.caddy" ]]; then had_caddy=1; run rm -f "/etc/caddy/conf.d/voltpanel-${name}.caddy"; fi
+  if [[ -e "/etc/letsencrypt/renewal-hooks/deploy/voltpanel-${name}-nginx" ]]; then run rm -f "/etc/letsencrypt/renewal-hooks/deploy/voltpanel-${name}-nginx"; fi
+  if [[ -e "/etc/voltpanel/tls/${name}-cloudflare.pem" ]]; then run rm -f "/etc/voltpanel/tls/${name}-cloudflare.pem"; fi
+  if [[ -e "/etc/voltpanel/tls/${name}-cloudflare.key" ]]; then run rm -f "/etc/voltpanel/tls/${name}-cloudflare.key"; fi
+  for u in "voltpanel-certbot-${name}.service" "voltpanel-certbot-${name}.timer"; do
+    if [[ -e "/etc/systemd/system/$u" ]]; then run rm -f "/etc/systemd/system/$u"; had_unit=1; fi
+    if systemctl is-enabled --quiet "$u" 2>/dev/null; then run systemctl disable "$u" >/dev/null 2>&1 || true; had_unit=1; fi
+  done
+  [[ "$had_unit" == 1 ]] && run systemctl daemon-reload
+  if [[ "$had_nginx" == 1 ]] && systemctl is-active --quiet nginx 2>/dev/null; then run nginx -t && run systemctl try-reload nginx; fi
+  if [[ "$had_caddy" == 1 ]] && systemctl is-active --quiet caddy 2>/dev/null; then
+    run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 && run systemctl try-reload caddy
   fi
 }

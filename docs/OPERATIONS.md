@@ -94,6 +94,25 @@ Signals POST a JSON envelope to an external URL when a subscribed event fires.
 - `2xx` marks the delivery `delivered`; anything else reschedules with exponential
   backoff until the attempt cap, then `failed`
 - The panel DB lock is never held across the outbound HTTP call
+### `panel.alert` — panel self-health
+
+The panel watches its own subsystems and fires a global `panel.alert` event
+when a condition starts. Events are **edge-triggered**: a kind is emitted once
+when it transitions from inactive to active, stays silent while the condition
+persists, and is re-armed after it recovers — recovery is not an event, so the
+condition clears by the alert's absence. The event carries `server_id: null`
+(global scope; any global webhook subscribed to it receives it) and is
+evaluated every 30 seconds alongside telemetry sampling.
+
+| `kind` | Condition |
+| --- | --- |
+| `pool.saturated` | DB pool connections at the configured max |
+| `mirror.degraded` | Mirror enabled but a mirror operation failed this process lifetime |
+| `webhooks.backlog` | More than 50 pending webhook deliveries |
+| `schedules.backlog` | More than 10 pending schedule runs |
+
+Subscribe with `panel.alert`, the `panel.*` group wildcard, or `*`. The payload
+carries `event`, `kind`, `timestamp`, and `server_id` (always `null`).
 
 Each request carries:
 
@@ -123,7 +142,7 @@ inspect attempt count, response code, and error text.
 4. Check clock synchronization
 5. Inspect disk/memory pressure
 6. Check nftables and veth interfaces
-7. Do not regenerate enrollment tokens unless secret recovery is required
+7. Regenerate enrollment only for deliberate secret recovery: it revokes the current secret immediately and requires `voltd join` before the node can reconnect
 
 ## Service hardening
 

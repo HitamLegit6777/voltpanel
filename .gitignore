@@ -1,6 +1,7 @@
 /target/
 /dist/
 /data/
+/packages/
 /servers/
 /backups/
 /logs/

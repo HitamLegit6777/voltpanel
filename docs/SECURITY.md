@@ -22,7 +22,7 @@ Each workload uses:
 | IPC | IPC namespace |
 | Hostname | UTS namespace |
 | Network | Network namespace, veth and nftables |
-| Identity | Collision-free host UID/GID, root mode 0700 |
+| Identity | Host-local UID/GID allocation scans existing workload roots and probes to a free ID; root mode 0700 |
 | Privilege | `no_new_privs`, empty effective/bounding/inheritable/ambient capabilities |
 | Memory | cgroup v2 `MemoryMax`/`memory.max`; swap disabled |
 | CPU | `CPUQuota`/`cpu.max` |
@@ -64,11 +64,9 @@ Remote file operations reject lexical traversal and every existing symlink compo
 
 ## Panel↔node transport
 
-HMAC signing protects integrity and authentication, not confidentiality. Production deployments must use HTTPS for both panel and node URLs.
+HMAC signing protects integrity and authentication, not confidentiality. Use HTTPS for every production panel and node URL.
 
-The installer configures Caddy automatically when a domain is supplied.
-
-Plain HTTP enrollment is allowed only with explicit `--allow-http`; use it solely on a trusted private network.
+For direct HTTPS, `voltd` terminates TLS with a self-signed certificate and the panel pins the SHA-256 fingerprint captured during enrollment. Installer-managed Caddy/Nginx modes terminate public TLS at the reverse proxy and keep the `voltd` origin on loopback. Enrollment requires TLS end to end: the panel refuses plaintext transport (403) and enrollments without a pinned fingerprint (400), so `--allow-http` no longer permits plaintext enrollment — it only fits loopback-local development.
 
 ## Secrets
 
@@ -88,14 +86,33 @@ Never commit:
 
 The provided `.gitignore` excludes these files.
 
+## Squad delegated managers
+
+Squads grant every member their role preset on every grouped server at once.
+Manager authority — root admins, the squad creator, and Manager-preset members —
+delegates horizontally, mirroring the subuser precedent:
+
+- A manager may add members or change roles only to equal-or-lower roles: the
+  subuser anti-escalation rule refuses to mint (or remove) a role whose
+  capabilities the manager does not hold on the squad.
+- A manager may assign or un-assign a server only when they already hold access
+  to it. Without this gate, granting the server would mint the Manager preset on
+  any panel server with zero prior access; root admins pass automatically.
+- Creation is admin-only; renaming is manager-scoped.
+- Outsiders get a minimal `{id, name, my_role: null}` view of a squad — no
+  member or server rosters — so sequential squad-id enumeration cannot leak
+  usernames or server names.
+- Deletion requires the squad creator or a root admin; managers (even
+  Manager-preset members) cannot delete a squad they manage.
+
 ## Reverse proxy headers
 
-Caddy templates set:
+The installer-generated Caddy configs (panel and node vhosts) set:
 
-- HSTS
-- `X-Content-Type-Options: nosniff`
-- `X-Frame-Options: DENY`
-- Referrer policy
+- HSTS (`Strict-Transport-Security`) on both panel and node vhosts
+- `X-Content-Type-Options: nosniff` on both
+- `X-Frame-Options: DENY` on both
+- Referrer policy on the panel vhost
 
 VoltPanel also emits frame/content/referrer headers directly.
 
@@ -114,4 +131,3 @@ Do not publish a working escape before maintainers have released a fix.
 
 - Hard disk byte quotas require filesystem project-quota integration and are not yet enforced per server. Disk capacity is used for placement and monitored.
 - SFTP is not yet embedded.
-- Execution-agent traffic must be protected with TLS/reverse proxy; the agent does not terminate TLS directly.

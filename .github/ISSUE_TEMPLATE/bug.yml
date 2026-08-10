@@ -17,7 +17,7 @@ body:
     id: component
     attributes:
       label: Component
-      options: [Panel backend, Node daemon, Isolation, Multi-node, UI, Installer, Documentation, Egg]
+      options: [Panel backend, Node daemon, Isolation, Multi-node, UI, Installer, Documentation, Blueprint]
     validations:
       required: true
   - type: textarea

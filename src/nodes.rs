@@ -5,9 +5,50 @@ use anyhow::{bail, Context, Result};
 use chrono::{Duration, Utc};
 use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 fn now() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// Fallback staleness window for a node whose heartbeat cadence is unknown
+/// (fresh boot, or a node that has not been seen since the panel restarted).
+/// 3x the default daemon interval of 15s.
+const DEFAULT_ONLINE_WINDOW_SECS: i64 = 45;
+
+/// Lower bound for a capacity reservation's lifetime, in seconds. A reservation
+/// must outlive the node's heartbeat interval so the daemon's next capacity
+/// report reflects the newly provisioned workload before the claim lapses.
+const MIN_RESERVATION_TTL_SECS: i64 = 120;
+
+/// Observed heartbeat cadence per node id (seconds), learned from the gap
+/// between consecutive heartbeats. `online()` sizes its staleness window from
+/// this (3x, clamped), so a node whose daemon is configured with a longer
+/// heartbeat interval is not falsely marked offline. In-memory by design: the
+/// interval lives in the agent's own config, which the panel never persists.
+static HEARTBEAT_CADENCE: LazyLock<Mutex<HashMap<i64, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Staleness window for one node's heartbeat: 3x the observed cadence, clamped
+/// to sane bounds, falling back to the 45s default before any cadence is known.
+fn online_window_secs(node_id: i64) -> i64 {
+    let observed = HEARTBEAT_CADENCE
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&node_id).copied())
+        .unwrap_or(0);
+    if observed > 0 {
+        (observed * 3).clamp(30, 900)
+    } else {
+        DEFAULT_ONLINE_WINDOW_SECS
+    }
+}
+
+/// How long a capacity reservation stays live: long enough to span at least
+/// one heartbeat report (2x the online window), never below the floor.
+fn reservation_ttl_secs(node_id: i64) -> i64 {
+    online_window_secs(node_id).saturating_mul(2).max(MIN_RESERVATION_TTL_SECS)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,9 +84,16 @@ pub struct Node {
     /// SHA-256 fingerprint of the agent's self-signed certificate, captured at
     /// enrollment. Empty means the node is still on plaintext HTTP.
     pub tls_fingerprint: String,
+    /// Operator-seeded certificate fingerprint the enrollment must present
+    /// (v16). NULL/empty = plain TOFU at first enrollment; a value means the
+    /// operator has declared the identity, so the first enrollment (and every
+    /// re-enrollment) must present exactly this fingerprint. Kept after
+    /// enrollment so a rotated node re-enrolls against the same declared
+    /// identity.
+    pub expected_fingerprint: String,
 }
-
 impl Node {
+
     pub fn online(&self) -> bool {
         if !self.enabled || !self.enrolled {
             return false;
@@ -53,10 +101,12 @@ impl Node {
         self.last_heartbeat
             .as_deref()
             .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-            .map(|t| t.with_timezone(&Utc) > Utc::now() - Duration::seconds(45))
+            .map(|t| {
+                t.with_timezone(&Utc)
+                    > Utc::now() - Duration::seconds(online_window_secs(self.id))
+            })
             .unwrap_or(false)
     }
-
     pub fn available_memory_mb(&self) -> i64 {
         let hard = if self.memory_limit_mb > 0 {
             self.memory_limit_mb
@@ -111,10 +161,25 @@ fn from_row(r: &Row) -> rusqlite::Result<Node> {
         created_at: r.get(24)?,
         updated_at: r.get(25)?,
         tls_fingerprint: r.get(26)?,
+        expected_fingerprint: r.get::<_, Option<String>>(27)?.unwrap_or_default(),
     })
 }
 
-const COLS: &str = "id,uuid,name,public_url,secret,enrollment_token,enrolled,enabled,maintenance,schedulable,location,tags,memory_limit_mb,disk_limit_mb,cpu_limit_percent,memory_overallocate,disk_overallocate,daemon_version,hostname,os,arch,capacity_json,last_heartbeat,last_error,created_at,updated_at,tls_fingerprint";
+const COLS: &str = "id,uuid,name,public_url,secret,enrollment_token,enrolled,enabled,maintenance,schedulable,location,tags,memory_limit_mb,disk_limit_mb,cpu_limit_percent,memory_overallocate,disk_overallocate,daemon_version,hostname,os,arch,capacity_json,last_heartbeat,last_error,created_at,updated_at,tls_fingerprint,expected_fingerprint";
+
+/// Validate a node's public URL: http/https scheme and a non-empty host.
+/// Returns the URL with trailing slashes trimmed, exactly as persisted.
+pub fn validate_public_url(raw: &str) -> Result<String> {
+    let trimmed = raw.trim_end_matches('/');
+    let parsed = url::Url::parse(trimmed).context("invalid node URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("node URL must use http or https");
+    }
+    if parsed.host_str().is_none() {
+        bail!("node URL must include a host");
+    }
+    Ok(trimmed.to_string())
+}
 
 pub fn create(
     db: &Db,
@@ -123,14 +188,15 @@ pub fn create(
     location: &str,
     tags: &[String],
 ) -> Result<Node> {
+    let public_url = validate_public_url(public_url)?;
     let uuid = uuid::Uuid::new_v4().to_string();
     let secret = crate::auth::random_token(48);
     let enrollment = crate::auth::random_token(32);
     let t = now();
-    let conn = db.lock();
+    let conn = db.get()?;
     conn.execute(
         "INSERT INTO nodes(uuid,name,public_url,secret,enrollment_token,location,tags,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8)",
-        params![uuid, name, public_url.trim_end_matches('/'), secret, enrollment, location, serde_json::to_string(tags)?, t],
+        params![uuid, name, public_url, secret, enrollment, location, serde_json::to_string(tags)?, t],
     )?;
     let id = conn.last_insert_rowid();
     conn.query_row(
@@ -142,7 +208,7 @@ pub fn create(
 }
 
 pub fn list(db: &Db) -> Result<Vec<Node>> {
-    let conn = db.lock();
+    let conn = db.get()?;
     let mut stmt = conn.prepare(&format!("SELECT {COLS} FROM nodes ORDER BY name"))?;
     let rows = stmt.query_map([], from_row)?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -150,7 +216,7 @@ pub fn list(db: &Db) -> Result<Vec<Node>> {
 }
 
 pub fn get(db: &Db, id: i64) -> Result<Node> {
-    let conn = db.lock();
+    let conn = db.get()?;
     conn.query_row(
         &format!("SELECT {COLS} FROM nodes WHERE id=?1"),
         [id],
@@ -160,7 +226,7 @@ pub fn get(db: &Db, id: i64) -> Result<Node> {
 }
 
 pub fn get_by_uuid(db: &Db, uuid: &str) -> Result<Node> {
-    let conn = db.lock();
+    let conn = db.get()?;
     conn.query_row(
         &format!("SELECT {COLS} FROM nodes WHERE uuid=?1"),
         [uuid],
@@ -170,7 +236,7 @@ pub fn get_by_uuid(db: &Db, uuid: &str) -> Result<Node> {
 }
 
 pub fn get_by_name(db: &Db, name: &str) -> Result<Node> {
-    let conn = db.lock();
+    let conn = db.get()?;
     conn.query_row(
         &format!("SELECT {COLS} FROM nodes WHERE name=?1"),
         [name],
@@ -179,43 +245,141 @@ pub fn get_by_name(db: &Db, name: &str) -> Result<Node> {
     .context("node not found")
 }
 
-pub fn enroll(
-    db: &Db,
-    token: &str,
-    heartbeat: &NodeHeartbeat,
-    tls_fingerprint: &str,
-) -> Result<Node> {
-    let conn = db.lock();
-    let id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM nodes WHERE enrollment_token=?1 AND enrolled=0",
-            [token],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let id = id.context("invalid or used enrollment token")?;
+/// Normalize and strictly validate a TLS certificate fingerprint before it is
+/// pinned. Empty stays empty (plaintext agent); anything else must be exactly
+/// 64 lowercase hex characters (a SHA-256 digest). Keeps the stored column and
+/// the pinned-client cache under one invariant: `""` or 64 hex.
+fn pinned_fingerprint(raw: &str) -> Result<String> {
+    let normalized = crate::tls::normalize_fingerprint(raw);
+    if normalized.is_empty() {
+        return Ok(String::new());
+    }
+    if normalized.len() != 64 || !normalized.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("invalid TLS fingerprint: expected 64 hex characters");
+    }
+    Ok(normalized)
+}
+
+pub fn enroll(db: &Db, token: &str, heartbeat: &NodeHeartbeat) -> Result<Node> {
+    // One atomic UPDATE ... RETURNING: the row flips to enrolled and mints the
+    // secret in the same statement, so two concurrent enrolls with the same
+    // token cannot both observe enrolled=0 — the loser updates zero rows and
+    // gets the token error instead of re-minting the secret and killing the
+    // winner's HMAC. Fingerprint validation happens before the write so a
+    // malformed pin never consumes the token.
+    //
+    // The api guard's fingerprint gate lives HERE too, as a WHERE predicate
+    // on the same statement: the row may only flip when nothing is pinned and
+    // nothing is seeded (plain TOFU), or the presented fingerprint matches
+    // the pin or the operator-seeded `expected_fingerprint`. Re-evaluating
+    // the gate atomically with the enrolled flip closes the check-then-act
+    // race (FASE-4 LOW from RecheckFingerprint): a seed committed between
+    // the api's guard read and this UPDATE — or a pin changing under the
+    // read — still refuses an unseeded pin instead of TOFU-pinning it, and
+    // the loser's token stays unconsumed. `expected_fingerprint` is
+    // deliberately NOT part of the SET clause: it stays set, so the
+    // operator's declared identity keeps gatekeeping every re-enrollment
+    // (presented == pinned OR presented == expected_fingerprint).
+    let secret = crate::auth::random_token(48);
     let t = now();
-    conn.execute(
-        "UPDATE nodes SET enrolled=1,enrollment_token=NULL,daemon_version=?1,hostname=?2,os=?3,arch=?4,capacity_json=?5,last_heartbeat=?6,last_error='',tls_fingerprint=?8,updated_at=?6 WHERE id=?7",
-        params![heartbeat.daemon_version, heartbeat.hostname, heartbeat.os, heartbeat.arch, serde_json::to_string(&heartbeat.capacity)?, t, id, crate::tls::normalize_fingerprint(tls_fingerprint)],
+    let fingerprint = pinned_fingerprint(&heartbeat.tls_fingerprint)?;
+    let conn = db.get()?;
+    let node = conn
+        .query_row(
+            &format!(
+                "UPDATE nodes SET enrolled=1,enrollment_token=NULL,secret=?1,daemon_version=?2,hostname=?3,os=?4,arch=?5,capacity_json=?6,last_heartbeat=?7,last_error='',tls_fingerprint=?8,updated_at=?7 \
+                 WHERE enrollment_token=?9 AND enrolled=0 AND ((tls_fingerprint='' AND (expected_fingerprint IS NULL OR expected_fingerprint='')) OR tls_fingerprint=?8 OR (expected_fingerprint IS NOT NULL AND expected_fingerprint<>'' AND expected_fingerprint=?8)) RETURNING {COLS}"
+            ),
+            params![
+                secret,
+                heartbeat.daemon_version,
+                heartbeat.hostname,
+                heartbeat.os,
+                heartbeat.arch,
+                serde_json::to_string(&heartbeat.capacity)?,
+                t,
+                fingerprint,
+                token,
+            ],
+            from_row,
+        )
+        .optional()?
+        .context("invalid or used enrollment token")?;
+    Ok(node)
+}
+
+
+/// Operator-seeded expected certificate fingerprint (v16 plaintext /
+/// proxy-fronted enrollment path). `None` (or empty) clears the seed and
+/// restores plain TOFU at the next enrollment; a value is normalized and
+/// strictly validated (64 hex) before it is stored, so the column can never
+/// hold a malformed fingerprint.
+pub fn set_expected_fingerprint(
+    db: &Db,
+    id: i64,
+    expected_fingerprint: Option<&str>,
+) -> Result<()> {
+    let fingerprint = match expected_fingerprint {
+        None | Some("") => None,
+        Some(raw) => {
+            let fp = pinned_fingerprint(raw)?;
+            if fp.is_empty() {
+                None
+            } else {
+                Some(fp)
+            }
+        }
+    };
+    let conn = db.get()?;
+    let changed = conn.execute(
+        "UPDATE nodes SET expected_fingerprint=?1,updated_at=?2 WHERE id=?3",
+        params![fingerprint, now(), id],
     )?;
-    conn.query_row(
-        &format!("SELECT {COLS} FROM nodes WHERE id=?1"),
-        [id],
-        from_row,
-    )
-    .map_err(Into::into)
+    if changed == 0 {
+        bail!("node not found");
+    }
+    Ok(())
 }
 
 pub fn heartbeat(db: &Db, uuid: &str, heartbeat: &NodeHeartbeat) -> Result<()> {
-    let conn = db.lock();
+    let conn = db.get()?;
+    // Piggybacked reservation sweep: every enrolled heartbeat is a natural,
+    // rate-limited tick for dropping leaked capacity claims (the reserve and
+    // release paths also expire on read, but a node that went dark stops
+    // touching the table). Guarded create keeps the sweep a no-op on
+    // databases that never made a reservation.
+    ensure_reservations_table(&conn)?;
+    expire_stale_reservations(&conn)?;
     let t = now();
+    // Learn the daemon's cadence from the gap between consecutive heartbeats
+    // so online() can size its staleness window per node instead of assuming
+    // the fixed 15s default. Read before the UPDATE: the previous timestamp is
+    // the one this beat is a gap away from.
+    let prev: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT id,last_heartbeat FROM nodes WHERE uuid=?1",
+            [uuid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
     let changed = conn.execute(
         "UPDATE nodes SET daemon_version=?1,hostname=?2,os=?3,arch=?4,capacity_json=?5,last_heartbeat=?6,last_error='',updated_at=?6 WHERE uuid=?7 AND enrolled=1",
         params![heartbeat.daemon_version, heartbeat.hostname, heartbeat.os, heartbeat.arch, serde_json::to_string(&heartbeat.capacity)?, t, uuid],
     )?;
     if changed == 0 {
         bail!("node not enrolled");
+    }
+    if let Some((node_id, Some(prev_ts))) = prev {
+        if let Ok(prev_t) = chrono::DateTime::parse_from_rfc3339(&prev_ts) {
+            let gap = (Utc::now() - prev_t.with_timezone(&Utc)).num_seconds();
+            // Ignore implausible gaps (replays, clock jumps): keep the last
+            // sane estimate instead of poisoning the window with an outlier.
+            if (5..=3600).contains(&gap) {
+                if let Ok(mut m) = HEARTBEAT_CADENCE.lock() {
+                    m.insert(node_id, gap);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -236,52 +400,111 @@ pub fn update(
     memory_overallocate: i64,
     disk_overallocate: i64,
 ) -> Result<Node> {
-    let conn = db.lock();
-    conn.execute(
+    if memory_limit_mb < 0 || disk_limit_mb < 0 || memory_overallocate < 0 || disk_overallocate < 0
+    {
+        bail!("resource limits must not be negative");
+    }
+    let public_url = validate_public_url(public_url)?;
+    // `servers.node` stores the node's name at assignment time, so a rename
+    // would silently orphan those assignments (delete()'s orphan check counts
+    // by the stored name). Refuse to rename while servers are still assigned;
+    // BEGIN IMMEDIATE keeps the read-check-update atomic across pooled
+    // connections (the old global mutex used to serialize this).
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current_name: String = tx
+        .query_row("SELECT name FROM nodes WHERE id=?1", [id], |r| r.get(0))
+        .context("node not found")?;
+    if name != current_name {
+        let assigned: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM servers WHERE node=?1 AND deleted=0",
+            [&current_name],
+            |r| r.get(0),
+        )?;
+        if assigned > 0 {
+            bail!("cannot rename node: {assigned} assigned server(s) would be orphaned");
+        }
+    }
+    tx.execute(
         "UPDATE nodes SET name=?1,public_url=?2,enabled=?3,maintenance=?4,schedulable=?5,location=?6,tags=?7,memory_limit_mb=?8,disk_limit_mb=?9,memory_overallocate=?10,disk_overallocate=?11,updated_at=?12 WHERE id=?13",
-        params![name, public_url.trim_end_matches('/'), enabled as i64, maintenance as i64, schedulable as i64, location, serde_json::to_string(tags)?, memory_limit_mb, disk_limit_mb, memory_overallocate, disk_overallocate, now(), id],
+        params![name, public_url, enabled as i64, maintenance as i64, schedulable as i64, location, serde_json::to_string(tags)?, memory_limit_mb, disk_limit_mb, memory_overallocate, disk_overallocate, now(), id],
     )?;
-    conn.query_row(
-        &format!("SELECT {COLS} FROM nodes WHERE id=?1"),
-        [id],
-        from_row,
-    )
-    .map_err(Into::into)
+    let node = tx.query_row(&format!("SELECT {COLS} FROM nodes WHERE id=?1"), [id], from_row)?;
+    tx.commit()?;
+    Ok(node)
 }
 
-pub fn rotate_secret(db: &Db, id: i64) -> Result<String> {
+pub fn rotate_secret(db: &Db, id: i64) -> Result<(String, String)> {
+    // Rotate the shared secret AND the enrollment token in one write, detaching
+    // the node until it re-enrolls. The old secret stops verifying immediately.
+    // Both fingerprints are intentionally KEPT by this UPDATE: the pinned TLS
+    // fingerprint (re-enrollment with the same fingerprint, identity
+    // unchanged, is accepted by the enroll guard) and the operator-seeded
+    // expected_fingerprint (a rotated node re-enrolls against the same
+    // declared identity). A different fingerprint is refused until
+    // delete+recreate or an operator update of expected_fingerprint.
     let secret = crate::auth::random_token(48);
-    let conn = db.lock();
-    conn.execute(
-        "UPDATE nodes SET secret=?1,updated_at=?2 WHERE id=?3",
-        params![secret, now(), id],
+    let token = crate::auth::random_token(32);
+    let conn = db.get()?;
+    let changed = conn.execute(
+        "UPDATE nodes SET secret=?1,enrollment_token=?2,enrolled=0,last_heartbeat=NULL,updated_at=?3 WHERE id=?4",
+        params![secret, token, now(), id],
     )?;
-    Ok(secret)
+    if changed == 0 {
+        bail!("node not found");
+    }
+    Ok((secret, token))
 }
 
 pub fn regenerate_enrollment(db: &Db, id: i64) -> Result<String> {
-    let token = crate::auth::random_token(32);
-    let conn = db.lock();
-    conn.execute("UPDATE nodes SET enrollment_token=?1,enrolled=0,last_heartbeat=NULL,updated_at=?2 WHERE id=?3", params![token, now(), id])?;
+    // Re-enrollment also rotates the secret: the previous HMAC is dead as soon
+    // as the new token is minted, not merely blocked by enrolled=0.
+    let (_, token) = rotate_secret(db, id)?;
     Ok(token)
 }
 
+/// Update the pinned TLS fingerprint on the authenticated heartbeat path.
+/// Only accepted for enrolled nodes; the caller must have verified the HMAC.
+/// The value is normalized and strictly validated before it is stored, so the
+/// column can never hold a malformed pin.
+pub fn set_tls_fingerprint(db: &Db, uuid: &str, fingerprint: &str) -> Result<()> {
+    let fingerprint = pinned_fingerprint(fingerprint)?;
+    let conn = db.get()?;
+    let changed = conn.execute(
+        "UPDATE nodes SET tls_fingerprint=?1,updated_at=?2 WHERE uuid=?3 AND enrolled=1",
+        params![fingerprint, now(), uuid],
+    )?;
+    if changed == 0 {
+        bail!("node not enrolled");
+    }
+    Ok(())
+}
+
 pub fn set_error(db: &Db, uuid: &str, error: &str) -> Result<()> {
-    let conn = db.lock();
-    conn.execute(
-        "UPDATE nodes SET last_error=?1,updated_at=?2 WHERE uuid=?3",
+    // Same enrolled-only guard as heartbeat()/set_tls_fingerprint(): an
+    // unenrolled (or revoked) node must not be able to write its state.
+    let conn = db.get()?;
+    let changed = conn.execute(
+        "UPDATE nodes SET last_error=?1,updated_at=?2 WHERE uuid=?3 AND enrolled=1",
         params![error, now(), uuid],
     )?;
+    if changed == 0 {
+        bail!("node not enrolled");
+    }
     Ok(())
 }
 
 pub fn delete(db: &Db, id: i64) -> Result<()> {
-    let conn = db.lock();
-    let assigned: i64 = conn.query_row("SELECT COUNT(*) FROM servers WHERE node=(SELECT name FROM nodes WHERE id=?1) AND deleted=0", [id], |r| r.get(0))?;
+    // Orphan check + delete must stay atomic across pooled connections;
+    // BEGIN IMMEDIATE serializes writers like the old global mutex did.
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let assigned: i64 = tx.query_row("SELECT COUNT(*) FROM servers WHERE node=(SELECT name FROM nodes WHERE id=?1) AND deleted=0", [id], |r| r.get(0))?;
     if assigned > 0 {
         bail!("node has {assigned} assigned server(s)");
     }
-    conn.execute("DELETE FROM nodes WHERE id=?1", [id])?;
+    tx.execute("DELETE FROM nodes WHERE id=?1", [id])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -293,7 +516,7 @@ pub fn record_event(
     message: &str,
     payload: &serde_json::Value,
 ) -> Result<()> {
-    let conn = db.lock();
+    let conn = db.get()?;
     conn.execute(
         "INSERT INTO node_events(node_id,level,kind,message,payload,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
         params![node_id, level, kind, message, serde_json::to_string(payload)?, now()],
@@ -302,7 +525,10 @@ pub fn record_event(
 }
 
 pub fn events(db: &Db, node_id: i64, limit: i64) -> Result<Vec<serde_json::Value>> {
-    let conn = db.lock();
+    let conn = db.get()?;
+    // Client-supplied limits are clamped: 0/negative and absurdly large values
+    // must not yield empty results or unbounded scans.
+    let limit = limit.clamp(1, 200);
     let mut stmt = conn.prepare("SELECT id,level,kind,message,payload,created_at FROM node_events WHERE node_id=?1 ORDER BY id DESC LIMIT ?2")?;
     let rows = stmt.query_map(params![node_id, limit], |r| {
         Ok(serde_json::json!({
@@ -315,30 +541,80 @@ pub fn events(db: &Db, node_id: i64, limit: i64) -> Result<Vec<serde_json::Value
         .map_err(Into::into)
 }
 
-pub fn select_for_server(
-    db: &Db,
+/// Create the capacity-reservation table on demand. The DDL is owned by the
+/// db.rs migration ladder (v18 step); this is a guarded CREATE IF NOT
+/// EXISTS fallback for pre-v18 databases, safe and idempotent to call
+/// before every use.
+fn ensure_reservations_table(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS node_reservations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            memory_mb INTEGER NOT NULL,
+            disk_mb INTEGER NOT NULL,
+            reserved_until TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+/// Drop reservations whose TTL has lapsed. The TTL is set so a reservation
+/// outlives the node's next heartbeat report; anything older is a leaked claim
+/// (create failed before commit without a release, or the node went dark).
+fn expire_stale_reservations(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute("DELETE FROM node_reservations WHERE reserved_until < ?1", [now()])?;
+    Ok(())
+}
+
+/// Memory/disk still claimed (unexpired) for a node by outstanding reservations.
+fn reserved_usage(conn: &rusqlite::Connection, node_id: i64) -> Result<(i64, i64)> {
+    let (mem, disk): (i64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(memory_mb),0), COALESCE(SUM(disk_mb),0) \
+         FROM node_reservations WHERE node_id=?1 AND reserved_until > ?2",
+        params![node_id, now()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((mem, disk))
+}
+
+/// Pick the least-loaded candidate for a server of the given size, counting
+/// both the capacity the agent last reported and any outstanding capacity
+/// reservations. Runs against `tx` so callers can claim atomically.
+fn pick_node_tx(
+    tx: &rusqlite::Transaction,
     memory_mb: i64,
     disk_mb: i64,
     required_tags: &[String],
     location: Option<&str>,
 ) -> Result<Node> {
-    let mut candidates: Vec<Node> = list(db)?
-        .into_iter()
-        .filter(|n| {
-            n.online()
-                && n.enabled
-                && n.schedulable
-                && !n.maintenance
-                && location
-                    .map(|loc| loc.is_empty() || n.location == loc)
-                    .unwrap_or(true)
-                && required_tags
-                    .iter()
-                    .all(|tag| n.tags.iter().any(|t| t == tag))
-                && n.available_memory_mb() >= memory_mb
-                && n.available_disk_mb() >= disk_mb
-        })
-        .collect();
+    let mut stmt = tx.prepare(&format!("SELECT {COLS} FROM nodes"))?;
+    let nodes = stmt
+        .query_map([], from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    let mut candidates: Vec<Node> = Vec::new();
+    for n in nodes {
+        if !n.online() || !n.enabled || !n.schedulable || n.maintenance {
+            continue;
+        }
+        if let Some(loc) = location {
+            if !loc.is_empty() && n.location != loc {
+                continue;
+            }
+        }
+        if !required_tags.iter().all(|tag| n.tags.iter().any(|t| t == tag)) {
+            continue;
+        }
+        let (r_mem, r_disk) = reserved_usage(tx, n.id)?;
+        if n.available_memory_mb().saturating_sub(r_mem) < memory_mb {
+            continue;
+        }
+        if n.available_disk_mb().saturating_sub(r_disk) < disk_mb {
+            continue;
+        }
+        candidates.push(n);
+    }
     candidates.sort_by(|a, b| {
         let a_score = a.capacity.cpu_percent
             + (a.capacity.memory_used as f64 / a.capacity.memory_total.max(1) as f64 * 100.0)
@@ -354,8 +630,68 @@ pub fn select_for_server(
         .context("no online node has enough capacity")
 }
 
+/// Dry-run placement: the same candidate rules as the real provisioning path
+/// (including outstanding reservations), but without claiming anything. Used
+/// by the advisory placement endpoint.
+pub fn select_for_server(
+    db: &Db,
+    memory_mb: i64,
+    disk_mb: i64,
+    required_tags: &[String],
+    location: Option<&str>,
+) -> Result<Node> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    ensure_reservations_table(&tx)?;
+    expire_stale_reservations(&tx)?;
+    let node = pick_node_tx(&tx, memory_mb, disk_mb, required_tags, location)?;
+    tx.commit()?;
+    Ok(node)
+}
+
+/// Claim `memory_mb`/`disk_mb` on the best fitting node, atomically with the
+/// caller's transaction. The reservation row is what stops two concurrent
+/// provisions from picking the same node while the agent's capacity report is
+/// stale: it survives this transaction's commit (until its TTL) and is visible
+/// to every later `select_for_server`/`reserve_capacity_tx`. On failure the
+/// caller's transaction rolls back, which releases the claim with it.
+///
+/// Returns the chosen node and the reservation id (for an early release).
+pub fn reserve_capacity_tx(
+    tx: &rusqlite::Transaction,
+    memory_mb: i64,
+    disk_mb: i64,
+    required_tags: &[String],
+    location: Option<&str>,
+) -> Result<(Node, i64)> {
+    ensure_reservations_table(tx)?;
+    expire_stale_reservations(tx)?;
+    let node = pick_node_tx(tx, memory_mb, disk_mb, required_tags, location)?;
+    let until = (Utc::now() + chrono::Duration::seconds(reservation_ttl_secs(node.id)))
+        .to_rfc3339();
+    tx.execute(
+        "INSERT INTO node_reservations(node_id,memory_mb,disk_mb,reserved_until,created_at) \
+         VALUES(?1,?2,?3,?4,?5)",
+        params![node.id, memory_mb, disk_mb, until, now()],
+    )?;
+    Ok((node, tx.last_insert_rowid()))
+}
+
+/// Release a reservation early (e.g. after a failed provision). Idempotent:
+/// a stale or already-released id is a no-op.
+pub fn release_reservation(db: &Db, reservation_id: i64) -> Result<()> {
+    // Idempotent-release path: the table may not exist yet on databases that
+    // never claimed capacity, so ensure it before touching it (a stale or
+    // already-released id is still a no-op).
+    let conn = db.get()?;
+    ensure_reservations_table(&conn)?;
+    conn.execute("DELETE FROM node_reservations WHERE id=?1", [reservation_id])?;
+    Ok(())
+}
+
+/// True when no live server on `node` uses `port` (allocation-aware).
 pub fn port_available_on_node(db: &Db, node: &str, port: i64) -> Result<bool> {
-    let conn = db.lock();
+    let conn = db.get()?;
     let used: i64 = conn.query_row(
         "SELECT COUNT(*) FROM servers WHERE node=?1 AND port=?2 AND deleted=0",
         params![node, port],
@@ -364,16 +700,456 @@ pub fn port_available_on_node(db: &Db, node: &str, port: i64) -> Result<bool> {
     Ok(used == 0)
 }
 
-pub fn next_free_port_on_node(
-    db: &Db,
-    node: &str,
-    range_start: i64,
-    range_end: i64,
-) -> Result<i64> {
-    for port in range_start..=range_end {
-        if port_available_on_node(db, node, port)? {
-            return Ok(port);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node_protocol::{NodeCapacity, NodeHeartbeat};
+
+    fn test_db() -> Db {
+        let dir = tempfile::tempdir().unwrap();
+        // The connection keeps the unlinked file usable for the test's lifetime.
+        let path = dir.path().join("nodes-test.db");
+        let db = crate::db::open(path.to_str().unwrap()).unwrap();
+        std::mem::forget(dir);
+        db
+    }
+
+    fn heartbeat_fixture() -> NodeHeartbeat {
+        NodeHeartbeat {
+            daemon_version: "0.1.1-test".into(),
+            hostname: "host".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            started_at: now(),
+            capacity: NodeCapacity::default(),
+            tls_fingerprint: String::new(),
         }
     }
-    bail!("no free port in range {range_start}-{range_end} on node {node}")
+
+    fn fp64() -> String {
+        "ab12".repeat(16)
+    }
+
+    #[test]
+    fn validate_public_url_contract() {
+        assert_eq!(
+            validate_public_url("https://node.example.com/").unwrap(),
+            "https://node.example.com"
+        );
+        assert_eq!(
+            validate_public_url("http://10.0.0.1:8081///").unwrap(),
+            "http://10.0.0.1:8081"
+        );
+        assert!(validate_public_url("ftp://node.example.com").is_err());
+        assert!(validate_public_url("https://").is_err());
+        assert!(validate_public_url("not a url").is_err());
+    }
+
+    #[test]
+    fn update_rejects_negative_limits_and_invalid_urls() {
+        let db = test_db();
+        let n = create(&db, "node-a", "https://node-a.example.com", "dc1", &[]).unwrap();
+        let err = update(
+            &db,
+            n.id,
+            "node-a",
+            "https://node-a.example.com",
+            true,
+            false,
+            true,
+            "dc1",
+            &[],
+            -1,
+            0,
+            0,
+            0,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must not be negative"));
+        let err = update(
+            &db,
+            n.id,
+            "node-a",
+            "ftp://bad.example.com",
+            true,
+            false,
+            true,
+            "dc1",
+            &[],
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("http or https"));
+        // Failed updates leave the row untouched.
+        let got = get(&db, n.id).unwrap();
+        assert_eq!(got.public_url, "https://node-a.example.com");
+        assert_eq!(got.memory_limit_mb, 0);
+    }
+
+    #[test]
+    fn rotate_secret_atomically_revokes_and_rejects_missing() {
+        let db = test_db();
+        let n = create(&db, "node-b", "https://node-b.example.com", "", &[]).unwrap();
+        let token = n.enrollment_token.clone().unwrap();
+        let hb = heartbeat_fixture();
+        let enrolled = enroll(&db, &token, &hb).unwrap();
+        assert!(enrolled.enrolled);
+        heartbeat(&db, &enrolled.uuid, &hb).unwrap();
+
+        let (secret, new_token) = rotate_secret(&db, n.id).unwrap();
+        assert!(!secret.is_empty());
+        assert!(!new_token.is_empty());
+        let after = get(&db, n.id).unwrap();
+        assert!(!after.enrolled);
+        assert_eq!(after.secret, secret);
+        assert_eq!(after.enrollment_token.as_deref(), Some(new_token.as_str()));
+        assert!(after.last_heartbeat.is_none());
+        // The rotated node no longer heartbeats: enrolled=0 blocks the update.
+        let err = heartbeat(&db, &enrolled.uuid, &hb).unwrap_err();
+        assert!(err.to_string().contains("node not enrolled"));
+        // Missing id is rejected loudly.
+        let err = rotate_secret(&db, 999_999).unwrap_err();
+        assert!(err.to_string().contains("node not found"));
+    }
+
+    #[test]
+    fn regenerate_enrollment_revokes_same_as_rotate() {
+        let db = test_db();
+        let n = create(&db, "node-e", "https://node-e.example.com", "", &[]).unwrap();
+        let hb = heartbeat_fixture();
+        let enrolled = enroll(&db, n.enrollment_token.as_deref().unwrap(), &hb).unwrap();
+        let old_secret = enrolled.secret.clone();
+        let token = regenerate_enrollment(&db, n.id).unwrap();
+        let after = get(&db, n.id).unwrap();
+        assert!(!after.enrolled);
+        assert_ne!(after.secret, old_secret);
+        assert_eq!(after.enrollment_token.as_deref(), Some(token.as_str()));
+        assert!(after.last_heartbeat.is_none());
+    }
+
+    #[test]
+    fn enroll_mints_fresh_secret_and_consumes_token() {
+        let db = test_db();
+        let n = create(&db, "node-c", "https://node-c.example.com", "", &[]).unwrap();
+        let original_secret = n.secret.clone();
+        let token = n.enrollment_token.clone().unwrap();
+        let mut hb = heartbeat_fixture();
+        hb.tls_fingerprint = fp64();
+        let enrolled = enroll(&db, &token, &hb).unwrap();
+        assert!(enrolled.enrolled);
+        assert!(enrolled.enrollment_token.is_none());
+        assert_ne!(enrolled.secret, original_secret);
+        assert_eq!(enrolled.tls_fingerprint, fp64());
+        // The token is single-use: a second enrollment is rejected.
+        let err = enroll(&db, &token, &hb).unwrap_err();
+        assert!(err.to_string().contains("invalid or used enrollment token"));
+        // Heartbeat is accepted now that the node is enrolled.
+        heartbeat(&db, &enrolled.uuid, &hb).unwrap();
+    }
+
+    #[test]
+    fn set_tls_fingerprint_only_for_enrolled() {
+        let db = test_db();
+        let n = create(&db, "node-d", "https://node-d.example.com", "", &[]).unwrap();
+        let err = set_tls_fingerprint(&db, &n.uuid, &fp64()).unwrap_err();
+        assert!(err.to_string().contains("node not enrolled"));
+        let hb = heartbeat_fixture();
+        enroll(&db, n.enrollment_token.as_deref().unwrap(), &hb).unwrap();
+        set_tls_fingerprint(&db, &n.uuid, &fp64()).unwrap();
+        assert_eq!(get(&db, n.id).unwrap().tls_fingerprint, fp64());
+    }
+    #[test]
+    fn enroll_rejects_malformed_fingerprint_and_pins_normalized() {
+        let db = test_db();
+        let n = create(&db, "node-f", "https://node-f.example.com", "", &[]).unwrap();
+        let mut hb = heartbeat_fixture();
+        // Strict 64-hex validation gates what gets pinned at enrollment.
+        hb.tls_fingerprint = "zz".repeat(32);
+        let err = enroll(&db, n.enrollment_token.as_deref().unwrap(), &hb).unwrap_err();
+        assert!(err.to_string().contains("64 hex"));
+        // A colon-separated uppercase fingerprint is normalized before pinning.
+        let n2 = create(&db, "node-g", "https://node-g.example.com", "", &[]).unwrap();
+        let mut hb2 = heartbeat_fixture();
+        let upper = fp64().to_ascii_uppercase();
+        let colonned = upper
+            .as_bytes()
+            .chunks(2)
+            .map(|c| String::from_utf8_lossy(c).to_string())
+            .collect::<Vec<_>>()
+            .join(":");
+        hb2.tls_fingerprint = colonned;
+        let enrolled = enroll(&db, n2.enrollment_token.as_deref().unwrap(), &hb2).unwrap();
+        assert_eq!(enrolled.tls_fingerprint, fp64());
+    }
+    #[test]
+    fn enroll_is_atomic_and_never_remints_secret_on_second_use() {
+        let db = test_db();
+        let n = create(&db, "node-i", "https://node-i.example.com", "", &[]).unwrap();
+        let token = n.enrollment_token.clone().unwrap();
+        let hb = heartbeat_fixture();
+        let first = enroll(&db, &token, &hb).unwrap();
+        // A second enrollment with the same token must fail AND must not
+        // re-mint the secret under the first node (the old SELECT-then-UPDATE
+        // race clobbered the winner's HMAC key).
+        let err = enroll(&db, &token, &hb).unwrap_err();
+        assert!(err.to_string().contains("invalid or used enrollment token"));
+        assert_eq!(
+            get(&db, n.id).unwrap().secret,
+            first.secret,
+            "losing enroll must not rotate the winner's secret"
+        );
+        heartbeat(&db, &first.uuid, &hb).unwrap();
+    }
+
+    /// FASE-4 LOW (RecheckFingerprint): the api handler pre-checks the
+    /// fingerprint in its own SELECT; the authoritative gate is the WHERE
+    /// predicate inside enroll's atomic UPDATE, which re-reads pin/seed at
+    /// statement time. Simulate the race — an operator seeding
+    /// `expected_fingerprint` between the guard read and the enroll write —
+    /// by enrolling with the seed already committed and no prior guard: the
+    /// mismatched pin must be refused, the token must survive, and the seed
+    /// must remain for the seeded identity.
+    #[test]
+    fn enroll_refuses_seed_committed_after_guard_read() {
+        let db = test_db();
+        let n = create(&db, "node-race", "https://race.example.com", "", &[]).unwrap();
+        let token = n.enrollment_token.clone().unwrap();
+        let seeded = fp64();
+        set_expected_fingerprint(&db, n.id, Some(&seeded)).unwrap();
+
+        let mut hb = heartbeat_fixture();
+        hb.tls_fingerprint = "cd34".repeat(16);
+        let err = enroll(&db, &token, &hb).unwrap_err();
+        assert!(err.to_string().contains("invalid or used enrollment token"));
+        let after = get(&db, n.id).unwrap();
+        assert!(!after.enrolled, "seeded gate must refuse the mismatched pin");
+        assert_eq!(
+            after.enrollment_token.as_deref(),
+            Some(token.as_str()),
+            "refused enroll must not consume the token"
+        );
+        assert_eq!(after.expected_fingerprint, seeded, "seed must survive");
+
+        // The same token still enrolls the seeded identity.
+        let mut hb2 = heartbeat_fixture();
+        hb2.tls_fingerprint = seeded.clone();
+        let enrolled = enroll(&db, &token, &hb2).unwrap();
+        assert!(enrolled.enrolled);
+        assert_eq!(enrolled.tls_fingerprint, seeded);
+    }
+
+    #[test]
+    fn rename_refused_while_servers_assigned_prevents_orphans() {
+        let db = test_db();
+        let n = create(&db, "node-h", "https://node-h.example.com", "", &[]).unwrap();
+        // Assign a server by node name, exactly like server creation does.
+        let conn = db.get().unwrap();
+        conn.execute(
+            "INSERT INTO users (username,email,password_hash,created_at,updated_at) VALUES ('u','u@example.com','x','t','t')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blueprints (uuid,name,created_at,updated_at) VALUES ('bp-1','e','t','t')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO servers (uuid,name,user_id,blueprint_id,node,created_at,updated_at) VALUES ('srv-1','s1',1,1,'node-h','t','t')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        // Renaming a node that still has assigned servers must fail so
+        // delete()'s name-based orphan check cannot be defeated.
+        let err = update(
+            &db,
+            n.id,
+            "renamed",
+            "https://node-h.example.com",
+            true,
+            false,
+            true,
+            "",
+            &[],
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("assigned server"));
+        assert_eq!(get(&db, n.id).unwrap().name, "node-h");
+        // Deleting with assigned servers is refused too.
+        let err = delete(&db, n.id).unwrap_err();
+        assert!(err.to_string().contains("assigned"));
+
+        // Once the server is gone, the rename goes through.
+        let conn = db.get().unwrap();
+        conn.execute("DELETE FROM servers WHERE uuid='srv-1'", []).unwrap();
+        drop(conn);
+        let renamed = update(
+            &db,
+            n.id,
+            "renamed",
+            "https://node-h.example.com",
+            true,
+            false,
+            true,
+            "",
+            &[],
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(renamed.name, "renamed");
+    }
+
+    #[test]
+    fn set_error_only_for_enrolled() {
+        let db = test_db();
+        let n = create(&db, "node-j", "https://node-j.example.com", "", &[]).unwrap();
+        let err = set_error(&db, &n.uuid, "boom").unwrap_err();
+        assert!(err.to_string().contains("node not enrolled"));
+        enroll(&db, n.enrollment_token.as_deref().unwrap(), &heartbeat_fixture()).unwrap();
+        set_error(&db, &n.uuid, "boom").unwrap();
+        assert_eq!(get(&db, n.id).unwrap().last_error, "boom");
+    }
+
+    /// Enroll and heartbeat a node with a fixed capacity and configured limits
+    /// so `available_*_mb()` and `online()` are deterministic.
+    fn online_node_with_limits(db: &Db, name: &str, mem_mb: i64, disk_mb: i64) -> Node {
+        let n = create(db, name, &format!("https://{name}.example.com"), "", &[]).unwrap();
+        let mut hb = heartbeat_fixture();
+        hb.capacity.memory_total = (mem_mb as u64).saturating_mul(1_048_576);
+        hb.capacity.disk_total = (disk_mb as u64).saturating_mul(1_048_576);
+        enroll(db, n.enrollment_token.as_deref().unwrap(), &hb).unwrap();
+        heartbeat(db, &n.uuid, &hb).unwrap();
+        update(
+            db,
+            n.id,
+            name,
+            &format!("https://{name}.example.com"),
+            true,
+            false,
+            true,
+            "",
+            &[],
+            mem_mb,
+            disk_mb,
+            0,
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reserve_capacity_prevents_oversubscription_until_released() {
+        let db = test_db();
+        // 8192 MB of memory: a single 5000 MB claim leaves only 3192 free, so
+        // a second identical claim must be refused.
+        let n = online_node_with_limits(&db, "node-cap", 8192, 16384);
+        assert!(n.online());
+
+        // First claim is granted; a second one inside the same transaction is
+        // refused — the outstanding reservation counts against the stale
+        // heartbeat capacity, exactly the race that previously let two
+        // concurrent creates double-book a node.
+        let mut conn = db.get().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let (node, rid) = reserve_capacity_tx(&tx, 5000, 8192, &[], None).unwrap();
+        assert_eq!(node.id, n.id);
+        assert!(rid > 0);
+        let err = reserve_capacity_tx(&tx, 5000, 8192, &[], None).unwrap_err();
+        assert!(err.to_string().contains("no online node has enough capacity"));
+        // Rolling the transaction back releases the claim (the create path
+        // relies on this when the quota/port checks fail before commit).
+        drop(tx);
+
+        // After the rollback the same claim succeeds and is committed.
+        let mut conn = db.get().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let (node2, rid2) = reserve_capacity_tx(&tx, 5000, 8192, &[], None).unwrap();
+        assert_eq!(node2.id, n.id);
+        tx.commit().unwrap();
+
+        // A committed reservation stays live: a fresh transaction still sees
+        // the node as exhausted (this is what protects the window between the
+        // row insert and the agent's next heartbeat report).
+        let mut conn = db.get().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert!(reserve_capacity_tx(&tx, 5000, 8192, &[], None).is_err());
+        drop(tx);
+
+        // An explicit release frees the capacity again.
+        release_reservation(&db, rid2).unwrap();
+        let mut conn = db.get().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let (node3, _) = reserve_capacity_tx(&tx, 5000, 8192, &[], None).unwrap();
+        assert_eq!(node3.id, n.id);
+        drop(tx);
+    }
+
+    #[test]
+    fn events_limit_is_clamped() {
+        let db = test_db();
+        let n = create(&db, "node-evt", "https://evt.example.com", "", &[]).unwrap();
+        for i in 0..250 {
+            record_event(&db, n.id, "info", "k", &format!("m{i}"), &serde_json::json!({}))
+                .unwrap();
+        }
+        assert_eq!(events(&db, n.id, 10_000).unwrap().len(), 200);
+        assert_eq!(events(&db, n.id, 0).unwrap().len(), 1);
+        assert_eq!(events(&db, n.id, -5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reservation_release_and_heartbeat_sweep_are_idempotent() {
+        let db = test_db();
+        // Release on a database that never made a reservation is a no-op:
+        // the table is ensured on demand (LOW from RecheckCapacity).
+        release_reservation(&db, 999_999).unwrap();
+
+        // Heartbeat piggybacks the stale-claim sweep: a lapsed reservation is
+        // dropped on the next enrolled beat.
+        let n = online_node_with_limits(&db, "node-sweep", 8192, 16384);
+        let mut conn = db.get().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let (_, rid) = reserve_capacity_tx(&tx, 1000, 1024, &[], None).unwrap();
+        tx.commit().unwrap();
+        // Backdate the claim past its TTL so only the sweep can remove it.
+        conn.execute(
+            "UPDATE node_reservations SET reserved_until='2000-01-01T00:00:00+00:00' WHERE id=?1",
+            [rid],
+        )
+        .unwrap();
+        drop(conn);
+        heartbeat(&db, &n.uuid, &heartbeat_fixture()).unwrap();
+        let remaining: i64 = db
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM node_reservations WHERE id=?1",
+                [rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "heartbeat sweep must delete lapsed claims");
+    }
 }

@@ -47,19 +47,29 @@ Usage: sudo ./install-node.sh [options]
   --cloudflare-key PATH       Cloudflare Origin private key
   --public-url URL            Explicit node URL stored in the panel
   --port PORT                 Internal/direct node port (default 8081)
-  --listen ADDRESS            Agent listen address (overrides --port)
-  --allow-http                Permit plain HTTP enrollment on trusted LAN
+  --listen ADDRESS            Agent listen address (mutually exclusive with --port; plaintext defaults to 127.0.0.1:PORT, 0.0.0.0:PORT with --allow-http)
+  --allow-http                Permit --tls none only for loopback-local development (the panel refuses plaintext enrollment)
   --no-caddy                  Alias for --tls none
   --non-interactive           Disable the terminal wizard
   --data-dir PATH             Node data directory (default /var/lib/voltd)
   --version VERSION           Release tag (default latest)
   --dry-run                   Print actions without modifying the host
+
+  Proxied TLS modes (caddy, certbot, certbot-ip, cloudflare) keep the agent
+  on a plaintext loopback origin behind the TLS-terminating proxy, so the
+  agent cannot self-present the endpoint certificate the panel dials. For
+  those deployments, seed the node's expected_fingerprint (the strict
+  64-hex SHA-256 fingerprint of the endpoint certificate) via the panel
+  UI/API before the first enrollment; the first enrollment and every
+  re-enrollment must then present exactly that fingerprint.
 EOF
       exit 0;;
     *) die "Unknown argument: $1";;
   esac
 done
 export VOLTPANEL_VERSION
+resolve_release_tag
+refresh_raw_base
 
 if [[ "$INTERACTIVE" == auto && "$ARG_COUNT" == 0 ]] && tui_available; then INTERACTIVE=1; else INTERACTIVE=0; fi
 if [[ "$INTERACTIVE" == 1 ]]; then
@@ -71,7 +81,7 @@ if [[ "$INTERACTIVE" == 1 ]]; then
     certbot "Certbot + Nginx with a domain" \
     certbot-ip "Certbot + Nginx with a public IP" \
     cloudflare "Cloudflare Origin Certificate" \
-    none "No reverse proxy / trusted LAN only")
+    none "No TLS — loopback-local dev only (panel refuses plaintext enrollment)")
   if [[ "$TLS_MODE" != none ]]; then
     if [[ "$TLS_MODE" == certbot-ip ]]; then
       tui_note "IP certificates require Certbot 5.4+, are valid for about 6 days, and must renew automatically."
@@ -102,50 +112,122 @@ case "$TLS_MODE" in caddy|certbot|certbot-ip|cloudflare|none) ;; *) die "Invalid
 validate_port "$PORT"
 [[ -z "$LISTEN" || "$PORT_SET" != 1 ]] || die "Use either --listen or --port, not both"
 
-require_root; require_systemd; load_os
+if [[ "$DRY_RUN" != 1 ]]; then require_root; require_systemd; fi
+load_os
 [[ -n "$PANEL_URL" ]] || die "--panel is required"
-[[ -n "$TOKEN" ]] || die "--token is required"
+[[ -n "$TOKEN" || "$DRY_RUN" == 1 ]] || die "--token is required"
 validate_url "$PANEL_URL"
 [[ -z "$DOMAIN" ]] || validate_domain "$DOMAIN"; [[ -z "$IP_ADDRESS" ]] || validate_ip "$IP_ADDRESS"
+[[ "$TLS_MODE" != cloudflare || -r "$CF_CERT" ]] || die "Cloudflare Origin Certificate not readable: $CF_CERT"
+[[ "$TLS_MODE" != cloudflare || -r "$CF_KEY" ]] || die "Cloudflare Origin private key not readable: $CF_KEY"
+
+# Plaintext enrollment is refused by the panel: the enrollment endpoint
+# requires positively-TLS transport (403 otherwise) and a presented
+# certificate fingerprint (400 without one), so a plaintext agent cannot
+# enroll. The v16 operator-seeded expected_fingerprint path lets an operator
+# declare the endpoint certificate fingerprint for proxy-fronted agents (see
+# --help), but a plaintext agent still presents no fingerprint of its own, so
+# --tls none remains meaningful only for loopback-local development, and only
+# with --allow-http plus an explicit warning.
+if [[ "$TLS_MODE" == none ]]; then
+  if [[ "$ALLOW_HTTP" != 1 || ! "$PANEL_URL" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost)([:/]|$) ]]; then
+    die "Plaintext enrollment is refused by the panel (403 on plaintext transport, 400 without a presented fingerprint), so --tls none cannot enroll a node. Use a TLS mode (--tls caddy, certbot, certbot-ip, or cloudflare), or run the panel on loopback for local development."
+  fi
+  warn "Plaintext enrollment is for loopback-local development only: a real panel refuses plaintext enrollments (403) and enrollments without a presented fingerprint (400). Production nodes must enroll over TLS (--tls caddy, certbot, certbot-ip, or cloudflare); proxy-fronted deployments can additionally seed expected_fingerprint (see --help)."
+fi
 
 if [[ "$TLS_MODE" != none ]]; then
   LISTEN=${LISTEN:-127.0.0.1:$PORT}
-  PUBLIC_URL=${PUBLIC_URL:-https://${DOMAIN:-$IP_ADDRESS}}
+  PUBLIC_URL=${PUBLIC_URL:-https://${DOMAIN:-$(host_for_url "$IP_ADDRESS")}}
 else
-  LISTEN=${LISTEN:-0.0.0.0:$PORT}
-  if [[ -z "$PUBLIC_URL" ]]; then
-    IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}')
-    PUBLIC_URL="http://${IP:-127.0.0.1}:${LISTEN##*:}"
+  # Plaintext agent API: default to loopback-only. Exposing it on every
+  # interface is a deliberate choice that needs --listen plus the
+  # --allow-http opt-in (enforced below and by `voltd join`).
+  if [[ -z "$LISTEN" ]]; then
+    if [[ "$ALLOW_HTTP" == 1 ]]; then LISTEN="0.0.0.0:$PORT"; else LISTEN="127.0.0.1:$PORT"; fi
   fi
+  if [[ -z "$PUBLIC_URL" ]]; then
+    if [[ "$LISTEN" == 127.0.0.1:* || "$LISTEN" == \[::1\]:* ]]; then
+      PUBLIC_URL="http://127.0.0.1:${LISTEN##*:}"
+    elif [[ "$LISTEN" == \[* ]]; then
+      IP6=$(ip -6 route get 2001:4860:4860::8888 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}') || IP6=""
+      PUBLIC_URL="http://$(host_for_url "${IP6:-::1}"):${LISTEN##*:}"
+    else
+      IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}') || IP=""
+      PUBLIC_URL="http://${IP:-127.0.0.1}:${LISTEN##*:}"
+    fi
+  fi
+fi
+if [[ "$TLS_MODE" == none && "$LISTEN" != 127.0.0.1:* && "$LISTEN" != \[::1\]:* ]]; then
+  if [[ "$ALLOW_HTTP" != 1 ]]; then
+    die "Refusing to expose the plaintext agent API on all interfaces ($LISTEN). Use --listen 127.0.0.1:$PORT for loopback-only, or pass --allow-http to explicitly opt in to a non-loopback plaintext bind on a trusted network."
+  fi
+  warn "Plaintext agent API on $LISTEN: control traffic is unencrypted and the panel cannot pin a certificate fingerprint. Only use this on a trusted network."
 fi
 if [[ "$TLS_MODE" != none && "$LISTEN" != 127.0.0.1:* && "$LISTEN" != \[::1\]:* ]]; then
   die "TLS proxy origin must listen on loopback (127.0.0.1 or [::1])"
 fi
 validate_url "$PUBLIC_URL"
 
-if [[ $PANEL_URL != https://* && "$PANEL_URL" != http://127.0.0.1* && "$PANEL_URL" != http://localhost* && "$ALLOW_HTTP" != 1 ]]; then
-  die "Panel enrollment must use HTTPS. On a trusted private LAN pass --allow-http explicitly."
+if [[ "$PANEL_URL" != https://* && "$ALLOW_HTTP" != 1 ]]; then
+  if [[ "$PANEL_URL" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost)([:/]|$) ]]; then :; else
+    die "Panel enrollment must use HTTPS. On a trusted private LAN pass --allow-http explicitly."
+  fi
 fi
 
 install_packages
 install_binary voltd
 run install -d -m 0700 "$DATA_DIR" "$DATA_DIR/servers" "$DATA_DIR/logs" "$DATA_DIR/meta" "$CONFIG_DIR"
 
-JOIN_ARGS=(join "$PANEL_URL" "$TOKEN" --public-url "$PUBLIC_URL" --listen "$LISTEN" --data "$DATA_DIR" --config "$CONFIG_DIR/voltd.toml" --no-start)
-JOIN_ARGS+=(--plaintext)
+ROLLBACK_ENABLED=0
+NODE_EXISTING=0; [[ -f "$CONFIG_DIR/voltd.toml" ]] && NODE_EXISTING=1
+rollback_node() {
+  local rc=$?
+  [[ -n "${TMP_COMMON:-}" ]] && rm -f "$TMP_COMMON"
+  [[ "$ROLLBACK_ENABLED" == 1 ]] || return 0
+  warn "Enrollment succeeded but later steps failed; removing the partial install. Re-run with a fresh enrollment token."
+  run rm -f "$CONFIG_DIR/voltd.toml" /etc/systemd/system/voltd.service /usr/local/sbin/voltd-manage /usr/share/voltpanel-node/common.sh
+  if systemctl is-active --quiet voltd 2>/dev/null; then run systemctl disable --now voltd >/dev/null 2>&1 || true; fi
+  run systemctl daemon-reload
+  cleanup_proxy_artifacts node
+  exit "$rc"
+}
+
+# The enrollment token is sensitive: hand it to `voltd join` via VOLTD_TOKEN
+# so it never appears in argv (process listings, audit logs), only in the
+# child's environment. `voltd join` accepts the env fallback when argv has no
+# token (src/bin/voltd.rs).
+JOIN_ARGS=(join "$PANEL_URL" --public-url "$PUBLIC_URL" --listen "$LISTEN" --data "$DATA_DIR" --config "$CONFIG_DIR/voltd.toml" --no-start)
+# --plaintext is passed only when the agent itself will serve plaintext. The
+# agent serves plaintext whenever it terminates no TLS of its own — which is
+# every mode this installer supports: --tls none binds raw http, and the
+# proxied TLS modes (caddy/certbot/certbot-ip/cloudflare) keep the agent as a
+# loopback http origin behind the TLS-terminating proxy (the proxy templates
+# dial http://). A future direct-TLS mode (the agent terminates TLS itself)
+# must NOT pass --plaintext.
+case "$TLS_MODE" in
+  none|caddy|certbot|certbot-ip|cloudflare) JOIN_ARGS+=(--plaintext) ;;
+esac
 [[ "$ALLOW_HTTP" == 1 ]] && JOIN_ARGS+=(--allow-http)
-if [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] /usr/local/bin/voltd ${JOIN_ARGS[*]}"; else /usr/local/bin/voltd "${JOIN_ARGS[@]}"; fi
+trap 'rollback_node' EXIT
 if [[ "$DRY_RUN" == 1 ]]; then
+  http_opt=""; [[ "$ALLOW_HTTP" == 1 ]] && http_opt=" --allow-http"
+  log "[dry-run] enroll: VOLTD_TOKEN=<redacted> /usr/local/bin/voltd join $PANEL_URL --public-url $PUBLIC_URL --listen $LISTEN --data $DATA_DIR --config $CONFIG_DIR/voltd.toml --no-start --plaintext$http_opt"
   log "[dry-run] validate $CONFIG_DIR/voltd.toml with voltd"
 else
+  VOLTD_TOKEN="$TOKEN" /usr/local/bin/voltd "${JOIN_ARGS[@]}"
+  [[ "$NODE_EXISTING" == 0 ]] && ROLLBACK_ENABLED=1
   /usr/local/bin/voltd check-config --config "$CONFIG_DIR/voltd.toml"
 fi
 
 write_file /etc/systemd/system/voltd.service 0644 <<EOF
 [Unit]
 Description=VoltPanel execution agent
+Documentation=https://github.com/HitamLegit6777/voltpanel
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -163,13 +245,18 @@ RuntimeDirectory=voltpanel
 RuntimeDirectoryMode=0750
 Delegate=yes
 NoNewPrivileges=yes
+PrivateDevices=yes
 PrivateTmp=yes
 ProtectHome=yes
+ProtectKernelModules=yes
 ProtectSystem=strict
 ReadWritePaths=$DATA_DIR $CONFIG_DIR /run/voltpanel /sys/fs/cgroup
+# CAP_SYS_ADMIN is REQUIRED: bwrap needs it to mount the sandbox filesystem
+# (tmpfs /dev, bind mounts, netns/cgroup setup). Do not remove it.
 CapabilityBoundingSet=CAP_CHOWN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_KILL
 AmbientCapabilities=CAP_CHOWN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_RAW CAP_KILL
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictSUIDSGID=yes
 LockPersonality=yes
 
 [Install]
@@ -180,8 +267,13 @@ if [[ -f "$SCRIPT_DIR/manage-node.sh" ]]; then run install -m0755 "$SCRIPT_DIR/m
 elif [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] download voltd-manage"
 else curl -fsSL "$VOLTPANEL_RAW/scripts/manage-node.sh" -o /usr/local/sbin/voltd-manage; chmod 0755 /usr/local/sbin/voltd-manage
 fi
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then run install -D -m 0644 "$SCRIPT_DIR/lib/common.sh" /usr/share/voltpanel-node/common.sh
+elif [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] install common.sh -> /usr/share/voltpanel-node/common.sh"
+else run install -d -m 0755 /usr/share/voltpanel-node; curl -fsSL "$VOLTPANEL_RAW/scripts/lib/common.sh" -o /usr/share/voltpanel-node/common.sh; chmod 0644 /usr/share/voltpanel-node/common.sh
+fi
 
 UPSTREAM=$(proxy_upstream "$LISTEN")
+cleanup_proxy_artifacts node
 case "$TLS_MODE" in
   caddy)
     install_caddy
@@ -192,24 +284,27 @@ $TLS_LINE
     encode zstd gzip
     reverse_proxy $UPSTREAM
     header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
     }
 }
 EOF
     configure_caddy_import
-    run systemctl enable --now caddy
     run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-    run systemctl reload caddy
+    if systemctl is-active --quiet caddy 2>/dev/null; then run systemctl reload caddy; else run systemctl enable --now caddy; fi
     ;;
   certbot) configure_certbot_proxy node "$DOMAIN" "$UPSTREAM" "$EMAIL" ;;
   certbot-ip) configure_certbot_ip_proxy node "$IP_ADDRESS" "$UPSTREAM" "$EMAIL" ;;
   cloudflare) configure_cloudflare_proxy node "$DOMAIN" "$UPSTREAM" "$CF_CERT" "$CF_KEY" ;;
 esac
 
-systemctl_reload_start voltd
-firewall_hint node
+# The agent requires HMAC-signed requests on every route, so readiness can only
+# be confirmed by signing with the config secret (node_health_probe in common.sh).
+systemctl_reload_start voltd node_health_probe
+firewall_hint node "$TLS_MODE"
+ROLLBACK_ENABLED=0
 ok "VoltPanel node installed and enrolled"
 printf '\n  Panel:      %s\n  Node URL:   %s\n  Config:     %s/voltd.toml\n  Data:       %s\n\n' "$PANEL_URL" "$PUBLIC_URL" "$CONFIG_DIR" "$DATA_DIR"
 log "Run 'voltd-manage doctor' for diagnostics."

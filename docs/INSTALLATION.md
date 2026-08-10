@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/HitamLegit6777/voltpanel/main/scrip
 sudo bash /tmp/install-panel.sh
 ```
 
-The wizard offers Caddy automatic HTTPS, Certbot with Nginx for a domain, Certbot with Nginx for a public IP, a Cloudflare Origin Certificate, or LAN-only HTTP. The random admin password is printed once. Save it and change it immediately.
+The wizard offers Caddy automatic HTTPS, Certbot with Nginx for a domain, Certbot with Nginx for a public IP, a Cloudflare Origin Certificate, or LAN-only HTTP. The random admin password is printed once. On an existing installation, the wizard switches to a management menu for reinstall, password reset, safe uninstall, or full purge.
 
 For a Cloudflare setup, create an Origin Certificate in Cloudflare, copy its PEM and private key to the host, select **Cloudflare Origin Certificate**, then set the zone SSL/TLS encryption mode to **Full (strict)**. Keep both origin key files private.
 
@@ -57,6 +57,10 @@ Public-IP certificates require a directly reachable IPv4/IPv6 and ports 80 and 4
 ### Unattended installer options
 
 ```text
+--reinstall             Reinstall binary/service; preserve config and data
+--uninstall             Remove application; preserve config and data
+--uninstall --purge     Remove application, config, and data permanently
+--reset-password [USER] Reset a password; default user is admin
 --domain DOMAIN          Public panel domain
 --email EMAIL            ACME contact email
 --tls MODE               caddy, certbot, certbot-ip, cloudflare, or none
@@ -109,17 +113,19 @@ sudo bash /tmp/install-node.sh
 
 The wizard asks for the panel URL and enrollment token and provides the same five TLS modes as the panel installer.
 
+Re-enrolling an installed systemd node requires a new token from **Control Center → Fabric**. Stop `voltd`, run `voltd join PANEL_URL TOKEN --public-url NODE_URL --no-start` with the existing node options, then start the service. Generating the token revokes the old shared secret immediately; the pinned TLS fingerprint is kept, so re-enrolling with the same certificate fingerprint is accepted (a different fingerprint is refused — delete and recreate the node to change it).
+
 ### Private LAN node
 
 ```bash
 sudo bash /tmp/install-node.sh --non-interactive \
-  --panel http://192.168.1.10:8080 \
+  --panel https://panel.example.com \
   --token TOKEN \
-  --public-url http://192.168.1.11:8081 \
-  --allow-http --tls none
+  --public-url https://node.example.com \
+  --tls caddy
 ```
 
-`--allow-http` must only be used on a trusted private network. HMAC protects integrity and authenticity, but only TLS protects console/file/snapshot confidentiality.
+Enrollment requires TLS end to end: the panel must be reachable over positively-TLS transport — native panel TLS, or a trusted TLS-terminating proxy (Caddy/Nginx) in front of the panel — and the node agent must present a certificate fingerprint for the panel to pin. The panel refuses plaintext transport (403) and fingerprint-less enrollments (400), so a private-network node still enrolls over TLS. `--allow-http` no longer permits plaintext enrollment; it only fits loopback-local development.
 
 ### Execution-agent installer options
 
@@ -134,7 +140,7 @@ sudo bash /tmp/install-node.sh --non-interactive \
 --public-url URL         URL stored by the panel
 --port PORT              Internal/direct node port (default 8081)
 --listen ADDRESS         voltd listen address; overrides --port
---allow-http             Explicitly permit non-loopback HTTP enrollment
+--allow-http             Permit --tls none only for loopback-local development (the panel refuses plaintext enrollment)
 --no-caddy               Alias for --tls none
 --non-interactive        Disable the TUI wizard
 --data-dir PATH          Workload data path
@@ -156,14 +162,14 @@ The node should become online in the panel within 15 seconds.
 
 ## Firewall
 
-With Caddy:
+Panel host with Caddy:
 
 ```bash
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-sudo ufw allow 20000:30000/tcp
-sudo ufw allow 20000:30000/udp
 ```
+
+The game-port range (20000-30000) belongs on node hosts, where the panel allocates it per server; it is not needed on the panel host.
 
 Keep 8080/8081 private when reverse-proxied. If a node origin is directly exposed, restrict 8081 to the panel IP.
 

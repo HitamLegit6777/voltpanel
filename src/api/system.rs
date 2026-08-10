@@ -1,18 +1,50 @@
 //! System endpoints: node stats, health, metrics, allocations.
 use super::{data, ok, AdminUser, ApiError, ApiResult, AppState, AuthUser};
-use crate::db;
+use crate::auth;
+use crate::db::blocking;
 use crate::models;
 use crate::services;
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use parking_lot::Mutex;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::json;
 
+// ---- DB execution off the async worker ----
+//
+// Handlers must not run SQLite work on a Tokio worker thread. Module-owned
+// SQL rides `Db::call(|conn| ...)`; pool-based `models`/`nodes` functions
+// (they do their own `pool.get()` and cannot run inside a `db.call` closure
+// without a nested checkout) ride `blocking(...)` on Tokio's blocking pool.
+// One rule: never hold a pooled connection across an `.await`.
+
+/// Node stats rescan every process on the host via sysinfo (tens of ms per
+/// call), so the admin stats endpoint throttles the scan behind a 5s TTL.
+/// The pure `services::node_stats()` is untouched; only this route caches.
+/// The guard is held across the scan: concurrent callers serialize behind the
+/// in-flight computation instead of stampeding N identical scans.
+fn cached_node_stats() -> services::NodeStats {
+    static CACHE: LazyLock<Mutex<Option<(services::NodeStats, Instant)>>> =
+        LazyLock::new(|| Mutex::new(None));
+    let mut cache = CACHE.lock();
+    if let Some((stats, ts)) = cache.as_ref() {
+        if ts.elapsed() < Duration::from_secs(5) {
+            return stats.clone();
+        }
+    }
+    let stats = services::node_stats();
+    *cache = Some((stats.clone(), Instant::now()));
+    stats
+}
+
+
 pub async fn node_stats(
     _state: State<AppState>,
-    _u: AuthUser,
+    _u: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let s = services::node_stats();
+    let s = cached_node_stats();
     Ok(Json(json!({
         "cpu": {
             "frequency_mhz": s.cpu_total,
@@ -36,10 +68,15 @@ pub async fn node_stats(
 
 pub async fn health(
     State(state): State<AppState>,
-    _u: AuthUser,
+    _u: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let integrity = db::integrity_check(&state.db).unwrap_or_else(|_| "unknown".into());
-    let server_count = models::count_servers(&state.db).unwrap_or(-1);
+    let (integrity, server_count) = blocking(state.db.clone(), move |db| {
+        Ok((
+            crate::db::integrity_check(&db).unwrap_or_else(|_| "unknown".into()),
+            models::count_servers(&db).unwrap_or(-1),
+        ))
+    })
+    .await?;
     let isolation = crate::isolation::probe(&crate::isolation::IsolationConfig::default());
     Ok(Json(json!({
         "status": if integrity == "ok" && isolation.secure { "ok" } else { "degraded" },
@@ -74,26 +111,33 @@ pub struct PortRangeQuery {
 /// Find free ports in a range (allocation table aware).
 pub async fn free_ports(
     State(state): State<AppState>,
-    _u: AuthUser,
+    _a: AdminUser,
     Query(q): Query<PortRangeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let start = q.start.unwrap_or(20000);
     let end = q.end.unwrap_or(30000);
-    let conn = state.db.lock();
-    let used: Vec<i64> = {
-        let mut stmt = conn.prepare("SELECT port FROM allocations")?;
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-        let mut v = Vec::new();
-        for r in rows {
-            v.push(r?);
-        }
-        v
-    };
-    drop(conn);
+    if start < 1 || end > 65_535 || start > end || end - start > 10_000 {
+        return Err(ApiError::bad_request(
+            "port range must be ordered, within 1..=65535, and at most 10001 ports",
+        ));
+    }
+    let used: Vec<i64> = state
+        .db
+        .call(move |conn| {
+            let mut stmt = conn.prepare("SELECT port FROM allocations")?;
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r?);
+            }
+            Ok(v)
+        })
+        .await?;
     let used_set: std::collections::HashSet<i64> = used.into_iter().collect();
+    let host_used = host_ports_in_use();
     let mut free = Vec::new();
     for p in start..=end {
-        if !used_set.contains(&p) && !port_in_use(p) {
+        if !used_set.contains(&p) && !host_used.contains(&p) {
             free.push(p);
         }
         if free.len() >= 20 {
@@ -103,43 +147,58 @@ pub async fn free_ports(
     Ok(data(json!(free)))
 }
 
-fn port_in_use(port: i64) -> bool {
+fn host_ports_in_use() -> std::collections::HashSet<i64> {
     use std::io::Read;
-    // check /proc/net/tcp + tcp6 quickly
-    for f in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        if let Ok(mut file) = std::fs::File::open(f) {
-            let mut s = String::new();
-            if file.read_to_string(&mut s).is_ok() {
-                let hex_port = format!("{:04X}", port);
-                for line in s.lines().skip(1) {
-                    let fields: Vec<&str> = line.split_whitespace().collect();
-                    if fields.len() > 1 && fields[1].ends_with(&hex_port) {
-                        return true;
-                    }
-                }
+    let mut ports = std::collections::HashSet::new();
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(mut file) = std::fs::File::open(path) else {
+            continue;
+        };
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() {
+            continue;
+        }
+        for line in text.lines().skip(1) {
+            let Some(local) = line.split_whitespace().nth(1) else {
+                continue;
+            };
+            let Some(port_hex) = local.rsplit(':').next() else {
+                continue;
+            };
+            if let Ok(port) = i64::from_str_radix(port_hex, 16) {
+                ports.insert(port);
             }
         }
     }
-    false
+    ports
+}
+
+pub(crate) fn port_in_use(port: i64) -> bool {
+    host_ports_in_use().contains(&port)
 }
 
 pub async fn allocations(
     State(state): State<AppState>,
-    _u: AuthUser,
+    _a: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let conn = state.db.lock();
-    let mut stmt = conn.prepare("SELECT a.server_id, a.port, s.name FROM allocations a LEFT JOIN servers s ON s.id=a.server_id ORDER BY a.port")?;
-    let rows = stmt.query_map([], |r| {
-        Ok(json!({
-            "server_id": r.get::<_, i64>(0)?,
-            "port": r.get::<_, i64>(1)?,
-            "server": r.get::<_, Option<String>>(2)?,
-        }))
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
+    let out: Vec<serde_json::Value> = state
+        .db
+        .call(move |conn| {
+            let mut stmt = conn.prepare("SELECT a.server_id, a.port, s.name FROM allocations a LEFT JOIN servers s ON s.id=a.server_id ORDER BY a.port")?;
+            let rows = stmt.query_map([], |r| {
+                Ok(json!({
+                    "server_id": r.get::<_, i64>(0)?,
+                    "port": r.get::<_, i64>(1)?,
+                    "server": r.get::<_, Option<String>>(2)?,
+                }))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await?;
     Ok(data(json!(out)))
 }
 
@@ -148,12 +207,17 @@ pub async fn assign_port(
     _a: AdminUser,
     Path((server_id, port)): Path<(i64, i64)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    models::get_server(&state.db, server_id)
+    blocking(state.db.clone(), move |db| models::get_server(&db, server_id))
+        .await
         .map_err(|_| ApiError::not_found("server not found"))?;
     if port_in_use(port) {
         return Err(ApiError::bad_request("port already in use on host"));
     }
-    models::allocate_port(&state.db, server_id, port)?;
+    blocking(state.db.clone(), move |db| {
+        models::allocate_port(&db, server_id, port)
+    })
+    .await
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
     Ok(ok(json!({ "ok": true })))
 }
 
@@ -162,11 +226,25 @@ pub async fn remove_port(
     _a: AdminUser,
     Path((server_id, port)): Path<(i64, i64)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let conn = state.db.lock();
-    conn.execute(
-        "DELETE FROM allocations WHERE server_id=?1 AND port=?2",
-        rusqlite::params![server_id, port],
-    )?;
+    // Route through the allocation machinery instead of a bare DELETE: the
+    // primary port is guarded (a workload would lose the port it runs on) and
+    // a missing allocation is a 404, not a silent no-op.
+    let alloc = blocking(state.db.clone(), move |db| {
+        models::list_allocations(&db, server_id)
+    })
+    .await?
+    .into_iter()
+    .find(|a| a.port == port)
+    .ok_or_else(|| ApiError::not_found("allocation not found"))?;
+    if alloc.is_primary {
+        return Err(ApiError::conflict(
+            "cannot remove the primary allocation; promote another port first",
+        ));
+    }
+    blocking(state.db.clone(), move |db| {
+        models::remove_allocation(&db, alloc.id)
+    })
+    .await?;
     Ok(ok(json!({ "ok": true })))
 }
 
@@ -174,20 +252,25 @@ pub async fn rate_limits_status(
     State(state): State<AppState>,
     _a: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let conn = state.db.lock();
-    let mut stmt = conn
-        .prepare("SELECT key, window_start, count FROM rate_limits ORDER BY count DESC LIMIT 50")?;
-    let rows = stmt.query_map([], |r| {
-        Ok(json!({
-            "key": r.get::<_, String>(0)?,
-            "window_start": r.get::<_, i64>(1)?,
-            "count": r.get::<_, i64>(2)?,
-        }))
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
+    let out: Vec<serde_json::Value> = state
+        .db
+        .call(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT key, window_start, count FROM rate_limits ORDER BY count DESC LIMIT 50")?;
+            let rows = stmt.query_map([], |r| {
+                Ok(json!({
+                    "key": r.get::<_, String>(0)?,
+                    "window_start": r.get::<_, i64>(1)?,
+                    "count": r.get::<_, i64>(2)?,
+                }))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await?;
     Ok(data(json!(out)))
 }
 
@@ -195,7 +278,8 @@ pub async fn reset_rate_limits(
     State(state): State<AppState>,
     _a: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    models::reset_rate_limits(&state.db)?;
+    blocking(state.db.clone(), move |db| models::reset_rate_limits(&db)).await?;
+    auth::reset_rate_limits();
     Ok(ok(json!({ "ok": true })))
 }
 
@@ -214,24 +298,59 @@ pub async fn set_server_limits(
     Path(server_id): Path<i64>,
     Json(req): Json<LimitOverride>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let s = models::get_server(&state.db, server_id)
+    let s = blocking(state.db.clone(), move |db| models::get_server(&db, server_id))
+        .await
         .map_err(|_| ApiError::not_found("server not found"))?;
+    if req.memory_mb == Some(0) {
+        return Err(ApiError::bad_request(
+            "memory limit must be positive (0 would disable the cap)",
+        ));
+    }
+    if req.cpu_percent == Some(0) {
+        return Err(ApiError::bad_request("cpu limit must be positive"));
+    }
+    let mut memory_mb = req.memory_mb.unwrap_or(s.memory_mb as u64);
+    // Floor the memory cap at what the workload is live-using right now: a cap
+    // below current usage would OOM-kill on the next enforcement tick. Best
+    // effort — an unreachable agent or a raced read keeps the requested cap.
+    let live_mem_mb: u64 = if s.node != "local" {
+        let node_name = s.node.clone();
+        match blocking(state.db.clone(), move |db| {
+            crate::nodes::get_by_name(&db, &node_name)
+        })
+        .await
+        {
+            Ok(node) => state
+                .node_client
+                .stats(&node, &s.uuid)
+                .await
+                .map(|i| i.memory_bytes / 1_048_576)
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
+    } else {
+        state.procs.info(&s).memory_bytes / 1_048_576
+    };
+    memory_mb = memory_mb.max(live_mem_mb);
     state.monitor.set_limit(services::ServerLimits {
         server_id,
-        memory_mb: req.memory_mb.unwrap_or(s.memory_mb as u64),
+        memory_mb,
         cpu_percent: req.cpu_percent.unwrap_or(s.cpu_percent as u64),
         bandwidth_rx: req.bandwidth_rx.unwrap_or(0),
         bandwidth_tx: req.bandwidth_tx.unwrap_or(0),
     });
-    Ok(ok(json!({ "ok": true })))
+    Ok(ok(json!({ "ok": true, "memory_mb": memory_mb })))
 }
 
 /// Websocket-less live stats polling helper endpoint.
 pub async fn live_stats(
     State(state): State<AppState>,
-    _u: AuthUser,
+    _a: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let servers = models::list_servers(&state.db, None, false)?;
+    let servers = blocking(state.db.clone(), move |db| {
+        models::list_servers(&db, None, false)
+    })
+    .await?;
     let out: Vec<serde_json::Value> = servers
         .iter()
         .map(|s| {
@@ -247,4 +366,39 @@ pub async fn live_stats(
         })
         .collect();
     Ok(data(json!(out)))
+}
+
+/// Grantable capability surface and the role presets built from it.
+///
+/// `capability.rs` documents this route as the discovery endpoint for
+/// `describe()`; subuser editors read it instead of hardcoding the enum.
+pub async fn capabilities(
+    State(_state): State<AppState>,
+    _u: AuthUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    use crate::capability::{Capability, Role};
+    let caps: Vec<serde_json::Value> = Capability::ALL
+        .into_iter()
+        .map(|c| {
+            json!({
+                "name": c.as_str(),
+                "group": c.category(),
+                "description": c.describe(),
+            })
+        })
+        .collect();
+    let roles: Vec<serde_json::Value> = Role::ALL
+        .into_iter()
+        .map(|r| {
+            json!({
+                "name": r.as_str(),
+                "capabilities": r
+                    .capabilities()
+                    .into_iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(data(json!({ "capabilities": caps, "roles": roles })))
 }

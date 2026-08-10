@@ -52,11 +52,17 @@ pub enum Capability {
     SubusersRead,
     #[serde(rename = "subusers.write")]
     SubusersWrite,
+    #[serde(rename = "allocation.read")]
+    AllocationRead,
+    #[serde(rename = "allocation.write")]
+    AllocationWrite,
+    #[serde(rename = "activity.read")]
+    ActivityRead,
 }
 
 impl Capability {
     /// Every capability, in stable presentation order.
-    pub const ALL: [Capability; 19] = [
+    pub const ALL: [Capability; 22] = [
         Capability::ControlStart,
         Capability::ControlStop,
         Capability::ControlRestart,
@@ -76,6 +82,9 @@ impl Capability {
         Capability::StartupSecrets,
         Capability::SubusersRead,
         Capability::SubusersWrite,
+        Capability::AllocationRead,
+        Capability::AllocationWrite,
+        Capability::ActivityRead,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -99,6 +108,9 @@ impl Capability {
             Capability::StartupSecrets => "startup.secrets",
             Capability::SubusersRead => "subusers.read",
             Capability::SubusersWrite => "subusers.write",
+            Capability::AllocationRead => "allocation.read",
+            Capability::AllocationWrite => "allocation.write",
+            Capability::ActivityRead => "activity.read",
         }
     }
 
@@ -118,6 +130,8 @@ impl Capability {
                 "startup"
             }
             Capability::SubusersRead | Capability::SubusersWrite => "subusers",
+            Capability::AllocationRead | Capability::AllocationWrite => "allocation",
+            Capability::ActivityRead => "activity",
         }
     }
 
@@ -143,6 +157,9 @@ impl Capability {
             Capability::StartupSecrets => "Reveal hidden launch inputs",
             Capability::SubusersRead => "View team members",
             Capability::SubusersWrite => "Manage team members",
+            Capability::AllocationRead => "View this server's allocations",
+            Capability::AllocationWrite => "Add, promote, edit and detach allocations",
+            Capability::ActivityRead => "View this server's activity feed",
         }
     }
 }
@@ -218,6 +235,8 @@ impl Role {
             C::BackupsRead,
             C::ScheduleRead,
             C::DatabaseRead,
+            C::AllocationRead,
+            C::ActivityRead,
         ]);
         if matches!(self, Role::Operator | Role::Developer | Role::Manager) {
             set.extend([
@@ -234,6 +253,7 @@ impl Role {
                 C::ScheduleWrite,
                 C::StartupUpdate,
                 C::SubusersRead,
+                C::AllocationWrite,
             ]);
         }
         if self == Role::Manager {
@@ -270,6 +290,23 @@ impl FromStr for Role {
     }
 }
 
+/// Error returned when minting a grant that includes a capability the
+/// grantor does not hold (see [`Grant::checked_new`]).
+#[derive(Debug, Clone)]
+pub struct CannotGrant(pub Capability);
+
+impl fmt::Display for CannotGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "cannot grant a capability the grantor does not hold: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for CannotGrant {}
+
 /// An effective grant: a role preset plus any extra explicit capabilities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
@@ -279,12 +316,35 @@ pub struct Grant {
 
 impl Grant {
     /// Build from a role, unioning the preset with `extra`.
+    ///
+    /// INVARIANT: `extra` may only contain capabilities the caller is allowed
+    /// to delegate — a grant is authority minted for another member. The model
+    /// cannot see the grantor, so subset enforcement lives at the boundary;
+    /// [`Grant::checked_new`] is the model-side guard for callers that hold
+    /// the grantor.
     pub fn new(role: Role, extra: impl IntoIterator<Item = Capability>) -> Self {
         let mut caps = role.capabilities();
         caps.extend(extra);
         Self { role, caps }
     }
 
+    /// Mint a grant on behalf of `grantor`, refusing any capability (preset
+    /// or extra) the grantor does not hold. Fail-closed: returns the first
+    /// offending capability rather than silently minting it.
+    pub fn checked_new(
+        grantor: &Grant,
+        role: Role,
+        extra: impl IntoIterator<Item = Capability>,
+    ) -> Result<Self, CannotGrant> {
+        let grant = Self::new(role, extra);
+        if let Some(over) = grant.caps.iter().find(|c| !grantor.caps.contains(c)) {
+            return Err(CannotGrant(*over));
+        }
+        Ok(grant)
+    }
+
+    /// Explicit capability list with no role preset. Callers must pass a
+    /// pre-filtered (scoped) set — see `models::server_grant`.
     pub fn custom(caps: impl IntoIterator<Item = Capability>) -> Self {
         Self {
             role: Role::Custom,
@@ -314,14 +374,47 @@ impl Grant {
 
     /// Serialize the capability set as the JSON array stored in `subusers.permissions`.
     pub fn to_json(&self) -> String {
-        serde_json::to_string(&self.names()).unwrap_or_else(|_| "[]".into())
+        serde_json::to_string(&self.names()).unwrap_or_else(|e| {
+            tracing::warn!("grant to_json serialization failed: {e}; storing empty permission set");
+            "[]".into()
+        })
     }
 
     /// Parse a stored capability array, tolerating pre-v6 legacy tokens.
+    ///
+    /// The effective grant is the role preset unioned with the stored extras.
+    /// Fail-closed on bad rows: a malformed JSON payload logs a warning and
+    /// yields no stored extras, a legacy `*` wildcard expands to nothing on
+    /// live reads (only the one-time DB migration in `db.rs` may consume it),
+    /// and an unknown role logs a warning and falls back to `Role::Custom`
+    /// (no preset) rather than silently widening.
     pub fn from_stored(role: &str, raw: &str) -> Self {
-        let tokens: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
-        let caps = expand_legacy(&tokens);
-        let role = Role::from_str(role).unwrap_or(Role::Custom);
+        let tokens: Vec<String> = match serde_json::from_str(raw) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                tracing::warn!(
+                    "stored grant has malformed permissions {raw:?}: {e}; ignoring stored extras"
+                );
+                Vec::new()
+            }
+        };
+        let role = match Role::from_str(role) {
+            Ok(role) => role,
+            Err(e) => {
+                tracing::warn!("stored grant has unknown role {role:?}: {e}; denying role preset");
+                Role::Custom
+            }
+        };
+        let stored = if tokens.iter().any(|t| t.trim() == "*") {
+            tracing::warn!(
+                "stored grant for role {role:?} contains legacy wildcard '*'; denying stored extras"
+            );
+            BTreeSet::new()
+        } else {
+            expand_legacy(&tokens)
+        };
+        let mut caps = role.capabilities();
+        caps.extend(stored);
         Self { role, caps }
     }
 }
@@ -368,6 +461,10 @@ pub fn expand_legacy(tokens: &[String]) -> BTreeSet<Capability> {
             "database" | "databases" => out.extend([C::DatabaseRead, C::DatabaseWrite]),
             "startup" => out.extend([C::StartupUpdate, C::StartupInstall, C::StartupSecrets]),
             "subusers" => out.extend([C::SubusersRead, C::SubusersWrite]),
+            "allocation" | "allocations" => out.extend([C::AllocationRead, C::AllocationWrite]),
+            "activity" => {
+                out.insert(C::ActivityRead);
+            }
             _ => {}
         }
     }
@@ -390,9 +487,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wildcard_expands_to_every_capability() {
-        let caps = expand_legacy(&["*".to_string()]);
-        assert_eq!(caps.len(), Capability::ALL.len());
+    fn wildcard_is_denied_on_live_reads() {
+        // `*` is a legacy/poisoned wildcard: from_stored must not expand it
+        // to the full capability set — only the one-time DB migration in
+        // db.rs may consume it, via expand_legacy.
+        let grant = Grant::from_stored("viewer", r#"["*"]"#);
+        assert_eq!(
+            grant.capabilities().collect::<BTreeSet<_>>(),
+            Role::Viewer.capabilities()
+        );
+        assert!(!grant.contains(Capability::ControlStart));
+        // The migration path still honors the wildcard.
+        assert_eq!(expand_legacy(&["*".to_string()]).len(), Capability::ALL.len());
     }
 
     #[test]
@@ -401,6 +507,21 @@ mod tests {
         assert!(caps.contains(&Capability::ControlKill));
         assert!(caps.contains(&Capability::FilesWrite));
         assert!(!caps.contains(&Capability::BackupsWrite));
+    }
+
+    #[test]
+    fn widened_groups_expand_from_legacy_tokens() {
+        let caps = expand_legacy(&["allocation".into(), "activity".into()]);
+        assert!(caps.contains(&Capability::AllocationRead));
+        assert!(caps.contains(&Capability::AllocationWrite));
+        assert!(caps.contains(&Capability::ActivityRead));
+        // Bare categories expand only their own group, not unrelated ones.
+        assert!(!caps.contains(&Capability::ControlStart));
+        assert!(!caps.contains(&Capability::FilesRead));
+        // The wire names round-trip through FromStr like every capability.
+        for wire in ["allocation.read", "allocation.write", "activity.read"] {
+            assert_eq!(Capability::from_str(wire).unwrap().as_str(), wire);
+        }
     }
 
     #[test]
@@ -440,6 +561,66 @@ mod tests {
         let restored = Grant::from_stored(grant.role.as_str(), &grant.to_json());
         assert_eq!(grant, restored);
         assert!(restored.contains(Capability::BackupsWrite));
+    }
+
+    #[test]
+    fn from_stored_unions_role_preset_with_stored_extras() {
+        let grant = Grant::from_stored("developer", r#"["backups.write"]"#);
+        assert!(grant.contains(Capability::ControlStart)); // developer preset
+        assert!(grant.contains(Capability::FilesWrite)); // developer preset
+        assert!(grant.contains(Capability::BackupsWrite)); // stored extra
+    }
+
+    #[test]
+    fn from_stored_unknown_role_is_denied_not_silent() {
+        let grant = Grant::from_stored("sysadmin", r#"["files.read"]"#);
+        assert_eq!(grant.role, Role::Custom);
+        // Stored extras survive; the unknowable preset is not granted.
+        assert!(grant.contains(Capability::FilesRead));
+        assert!(!grant.contains(Capability::ControlStart));
+    }
+
+    #[test]
+    fn from_stored_malformed_json_yields_no_stored_extras() {
+        let grant = Grant::from_stored("operator", "not json");
+        assert_eq!(
+            grant.capabilities().collect::<BTreeSet<_>>(),
+            Role::Operator.capabilities()
+        );
+    }
+
+    #[test]
+    fn checked_new_refuses_capabilities_the_grantor_does_not_hold() {
+        let grantor = Grant::new(Role::Developer, []);
+        let ok = Grant::checked_new(&grantor, Role::Viewer, [Capability::FilesRead]).unwrap();
+        assert!(ok.contains(Capability::FilesRead));
+        assert!(ok.contains(Capability::ConsoleRead)); // viewer preset, held by grantor
+        let over = Grant::checked_new(&grantor, Role::Viewer, [Capability::BackupsWrite]).unwrap_err();
+        assert_eq!(over.0, Capability::BackupsWrite);
+        // A preset wider than the grantor's is refused too.
+        let over = Grant::checked_new(&grantor, Role::Manager, []).unwrap_err();
+        assert_eq!(over.0, Capability::ControlKill);
+    }
+
+    #[test]
+    fn capability_catalog_is_complete_and_consistent() {
+        // ALL, as_str, category and describe are maintained in lockstep; the
+        // match arms are compiler-exhaustive, so this guards ALL's
+        // completeness plus the wire-name round-trip for every variant.
+        assert_eq!(
+            Capability::ALL.len(),
+            22,
+            "a Capability variant was added without updating Capability::ALL"
+        );
+        let mut names = BTreeSet::new();
+        for cap in Capability::ALL {
+            let name = cap.as_str();
+            assert!(names.insert(name), "duplicate wire name {name}");
+            assert_eq!(Capability::from_str(name).unwrap(), cap);
+            assert!(!cap.category().is_empty());
+            assert!(!cap.describe().is_empty());
+            assert_eq!(serde_json::to_string(&cap).unwrap(), format!("\"{name}\""));
+        }
     }
 
     #[test]

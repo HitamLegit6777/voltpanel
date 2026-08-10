@@ -17,13 +17,14 @@ Execution agents can be in different locations as long as panel↔node HTTPS con
 4. The node receives its UUID and signing secret
 5. Heartbeats update node status and capacity every 15 seconds
 
-Enrollment tokens are single-use. Non-loopback HTTP enrollment is refused unless `--allow-http` is explicit.
+Enrollment tokens are single-use. Enrollment requires TLS end to end: the panel refuses enrollment over plaintext transport (403) and refuses enrollments without a pinned certificate fingerprint (400), so `--allow-http` no longer permits plaintext enrollment.
 
 ## Signed protocol
 
 Every panel↔node request contains:
 
 ```text
+NODE_ID
 METHOD
 PATH
 TIMESTAMP
@@ -37,6 +38,19 @@ The canonical string is signed using HMAC-SHA256. Both sides reject:
 - Reused nonces
 - Modified bodies or paths
 - Wrong node identity
+
+Responses are signed the same way. The agent echoes the request's nonce and signs
+
+```text
+NODE_ID
+METHOD
+PATH
+STATUS
+NONCE
+SHA256(BODY)
+```
+
+appending `signature` and the echoed `nonce` to the envelope; the panel verifies a response before trusting its contents. An agent predating response signing returns an unsigned envelope, which the panel accepts with a per-node warning until the fleet is upgraded. A signature that is present but malformed, echoes the wrong nonce, or fails the MAC is rejected outright.
 
 Keep NTP active on every machine:
 
@@ -116,15 +130,19 @@ Before maintenance:
 5. Run `voltd-manage doctor`
 6. Re-enable scheduling
 
-## Secret rotation
+## Secret rotation and re-enrollment
 
-Rotating a secret invalidates the agent's current secret. For safe rotation:
+Both **Rotate secret** and **Generate enrollment token** revoke the current shared secret immediately, mark the node unenrolled, and return a new single-use enrollment token. Existing HMAC requests stop authenticating until the agent completes enrollment again. Rotation keeps the node's pinned TLS fingerprint.
 
-1. Stop new provisioning
-2. Generate a new enrollment token
-3. Run `voltd join ... --no-start` again on the node
-4. Restart `voltd`
-5. Test connectivity
+For a systemd-managed agent:
+
+1. Stop new provisioning and place the node in maintenance mode.
+2. Rotate the secret or generate a new enrollment token in **Control Center → Fabric**; retain the returned token.
+3. Run `sudo systemctl stop voltd` on the node.
+4. Run `voltd join PANEL_URL TOKEN --public-url NODE_URL --no-start` with the node's existing listen, data, and config options. Enrollment requires TLS (the panel refuses plaintext transport and fingerprint-less enrollments), so re-enroll with the node's existing certificate material; re-enrolling with the SAME fingerprint is accepted.
+5. Run `sudo systemctl start voltd`, test connectivity, then leave maintenance mode.
+
+Successful enrollment mints the agent's new shared secret and returns the new enrollment token. Re-enrolling with a DIFFERENT fingerprint than the pinned one is refused — delete and recreate the node to change it. Reusing the token is rejected.
 
 ## Capacity planning
 

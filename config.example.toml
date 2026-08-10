@@ -5,15 +5,16 @@
 instance_name = "VoltPanel"
 # locale: en / id
 locale = "en"
-timezone = "UTC"
 # Base data directory (absolute or relative to cwd)
 data_dir = "./data"
 log_level = "info"
+# Days of audit history to keep. Pruned probabilistically (~1/1000 writes);
+# the newest ~500 entries are always retained.
+audit_retention_days = 90
 
 [web]
 # Bind address. For public access use 0.0.0.0:8080 behind a reverse proxy.
 listen = "127.0.0.1:8080"
-base_path = "/"
 session_ttl_hours = 24
 max_body_mb = 64
 # Serve HTTPS with a self-signed certificate stored in <data_dir>/tls.
@@ -23,6 +24,14 @@ tls_self_signed = false
 # Extra hostnames/IPs to include in that certificate (the local hostname and
 # loopback addresses are always included).
 tls_extra_sans = []
+# Reverse proxies allowed to set X-Forwarded-For / X-Forwarded-Proto
+# (CIDR list, e.g. ["127.0.0.1", "10.0.0.0/8"]). Empty means the socket
+# peer address is always authoritative and forwarded headers are ignored.
+trusted_proxies = []
+# Extra browser origins (scheme://host[:port]) allowed for cookie-authenticated
+# mutations. Empty keeps the default same-host rule only. Use https:// entries
+# when TLS is enabled.
+allowed_origins = []
 
 [paths]
 servers_dir = "servers"
@@ -30,6 +39,10 @@ backups_dir = "backups"
 blueprints_dir = "blueprints"
 logs_dir = "logs"
 website_dir = "websites"
+# Data Lab SQLite storage. Kept outside servers_dir on purpose: a server root
+# is bind-mounted into the workload sandbox and owned by the workload UID, so
+# databases stored under it are workload-writable.
+datalab_dir = "datalab"
 
 [limits]
 default_memory_mb = 1024
@@ -41,12 +54,8 @@ max_servers_per_user = 16
 [security]
 argon2_cost = 3
 argon2_mem_kib = 65536
-# Change this! Used to sign session tokens.
-jwt_secret = "CHANGE_ME_to_a_long_random_string"
 rate_limit_per_min = 120
 password_min_len = 8
-# System user to drop privileges to when spawning game servers.
-userland = "nobody"
 allow_cross_server_dir = false
 
 [features]

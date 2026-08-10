@@ -1,6 +1,7 @@
 //! API key endpoints (bearer-token style access keys).
 use super::{data, ok, ApiError, ApiResult, AppState, AuthUser};
 use crate::capability::Capability;
+use crate::db::blocking;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -11,7 +12,11 @@ pub async fn list(
     State(state): State<AppState>,
     AuthUser(u): AuthUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let keys = crate::services::keys::list(&state.db, u.id)?;
+    let uid = u.id;
+    let keys = blocking(state.db.clone(), move |db| {
+        crate::services::keys::list(&db, uid)
+    })
+    .await?;
     Ok(data(json!(keys)))
 }
 
@@ -31,32 +36,58 @@ pub async fn create(
     AuthUser(u): AuthUser,
     Json(req): Json<CreateReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    for c in req.capabilities.iter().flatten() {
+    let caps_vec = req.capabilities.clone().unwrap_or_default();
+    let caps: &[String] = &caps_vec;
+    if caps.is_empty() {
+        return Err(ApiError::bad_request("at least one capability is required"));
+    }
+    for c in caps {
         if c != "*" && Capability::from_str(c).is_err() {
             return Err(ApiError::bad_request(format!("unknown capability: {c}")));
         }
     }
-    // the raw token is shown exactly once; the service stores only its hash
-    let (id, raw) = crate::services::keys::create(
-        &state.db,
-        u.id,
-        &req.name,
-        req.capabilities.as_deref().unwrap_or(&[]),
-        req.server_ids.as_deref().unwrap_or(&[]),
-        req.ttl_days,
-    )?;
-    Ok(Json(json!({ "id": id, "token": raw, "name": req.name })))
+    if let Some(days) = req.ttl_days {
+        if days <= 0 {
+            return Err(ApiError::bad_request("ttl_days must be positive"));
+        }
+        if days > crate::services::keys::MAX_TTL_DAYS {
+            return Err(ApiError::bad_request(format!(
+                "ttl_days exceeds the {}-day maximum",
+                crate::services::keys::MAX_TTL_DAYS
+            )));
+        }
+    }
+    let uid = u.id;
+    let name = req.name.clone();
+    let name2 = name.clone();
+    let server_ids = req.server_ids.clone().unwrap_or_default();
+    let ttl_days = req.ttl_days;
+    let (id, raw) = blocking(state.db.clone(), move |db| {
+        crate::services::keys::create(
+            &db,
+            uid,
+            &name,
+            caps_vec.as_slice(),
+            &server_ids,
+            ttl_days,
+        )
+    })
+    .await?;
+    Ok(Json(json!({ "id": id, "token": raw, "name": name2 })))
 }
 
-/// Confirm the caller owns the key (or is admin) before revoke/delete.
-fn check_owner(state: &AppState, user_id: i64, root_admin: bool, id: i64) -> ApiResult<()> {
-    let conn = state.db.lock();
-    let owner: Option<i64> = conn
-        .query_row("SELECT user_id FROM api_keys WHERE id=?1", [id], |r| {
-            r.get(0)
+async fn check_owner(state: &AppState, user_id: i64, root_admin: bool, id: i64) -> ApiResult<()> {
+    let owner: Option<i64> = state
+        .db
+        .call(move |conn| {
+            Ok::<_, anyhow::Error>(
+                conn.query_row("SELECT user_id FROM api_keys WHERE id=?1", [id], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .ok(),
+            )
         })
-        .ok();
-    drop(conn);
+        .await?;
     if owner != Some(user_id) && !root_admin {
         return Err(ApiError::forbidden("not your key"));
     }
@@ -68,8 +99,12 @@ pub async fn revoke(
     AuthUser(u): AuthUser,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    check_owner(&state, u.id, u.root_admin, id)?;
-    crate::services::keys::revoke(&state.db, id)?;
+    check_owner(&state, u.id, u.root_admin, id).await?;
+    let kid = id;
+    blocking(state.db.clone(), move |db| {
+        crate::services::keys::revoke(&db, kid)
+    })
+    .await?;
     Ok(ok(json!({ "ok": true })))
 }
 
@@ -78,7 +113,11 @@ pub async fn delete(
     AuthUser(u): AuthUser,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    check_owner(&state, u.id, u.root_admin, id)?;
-    crate::services::keys::delete(&state.db, id)?;
+    check_owner(&state, u.id, u.root_admin, id).await?;
+    let kid = id;
+    blocking(state.db.clone(), move |db| {
+        crate::services::keys::delete(&db, kid)
+    })
+    .await?;
     Ok(ok(json!({ "ok": true })))
 }
