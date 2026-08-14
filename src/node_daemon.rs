@@ -547,7 +547,7 @@ impl DaemonRuntime {
         } else {
             spec.ports.clone()
         };
-        let network = match crate::isolation::NetworkLease::configure(pid, uuid, &ports) {
+        let network = match crate::isolation::NetworkLease::configure(pid, uuid, &ports, spec.network_mbps) {
             Ok(value) => value,
             Err(error) => {
                 reap_failed_spawn(cgroup, child);
@@ -817,6 +817,7 @@ impl DaemonRuntime {
             .map(|i| i.elapsed().as_secs())
             .unwrap_or(0);
         let exit_code = *proc.exit_code.lock();
+        let usage = crate::isolation::network_usage(uuid);
         Ok(RemoteServerStats {
             uuid: uuid.into(),
             state,
@@ -824,8 +825,10 @@ impl DaemonRuntime {
             cpu_percent: cpu,
             memory_bytes: memory,
             disk_bytes: cached_dir_size(&proc, &self.server_root(uuid)?),
-            network_rx_bytes: proc.rx_bytes.load(Ordering::Relaxed),
-            network_tx_bytes: proc.tx_bytes.load(Ordering::Relaxed),
+            // Real host-veth traffic counters; the console rx/tx atomics are
+            // pty-pipe byte counts (stdin/stdout), not network bandwidth.
+            network_rx_bytes: usage.0,
+            network_tx_bytes: usage.1,
             uptime_secs,
             restart_count: proc.restart_count.load(Ordering::Relaxed),
             exit_code,
@@ -901,7 +904,7 @@ impl DaemonRuntime {
         &self,
         uuid: &str,
         operation: crate::node_protocol::FileOperation,
-    ) -> Result<bool> {
+    ) -> Result<serde_json::Value> {
         use crate::node_protocol::FileOperation;
         let root = self.server_root(uuid)?;
         match operation {
@@ -924,9 +927,237 @@ impl DaemonRuntime {
             }
             FileOperation::Delete { path } => secure_delete(&root, &path)?,
             FileOperation::Chmod { path, mode } => secure_chmod(&root, &path, mode)?,
+            FileOperation::Archive { paths, format } => {
+                let (rel, size) = Self::archive_files(&root, &paths, &format)?;
+                return Ok(serde_json::json!({ "path": rel, "size": size }));
+            }
+            FileOperation::Extract { archive, dest } => {
+                Self::extract_archive(&root, &archive, &dest)?;
+                return Ok(serde_json::json!(true));
+            }
         }
-        Ok(true)
+        Ok(serde_json::json!(true))
     }
+
+/// Archive one or more paths (files and/or directories) into a sibling zip or
+/// tar.gz. Returns the archive's server-relative path and uncompressed byte
+/// total. Symlinks are never followed.
+fn archive_files(root: &Path, paths: &[String], format: &str) -> Result<(String, u64)> {
+    for p in paths {
+        Self::validate_relative(p)?;
+    }
+    let ext = if format == "tar.gz" { "tar.gz" } else { "zip" };
+    let first = paths.first().map(|s| s.as_str()).unwrap_or("/");
+    let out_name = if paths.len() == 1 {
+        let base = Path::new(first)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "archive".into());
+        format!("{base}.{ext}")
+    } else {
+        format!("archive.{ext}")
+    };
+    let out_rel = Self::sibling_of(first, &out_name);
+    let out_abs = root.join(out_rel.trim_start_matches('/'));
+    if let Some(parent) = out_abs.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let size = if ext == "zip" {
+        Self::zip_paths_to(root, paths, &out_abs)?
+    } else {
+        Self::tar_gz_paths_to(root, paths, &out_abs)?
+    };
+    Ok((out_rel, size))
+}
+
+fn zip_paths_to(root: &Path, paths: &[String], out_abs: &Path) -> Result<u64> {
+    let file = fs::File::create(out_abs)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut total: u64 = 0;
+    for rel in paths {
+        Self::add_to_zip(root, rel, &mut zip, &options, &mut total)?;
+    }
+    zip.finish()?;
+    Ok(total)
+}
+
+fn tar_gz_paths_to(root: &Path, paths: &[String], out_abs: &Path) -> Result<u64> {
+    let file = fs::File::create(out_abs)?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+    let mut tar = tar::Builder::new(encoder);
+    let mut total: u64 = 0;
+    for rel in paths {
+        Self::add_to_tar(root, rel, &mut tar, &mut total)?;
+    }
+    let encoder = tar.into_inner()?;
+    encoder.finish()?;
+    Ok(total)
+}
+
+fn add_to_zip(
+    root: &Path,
+    rel: &str,
+    zip: &mut zip::ZipWriter<fs::File>,
+    options: &zip::write::FileOptions,
+    total: &mut u64,
+) -> Result<()> {
+    let abs = root.join(rel.trim_start_matches('/'));
+    let meta = fs::symlink_metadata(&abs)?;
+    let base = Path::new(rel)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "item".into());
+    if meta.is_dir() {
+        for entry in walkdir::WalkDir::new(&abs).follow_links(false) {
+            let entry = entry?;
+            let m = fs::symlink_metadata(entry.path())?;
+            if m.file_type().is_symlink() {
+                continue;
+            }
+            let relpath = entry.path().strip_prefix(&abs)?;
+            if relpath.as_os_str().is_empty() {
+                continue;
+            }
+            let name = format!("{base}/{}", relpath.to_string_lossy());
+            if m.is_dir() {
+                zip.add_directory(format!("{name}/"), *options)?;
+            } else if m.is_file() {
+                zip.start_file(name, *options)?;
+                *total = total.saturating_add(m.len());
+                let mut f = fs::File::open(entry.path())?;
+                std::io::copy(&mut f, zip)?;
+            }
+        }
+    } else if meta.is_file() {
+        zip.start_file(base, *options)?;
+        *total = total.saturating_add(meta.len());
+        let mut f = fs::File::open(&abs)?;
+        std::io::copy(&mut f, zip)?;
+    }
+    Ok(())
+}
+
+fn add_to_tar(
+    root: &Path,
+    rel: &str,
+    tar: &mut tar::Builder<flate2::write::GzEncoder<fs::File>>,
+    total: &mut u64,
+) -> Result<()> {
+    let abs = root.join(rel.trim_start_matches('/'));
+    let meta = fs::symlink_metadata(&abs)?;
+    let base = Path::new(rel)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "item".into());
+    if meta.is_dir() {
+        for entry in walkdir::WalkDir::new(&abs).follow_links(false) {
+            let entry = entry?;
+            let m = fs::symlink_metadata(entry.path())?;
+            if m.file_type().is_symlink() {
+                continue;
+            }
+            let relpath = entry.path().strip_prefix(&abs)?;
+            if relpath.as_os_str().is_empty() {
+                continue;
+            }
+            let name = Path::new(&base).join(&relpath);
+            if m.is_dir() {
+                tar.append_dir(name, entry.path())?;
+            } else if m.is_file() {
+                tar.append_path_with_name(entry.path(), &name)?;
+                *total = total.saturating_add(m.len());
+            }
+        }
+    } else if meta.is_file() {
+        tar.append_path_with_name(&abs, &base)?;
+        *total = total.saturating_add(meta.len());
+    }
+    Ok(())
+}
+
+/// Extract a zip or tar.gz archive into `dest` under the server root, with
+/// zip-slip / tar-slip protection (no absolute paths, no parent traversal,
+/// no symlinks/hardlinks).
+fn extract_archive(root: &Path, archive: &str, dest: &str) -> Result<()> {
+    Self::validate_relative(archive)?;
+    Self::validate_relative(dest)?;
+    let abs = root.join(archive.trim_start_matches('/'));
+    let dest_abs = root.join(dest.trim_start_matches('/'));
+    fs::create_dir_all(&dest_abs)?;
+    if archive.ends_with(".tar.gz") || archive.ends_with(".tgz") {
+        let file = fs::File::open(&abs)?;
+        let gz = flate2::read::GzDecoder::new(file);
+        let mut tar = tar::Archive::new(gz);
+        for entry in tar.entries()? {
+            let mut entry = entry?;
+            let kind = entry.header().entry_type();
+            if kind.is_symlink() || kind.is_hard_link() {
+                bail!("archive contains forbidden link entry");
+            }
+            let name = entry.path()?.into_owned();
+            let target = safe_join(&dest_abs, &name.to_string_lossy())?;
+            if kind.is_dir() {
+                fs::create_dir_all(&target)?;
+            } else if kind.is_file() {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                entry.unpack(&target)?;
+            }
+        }
+    } else {
+        let file = fs::File::open(&abs)?;
+        let mut zip = zip::ZipArchive::new(file)?;
+        for i in 0..zip.len() {
+            let mut entry = zip.by_index(i)?;
+            if entry.unix_mode().map_or(false, |m| m & 0o170000 == 0o120000) {
+                bail!("archive contains symlink entry");
+            }
+            let name = entry.name().to_string();
+            let is_dir = name.ends_with('/');
+            let target = safe_join(&dest_abs, &name)?;
+            if is_dir {
+                fs::create_dir_all(&target)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut out = fs::File::create(&target)?;
+                std::io::copy(&mut entry, &mut out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative(rel: &str) -> Result<()> {
+    let p = Path::new(rel.trim_start_matches('/'));
+    for c in p.components() {
+        match c {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("path escapes server directory")
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sibling_of(src: &str, name: &str) -> String {
+    let parent = Path::new(src)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".into());
+    let parent = parent.trim_end_matches('/');
+    if parent.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
 
     pub fn capacity(&self) -> NodeCapacity {
         use sysinfo::System;
@@ -2278,6 +2509,7 @@ mod tests {
                 ports: vec![],
                 env: vec![],
                 auto_restart: false,
+                network_mbps: 0,
             })),
         );
         rt.processes
@@ -2298,6 +2530,27 @@ mod tests {
         assert!(
             post >= pre,
             "cursor rewound after clear: {pre} -> {post}"
+        );
+    }
+
+    #[test]
+    fn archive_and_extract_round_trip_files_and_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("srv");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+        fs::write(root.join("sub/b.txt"), b"world").unwrap();
+
+        let paths = vec!["/a.txt".to_string(), "/sub".to_string()];
+        let (rel, size) = DaemonRuntime::archive_files(&root, &paths, "zip").unwrap();
+        assert_eq!(rel, "/archive.zip");
+        assert!(size > 0);
+
+        DaemonRuntime::extract_archive(&root, &rel, "/out").unwrap();
+        assert_eq!(fs::read_to_string(root.join("out/a.txt")).unwrap(), "hello");
+        assert_eq!(
+            fs::read_to_string(root.join("out/sub/b.txt")).unwrap(),
+            "world"
         );
     }
 
@@ -2481,6 +2734,7 @@ mod tests {
             ports: vec![],
             env: vec![],
             auto_restart: false,
+            network_mbps: 0,
         }
     }
 

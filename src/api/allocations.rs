@@ -241,8 +241,21 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.paths.logs_dir = tmp.path().join("logs");
         cfg.paths.servers_dir = tmp.path().join("servers");
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
-        let procs = Arc::new(crate::services::proc::ProcManager::new(db.clone(), hub.clone()));
+        let procs = Arc::new(crate::services::proc::ProcManager::new(
+            db.clone(),
+            hub.clone(),
+            cfg.paths.datalab_dir.clone(),
+        ));
+        let watcher_engine = Arc::new(crate::services::watcher::WatcherEngine::new(
+            db.clone(),
+            Arc::new(crate::services::proc::Notifier::new()),
+            Arc::downgrade(&hub),
+            procs.clone(),
+            Arc::new(crate::services::node::NodeClient::new().unwrap()),
+            tokio::runtime::Handle::current(),
+        ));
         let state = AppState {
             db,
             cfg,
@@ -253,6 +266,7 @@ mod tests {
             node_client: Arc::new(crate::services::node::NodeClient::new().unwrap()),
             node_nonces: Arc::new(crate::services::node::NonceCache::default()),
             running: Arc::new(AtomicBool::new(true)),
+            watcher_engine,
         };
         (tmp, state)
     }
@@ -285,7 +299,7 @@ mod tests {
         )
         .unwrap();
         let server_id = models::create_server(
-            &state.db, uuid, "srv", user_id, blueprint_id, "generic", "echo", 512, 1024, 100,
+            &state.db, uuid, "srv", user_id, blueprint_id, "generic", "echo", 512, 1024, 100, 0,
         )
         .unwrap();
         let (raw, _) = crate::auth::create_session(

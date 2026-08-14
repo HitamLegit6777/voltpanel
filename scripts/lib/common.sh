@@ -661,3 +661,137 @@ cleanup_proxy_artifacts() {
     run caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 && run systemctl try-reload caddy
   fi
 }
+
+# ---------------------------------------------------------------------------
+# Ops restore + diagnostics bundle helpers
+# ---------------------------------------------------------------------------
+
+# Ceiling of the SQLite schema ladder this release's binary supports. Restore
+# refuses an archive whose manifest declares a newer user_version. UPDATE
+# CONTRACT: bump to the final `PRAGMA user_version = N` in src/db.rs migrate()
+# whenever a migration lands. backup/restore ship from the same release as the
+# binary (install-panel.sh installs both), so this stays in lockstep with it.
+SCHEMA_VERSION_MAX="${SCHEMA_VERSION_MAX:-20}"
+
+# PRAGMA user_version of a SQLite file; prints 0 (and returns nonzero) when
+# the file is absent or unreadable.
+sqlite_user_version() {
+  local db=$1
+  [[ -r "$db" ]] || { printf '0'; return 1; }
+  sqlite3 -readonly "$db" 'PRAGMA user_version;' 2>/dev/null || { printf '0'; return 1; }
+}
+
+sqlite_integrity_ok() {
+  local db=$1
+  [[ -r "$db" ]] || return 1
+  [[ "$(sqlite3 -readonly "$db" 'PRAGMA integrity_check;' 2>/dev/null)" == ok ]]
+}
+
+# Mask secret-bearing TOML values on stdin (`key = "value"` lines whose key
+# contains secret/password/token/key/signature/master-key). Values are
+# replaced with "REDACTED"; keys stay visible so the diagnostics stay
+# readable. The second expression covers inline `key=value` tokens.
+redact_config() {
+  sed -E \
+    -e 's/([[:space:]]*[A-Za-z0-9_.-]*(secret|password|passwd|token|api[_-]?key|private[_-]?key|master[_-]?key|sig(nature)?)[A-Za-z0-9_.-]*[[:space:]]*=[[:space:]]*).*/\1"REDACTED"/I' \
+    -e 's/(secret|password|passwd|token|api[_-]?key|private[_-]?key|master[_-]?key|sig(nature)?)=[^[:space:]"]+/\1="REDACTED"/Ig'
+}
+
+# Ask before a destructive step. --force bypasses the prompt; a non-interactive
+# shell cannot confirm, so it fails instead of proceeding silently.
+confirm_or_force() {
+  local force=$1 prompt=$2
+  if [[ "$force" == 1 ]]; then return 0; fi
+  tui_available || die "$prompt (non-interactive shell; pass --force to skip this prompt)"
+  tui_yesno "$prompt"
+}
+
+# Unique backup stamp: second-resolution date, numerically suffixed on
+# collision so rapid repeated backups never overwrite each other.
+unique_stamp() {
+  local stamp=$1 dir=${2:-$BACKUP_DIR} n=1
+  while [[ -e "$dir/panel-$stamp.tar.gz" ]]; do stamp="${1}-${n}"; n=$((n + 1)); done
+  printf '%s' "$stamp"
+}
+
+# Keep the newest `keep` panel-*.tar.gz backups (plus their .sha256 files).
+prune_backups() {
+  local dir=$1 keep=$2 f
+  local -a old=()
+  while IFS= read -r f; do [[ -n "$f" ]] && old+=("$f"); done < <(
+    find "$dir" -maxdepth 1 -name 'panel-*.tar.gz' -printf '%T@ %p\n' 2>/dev/null \
+      | sort -nr | awk -v keep="$keep" 'NR > keep { $1=""; sub(/^ /, ""); print }'
+  )
+  for f in "${old[@]}"; do
+    printf 'pruning old backup: %s\n' "$(basename "$f")"
+    rm -f -- "$f" "${f%.tar.gz}.sha256"
+  done
+}
+
+# Structural safety of a restore archive: reject absolute paths, `..`
+# components, non-regular members (symlink/hardlink/device/fifo) and unknown
+# top-level names, so extraction can never escape data_dir or config_dir.
+# Archive layout is fixed by `voltpanel-manage backup`: manifest.json,
+# voltpanel.db, servers/ backups/ blueprints/ websites/ datalab/, config/.
+validate_archive() {
+  local archive=$1 line type found=0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    found=1
+    while [[ "$line" == */ ]]; do line=${line%/}; done
+    case "$line" in
+      manifest.json|voltpanel.db|servers|backups|blueprints|websites|datalab|config) ;;
+      servers/*|backups/*|blueprints/*|websites/*|datalab/*|config/*) ;;
+      *)
+        printf 'archive contains unexpected entry: %s\n' "$line" >&2
+        return 1
+        ;;
+    esac
+    [[ "$line" != *..* && "$line" != /* && "$line" != ./* ]] || {
+      printf 'unsafe path in archive: %s\n' "$line" >&2
+      return 1
+    }
+  done < <(tar -tzf "$archive" 2>/dev/null) || {
+    printf 'unreadable archive: %s\n' "$archive" >&2
+    return 1
+  }
+  (( found == 1 )) || { printf 'empty archive: %s\n' "$archive" >&2; return 1; }
+  tar -tzf "$archive" 2>/dev/null | grep -qx manifest.json || {
+    printf 'archive lacks manifest.json: %s\n' "$archive" >&2
+    return 1
+  }
+  # Second pass for member types and permissions: only regular files and
+  # directories may be restored. Symlinks are refused (a symlink member
+  # followed by a member through it could redirect extraction outside the
+  # restore root), and regular members carrying setuid/setgid/sticky or
+  # world-writable modes are refused (privilege escalation on install).
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    type=${line:0:1}
+    case "$type" in
+      -|d) ;;
+      *)
+        printf 'archive member is not a regular file or directory (type %s)\n' "$type" >&2
+        return 1
+        ;;
+    esac
+    if [[ "$type" == - ]]; then
+      # tar -tv mode field: "-rwxr-xr-x" — setuid at 3, setgid at 6,
+      # world-writable at 8, sticky at 9.
+      perms=${line:0:10}
+      if [[ "${perms:3:1}" == [sS] || "${perms:6:1}" == [sS] || "${perms:8:1}" == w || "${perms:9:1}" == [tT] ]]; then
+        printf 'archive member has unsafe permissions: %s\n' "$line" >&2
+        return 1
+      fi
+    fi
+  done < <(tar -tvzf --quoting-style=shell "$archive" 2>/dev/null)
+}
+
+# Read a value from a manifest.json (bare number or quoted string).
+manifest_value() {
+  local key=$1 manifest=$2 value
+  value=$(printf '%s\n' "$manifest" | grep -F "\"$key\"" | head -n1)
+  [[ -n "$value" ]] || { printf ''; return 1; }
+  value=${value#*:}
+  printf '%s' "$value" | tr -d '[:space:]",'
+}

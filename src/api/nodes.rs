@@ -9,6 +9,7 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Deserialize;
+use futures::StreamExt;
 use std::net::SocketAddr;
 
 #[derive(Debug, Deserialize)]
@@ -50,13 +51,35 @@ pub async fn get(
 ) -> ApiResult<Json<serde_json::Value>> {
     let n = blocking(state.db.clone(), move |db| nodes::get(&db, id)).await?;
     let events = blocking(state.db.clone(), move |db| nodes::events(&db, id, 100)).await?;
+    let node_name = n.name.clone();
+    let affected = blocking(state.db.clone(), move |db| {
+        nodes::server_count(&db, &node_name)
+    })
+    .await?;
     Ok(Json(serde_json::json!({
         "node": n,
         "online": n.online(),
         "available_memory_mb": n.available_memory_mb(),
         "available_disk_mb": n.available_disk_mb(),
+        "drain": drain_object(&n, affected),
         "events": events,
     })))
+}
+
+/// The drain object every node view carries: whether a drain is active, its
+/// mode (`hold` = cordoned, `stop` = cordoned + stopping workloads), the
+/// operator-supplied reason, the optional deadline — an auto-lift deadline:
+/// the reconcile sweep clears the drain once it passes, recording a
+/// `drain_expired` node event — and the number of live servers the drain
+/// affects.
+fn drain_object(n: &crate::nodes::Node, affected_count: i64) -> serde_json::Value {
+    serde_json::json!({
+        "active": !n.drain_mode.is_empty(),
+        "mode": n.drain_mode,
+        "reason": n.drain_reason,
+        "deadline": n.drain_deadline,
+        "affected_count": affected_count,
+    })
 }
 
 /// Normalize and strictly validate the operator-seeded expected fingerprint
@@ -577,6 +600,160 @@ pub async fn test_connection(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DrainRequest {
+    /// `hold` = cordon only (workloads stay up); `stop` = cordon + stop the
+    /// node's running workloads.
+    pub mode: String,
+    #[serde(default)]
+    pub reason: String,
+    /// Seconds from now the drain must complete; 60..=86400.
+    #[serde(default)]
+    pub deadline_secs: Option<i64>,
+}
+
+/// Remote stop budget per server: polls every 200ms up to 50 attempts (10s
+/// worst case per server) before the stop is recorded as failed.
+const DRAIN_STOP_ATTEMPTS: u32 = 50;
+const DRAIN_STOP_POLL_MS: u64 = 200;
+/// Bounded concurrency for the drain's remote stops.
+const DRAIN_STOP_CONCURRENCY: usize = 4;
+
+/// Cordon/drain a node. `hold` only stops placement; `stop` additionally
+/// stops every running server on the node (bounded concurrency, no
+/// transfer this iteration). Per-server stop failures are recorded as node
+/// events and returned as `failed_ids`; the drain state itself is already
+/// committed, so a partial stop never leaves the node schedulable.
+pub async fn drain(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<i64>,
+    Json(req): Json<DrainRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if req.mode != "hold" && req.mode != "stop" {
+        return Err(ApiError::bad_request("mode must be 'hold' or 'stop'"));
+    }
+    let reason = req.reason.trim().to_string();
+    if reason.chars().count() > 512 {
+        return Err(ApiError::bad_request(
+            "reason must be at most 512 characters",
+        ));
+    }
+    let deadline = match req.deadline_secs {
+        Some(secs) if (60..=86400).contains(&secs) => {
+            Some((chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339())
+        }
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "deadline_secs must be between 60 and 86400",
+            ))
+        }
+        None => None,
+    };
+    let mode = req.mode.clone();
+    let mode_for_db = mode.clone();
+    let reason2 = reason.clone();
+    let node = blocking(state.db.clone(), move |db| nodes::get(&db, id)).await?;
+    // Cordon + record intent before touching workloads, so placement stops
+    // selecting the node even while stops are still in flight.
+    let affected = blocking(state.db.clone(), move |db| {
+        nodes::set_drain(&db, id, &mode_for_db, &reason2, deadline.as_deref())
+    })
+    .await?;
+    let mut failed_ids: Vec<i64> = Vec::new();
+    if mode == "stop" {
+        let node_name = node.name.clone();
+        let servers = blocking(state.db.clone(), move |db| {
+            crate::models::servers_on_node(&db, &node_name)
+        })
+        .await?;
+        let running: Vec<_> = servers
+            .into_iter()
+            .filter(|s| s.status == "running")
+            .collect();
+        let attempts = DRAIN_STOP_ATTEMPTS;
+        let poll = std::time::Duration::from_millis(DRAIN_STOP_POLL_MS);
+        // Owned (id, uuid) pairs first: the async block must not borrow from
+        // the iterator closure, or buffer_unordered rejects the stream's
+        // lifetime.
+        let targets: Vec<(i64, String)> =
+            running.iter().map(|s| (s.id, s.uuid.clone())).collect();
+        let results = futures::stream::iter(targets.into_iter().map(|(server_id, uuid)| {
+            let client = state.node_client.clone();
+            let node = node.clone();
+            async move {
+                let res = client.stop_and_wait(&node, &uuid, attempts, poll).await;
+                (server_id, res)
+            }
+        }))
+        .buffer_unordered(DRAIN_STOP_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+        for (server_id, res) in results {
+            if let Err(e) = res {
+                let err = e.to_string();
+                let _ = blocking(state.db.clone(), move |db| {
+                    nodes::record_event(
+                        &db,
+                        id,
+                        "error",
+                        "drain_stop",
+                        &format!("failed to stop server #{server_id}: {err}"),
+                        &serde_json::json!({ "server_id": server_id }),
+                    )
+                })
+                .await;
+                failed_ids.push(server_id);
+            }
+        }
+    }
+    let failed_ids_for_event = failed_ids.clone();
+    blocking(state.db.clone(), move |db| {
+        nodes::record_event(
+            &db,
+            id,
+            "warn",
+            "drain",
+            &format!("node drain requested (mode={mode})"),
+            &serde_json::json!({
+                "mode": mode,
+                "reason": reason,
+                "affected_count": affected,
+                "failed_ids": failed_ids_for_event,
+            }),
+        )
+    })
+    .await?;
+    let n = blocking(state.db.clone(), move |db| nodes::get(&db, id)).await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "affected_count": affected,
+        "failed_ids": failed_ids,
+        "drain": drain_object(&n, affected),
+    })))
+}
+
+/// Lift a drain: clear the drain state and restore scheduling.
+pub async fn clear_drain(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    blocking(state.db.clone(), move |db| nodes::clear_drain(&db, id)).await?;
+    blocking(state.db.clone(), move |db| {
+        nodes::record_event(
+            &db,
+            id,
+            "info",
+            "drain_cleared",
+            "node drain lifted; scheduling restored",
+            &serde_json::json!({}),
+        )
+    })
+    .await?;
+    Ok(ok(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PlacementRequest {
     pub memory_mb: i64,
     pub disk_mb: i64,
@@ -741,6 +918,7 @@ pub async fn transfer_server(
         memory_mb,
         disk_mb,
         cpu_percent,
+        network_mbps: server.network_mbps as u64,
         port,
         ports,
         env,
@@ -1004,6 +1182,7 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.paths.logs_dir = tmp.path().join("logs");
         cfg.paths.servers_dir = tmp.path().join("servers");
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         // Enrollment demands a positively-TLS transport; the test drives the
         // handler directly, so native panel TLS is declared.
         cfg.web.tls_self_signed = true;
@@ -1011,7 +1190,19 @@ mod tests {
         // from tripping under parallel test load.
         cfg.security.rate_limit_per_min = 10_000;
         let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
-        let procs = Arc::new(crate::services::proc::ProcManager::new(db.clone(), hub.clone()));
+        let procs = Arc::new(crate::services::proc::ProcManager::new(
+            db.clone(),
+            hub.clone(),
+            cfg.paths.datalab_dir.clone(),
+        ));
+        let watcher_engine = Arc::new(crate::services::watcher::WatcherEngine::new(
+            db.clone(),
+            Arc::new(crate::services::proc::Notifier::new()),
+            Arc::downgrade(&hub),
+            procs.clone(),
+            Arc::new(crate::services::node::NodeClient::new().unwrap()),
+            tokio::runtime::Handle::current(),
+        ));
         let state = AppState {
             db,
             cfg,
@@ -1022,6 +1213,7 @@ mod tests {
             node_client: Arc::new(crate::services::node::NodeClient::new().unwrap()),
             node_nonces: Arc::new(crate::services::node::NonceCache::default()),
             running: Arc::new(AtomicBool::new(true)),
+            watcher_engine,
         };
         (tmp, state)
     }
@@ -1197,8 +1389,8 @@ mod tests {
     /// node in the same transaction (`set_server_node`, the exact call
     /// `transfer_server` makes): without it the panel would keep treating the
     /// old node as the owner of every port.
-    #[test]
-    fn transfer_migrates_allocations_node() {
+    #[tokio::test]
+    async fn transfer_migrates_allocations_node() {
         let (_tmp, state) = test_state();
         crate::nodes::create(&state.db, "source", "https://source.example.com", "", &[]).unwrap();
         crate::nodes::create(&state.db, "target", "https://target.example.com", "", &[]).unwrap();
@@ -1242,5 +1434,308 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(alloc_nodes, vec!["target".to_string(), "target".to_string()]);
+    }
+
+    /// A root admin with a live session cookie.
+    fn drain_cookie(state: &AppState) -> String {
+        let user_id = crate::models::create_user(
+            &state.db,
+            "drain-admin",
+            "drain@x.io",
+            "h",
+            true,
+            "en",
+            "dark",
+        )
+        .unwrap();
+        let (raw, _) = crate::auth::create_session(
+            &state.db,
+            &state.cfg,
+            user_id,
+            "test-agent",
+            "127.0.0.1",
+            false,
+        )
+        .unwrap();
+        format!("vp_session={raw}")
+    }
+
+    /// Create + enroll + heartbeat a node so it is a real, online fabric
+    /// member (stop attempts need enrolled=1).
+    fn enroll_online_node(state: &AppState, name: &str, url: &str) -> i64 {
+        let n = crate::nodes::create(&state.db, name, url, "dc", &[]).unwrap();
+        let hb = crate::node_protocol::NodeHeartbeat {
+            daemon_version: "0.1.1-test".into(),
+            hostname: "host".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            capacity: Default::default(),
+            tls_fingerprint: String::new(),
+        };
+        crate::nodes::enroll(&state.db, n.enrollment_token.as_deref().unwrap(), &hb).unwrap();
+        crate::nodes::heartbeat(&state.db, &n.uuid, &hb).unwrap();
+        n.id
+    }
+
+    /// Insert a live server assigned to `node_name` with the given status.
+    fn add_server_on_node(state: &AppState, node_name: &str, uuid: &str, status: &str) -> i64 {
+        let conn = state.db.get().unwrap();
+        conn.execute(
+            "INSERT INTO users (username,email,password_hash,created_at,updated_at) VALUES (?1,?2,'x','t','t')",
+            rusqlite::params![format!("u-{uuid}"), format!("{uuid}@x.io")],
+        )
+        .unwrap();
+        let user_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO blueprints (uuid,name,created_at,updated_at) VALUES (?1,'e','t','t')",
+            [format!("bp-{uuid}")],
+        )
+        .unwrap();
+        let bp_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO servers (uuid,name,user_id,blueprint_id,node,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,'t','t')",
+            rusqlite::params![uuid, format!("s-{uuid}"), user_id, bp_id, node_name, status],
+        )
+        .unwrap();
+        let server_id = conn.last_insert_rowid();
+        drop(conn);
+        server_id
+    }
+
+    fn drain_router(state: AppState) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/api/nodes/:id/drain",
+                axum::routing::post(drain).delete(clear_drain),
+            )
+            .route("/api/nodes/:id", axum::routing::get(get))
+            .with_state(state)
+    }
+
+    async fn drain_request_json(
+        router: axum::Router,
+        method: &str,
+        uri: &str,
+        cookie: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", cookie)
+            .header("content-type", "application/json");
+        let req = builder.body(Body::from(body.to_string())).unwrap();
+        let response = router.oneshot(req).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let value = if bytes.is_empty() {
+            serde_json::json!(null)
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::json!(null))
+        };
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn drain_hold_cordons_and_clear_restores() {
+        let (_tmp, state) = test_state();
+        let cookie = drain_cookie(&state);
+        let node_id = enroll_online_node(&state, "drain-hold", "https://drain-hold.example.com");
+        let n = crate::nodes::get(&state.db, node_id).unwrap();
+        add_server_on_node(&state, &n.name, "dhold-1", "running");
+        let router = drain_router(state.clone());
+        let uri = format!("/api/nodes/{node_id}/drain");
+
+        let (status, body) = drain_request_json(
+            router.clone(),
+            "POST",
+            &uri,
+            &cookie,
+            serde_json::json!({ "mode": "hold", "reason": "rack maintenance", "deadline_secs": 3600 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "drain must succeed: {body}");
+        assert_eq!(body["affected_count"], 1);
+        assert_eq!(body["failed_ids"], serde_json::json!([]));
+        assert_eq!(body["drain"]["active"], true);
+        assert_eq!(body["drain"]["mode"], "hold");
+        assert_eq!(body["drain"]["reason"], "rack maintenance");
+        assert!(body["drain"]["deadline"].is_string());
+
+        let drained = crate::nodes::get(&state.db, node_id).unwrap();
+        assert!(!drained.schedulable, "hold must cordon the node");
+        assert!(drained.maintenance);
+        assert_eq!(drained.drain_mode, "hold");
+
+        // GET reports the drain object with the affected count.
+        let (status, body) = drain_request_json(
+            router.clone(),
+            "GET",
+            &format!("/api/nodes/{node_id}"),
+            &cookie,
+            serde_json::json!(null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["drain"]["active"], true);
+        assert_eq!(body["drain"]["mode"], "hold");
+        assert_eq!(body["drain"]["affected_count"], 1);
+
+        // Clearing restores scheduling and the drain object goes inactive.
+        let (status, body) = drain_request_json(
+            router.clone(),
+            "DELETE",
+            &uri,
+            &cookie,
+            serde_json::json!(null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "clear must succeed: {body}");
+        let restored = crate::nodes::get(&state.db, node_id).unwrap();
+        assert!(restored.schedulable);
+        assert!(!restored.maintenance);
+        assert_eq!(restored.drain_mode, "");
+        let (_, body) = drain_request_json(
+            router,
+            "GET",
+            &format!("/api/nodes/{node_id}"),
+            &cookie,
+            serde_json::json!(null),
+        )
+        .await;
+        assert_eq!(body["drain"]["active"], false);
+        assert_eq!(body["drain"]["mode"], "");
+    }
+
+    #[tokio::test]
+    async fn drain_stop_attempts_each_running_server() {
+        let (_tmp, state) = test_state();
+        // A closed localhost port: every stop attempt fails fast with a
+        // connection error, so failed_ids enumerates exactly the servers the
+        // drain attempted (the running ones) and each failure lands in
+        // node_events.
+        let closed_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            port
+        };
+        let cookie = drain_cookie(&state);
+        let node_id = enroll_online_node(
+            &state,
+            "drain-stop",
+            &format!("http://127.0.0.1:{closed_port}"),
+        );
+        let n = crate::nodes::get(&state.db, node_id).unwrap();
+        let running_1 = add_server_on_node(&state, &n.name, "dstop-1", "running");
+        let running_2 = add_server_on_node(&state, &n.name, "dstop-2", "running");
+        let stopped = add_server_on_node(&state, &n.name, "dstop-3", "stopped");
+        let router = drain_router(state.clone());
+
+        let (status, body) = drain_request_json(
+            router,
+            "POST",
+            &format!("/api/nodes/{node_id}/drain"),
+            &cookie,
+            serde_json::json!({ "mode": "stop", "reason": "reboot", "deadline_secs": 60 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "drain must succeed: {body}");
+        assert_eq!(body["affected_count"], 3, "all live servers count: {body}");
+        let failed: Vec<i64> = body["failed_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        assert!(
+            failed.contains(&running_1),
+            "running server {running_1} must be attempted: {failed:?}"
+        );
+        assert!(
+            failed.contains(&running_2),
+            "running server {running_2} must be attempted: {failed:?}"
+        );
+        assert!(
+            !failed.contains(&stopped),
+            "stopped server must not be attempted: {failed:?}"
+        );
+
+        // Each failed stop is recorded as a node event.
+        let events = crate::nodes::events(&state.db, node_id, 100).unwrap();
+        let drain_stops: Vec<_> = events
+            .iter()
+            .filter(|e| e["kind"] == "drain_stop")
+            .collect();
+        assert_eq!(drain_stops.len(), 2, "one error event per failed stop");
+    }
+
+    #[tokio::test]
+    async fn drain_rejects_invalid_modes_and_deadlines() {
+        let (_tmp, state) = test_state();
+        let cookie = drain_cookie(&state);
+        let node_id = enroll_online_node(&state, "drain-bad", "https://drain-bad.example.com");
+        let router = drain_router(state.clone());
+        let uri = format!("/api/nodes/{node_id}/drain");
+
+        let (status, _) = drain_request_json(
+            router.clone(),
+            "POST",
+            &uri,
+            &cookie,
+            serde_json::json!({ "mode": "drain", "reason": "x" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "unknown mode must be refused");
+
+        let (status, _) = drain_request_json(
+            router.clone(),
+            "POST",
+            &uri,
+            &cookie,
+            serde_json::json!({ "mode": "hold", "deadline_secs": 30 }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "deadline below 60s must be refused"
+        );
+
+        let (status, _) = drain_request_json(
+            router.clone(),
+            "POST",
+            &uri,
+            &cookie,
+            serde_json::json!({ "mode": "hold", "deadline_secs": 90_000 }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "deadline above 24h must be refused"
+        );
+
+        let (status, _) = drain_request_json(
+            router,
+            "POST",
+            &uri,
+            &cookie,
+            serde_json::json!({ "mode": "hold", "reason": "r".repeat(513) }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "reason over 512 chars must be refused"
+        );
+
+        // Every refusal left the node untouched and schedulable.
+        let n = crate::nodes::get(&state.db, node_id).unwrap();
+        assert!(n.schedulable);
+        assert_eq!(n.drain_mode, "");
     }
 }

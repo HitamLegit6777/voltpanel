@@ -233,6 +233,10 @@ pub fn env_for_server(db: &Db, server: &Server) -> Vec<(String, String)> {
         "SERVER_PORT".into(),
         server.port.map(|p| p.to_string()).unwrap_or_default(),
     ));
+    env.push((
+        crate::isolation::DATALAB_ENV_VAR.into(),
+        crate::isolation::DATALAB_MOUNT_DIR.into(),
+    ));
     env
 }
 
@@ -586,12 +590,19 @@ pub fn run_install(
     };
     let cgroup =
         crate::isolation::Cgroup::create(&isolation, &format!("{}-install", server.uuid), &limits)?;
-    let mut cmd = crate::isolation::sandbox_command(
+    // Bind the server's Data Lab directory into the install sandbox so setup
+    // scripts can create or migrate server databases; the panel's datalab
+    // root rides the hub's config (the same root `services::databases`
+    // manages). The runtime launch path (services::proc) adopts this bind
+    // once it can reach the panel config.
+    let datalab_root = hub.config.paths.datalab_dir.clone();
+    let mut cmd = crate::isolation::sandbox_command_with_datalab(
         &isolation,
         &dir,
         &format!("{}-install", server.uuid),
         &script,
         &limits,
+        &datalab_root,
     )?;
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -604,7 +615,7 @@ pub fn run_install(
     let pid = child.id();
     cgroup.attach(pid)?;
     let network =
-        crate::isolation::NetworkLease::configure(pid, &format!("{}-install", server.uuid), &[])?;
+        crate::isolation::NetworkLease::configure(pid, &format!("{}-install", server.uuid), &[], server.network_mbps as u64)?;
 
     // Stream install output into the console hub tagged `Install`, so setup is
     // live and replayable exactly like runtime output.
@@ -2202,6 +2213,20 @@ mod tests {
         assert!(
             env.iter().any(|(k, v)| k == "SECRET_TOKEN" && v == "hunter2"),
             "secret missing from process env"
+        );
+    }
+
+    #[test]
+    fn env_for_server_advertises_datalab_mount() {
+        let t = TestDb::new();
+        let server = t.server();
+        let env = env_for_server(&t.db, &server);
+        assert!(
+            env.iter().any(|(k, v)| {
+                k == crate::isolation::DATALAB_ENV_VAR
+                    && v == crate::isolation::DATALAB_MOUNT_DIR
+            }),
+            "VOLTP_DATALAB_DIR must point workloads at the sandbox mount"
         );
     }
 

@@ -146,6 +146,60 @@ pub fn set_twofa_secret(db: &Db, user_id: i64, secret: Option<&str>) -> Result<(
     Ok(())
 }
 
+// ---------------- 2FA recovery codes ----------------
+
+/// Atomically replace a user's recovery codes: revoke every existing code and
+/// insert the freshly generated set, all in one IMMEDIATE transaction so a
+/// concurrent login can never observe a half-revoked mix. Only the SHA-256
+/// digests (via [`crate::auth::hash_recovery_code`]) are stored; the
+/// plaintext lives solely in the caller's one-time response.
+pub fn replace_recovery_codes(db: &Db, user_id: i64, codes: &[String]) -> Result<()> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute(
+        "DELETE FROM user_recovery_codes WHERE user_id=?1",
+        [user_id],
+    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO user_recovery_codes(user_id,code_hash,used_at,created_at) \
+             VALUES(?1,?2,NULL,?3)",
+        )?;
+        let t = now();
+        for code in codes {
+            stmt.execute(params![user_id, crate::auth::hash_recovery_code(code), t])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Atomically consume one unused recovery code. The single conditional UPDATE
+/// claims the row only while it is still unused (`used_at IS NULL`), and
+/// SQLite serializes writers, so two racing login attempts can never both
+/// consume the same code: exactly one UPDATE matches the row, the other
+/// affects zero rows. Replaying an already-used code returns `false`.
+pub fn consume_recovery_code(db: &Db, user_id: i64, code: &str) -> Result<bool> {
+    let conn = db.get()?;
+    let hash = crate::auth::hash_recovery_code(code);
+    let n = conn.execute(
+        "UPDATE user_recovery_codes SET used_at=?1 \
+         WHERE user_id=?2 AND code_hash=?3 AND used_at IS NULL",
+        params![now(), user_id, hash],
+    )?;
+    Ok(n > 0)
+}
+
+/// Delete every recovery code for a user (2FA disable / admin reset).
+pub fn delete_recovery_codes(db: &Db, user_id: i64) -> Result<()> {
+    let conn = db.get()?;
+    conn.execute(
+        "DELETE FROM user_recovery_codes WHERE user_id=?1",
+        [user_id],
+    )?;
+    Ok(())
+}
+
 pub fn delete_user(db: &Db, id: i64) -> Result<()> {
     let conn = db.get()?;
     conn.execute("DELETE FROM users WHERE id=?1", [id])?;
@@ -416,6 +470,8 @@ pub struct Server {
     pub crash_window_start: String,
     /// Last exit classification, surfaced by the console crash endpoint.
     pub crash_reason: String,
+    /// Symmetric network bandwidth throttle in megabits/second (0 = unlimited).
+    pub network_mbps: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -446,11 +502,12 @@ fn server_from_row(r: &Row) -> rusqlite::Result<Server> {
         crash_reason: r.get(21)?,
         created_at: r.get(22)?,
         updated_at: r.get(23)?,
+        network_mbps: r.get(24)?,
     })
 }
 
 const SERVER_COLS: &str =
-    "id,uuid,name,user_id,blueprint_id,description,status,runtime_hint,startup,node,port,memory_mb,disk_mb,cpu_percent,suspended,auto_restart,restart_count,crash_detect_clean_exit,crash_restart_budget,crash_restarts,crash_window_start,crash_reason,created_at,updated_at";
+    "id,uuid,name,user_id,blueprint_id,description,status,runtime_hint,startup,node,port,memory_mb,disk_mb,cpu_percent,suspended,auto_restart,restart_count,crash_detect_clean_exit,crash_restart_budget,crash_restarts,crash_window_start,crash_reason,created_at,updated_at,network_mbps";
 
 
 pub fn get_server(db: &Db, id: i64) -> Result<Server> {
@@ -571,7 +628,6 @@ pub fn count_all_servers_by_user(db: &Db, user_id: i64) -> Result<i64> {
         |r| r.get(0),
     )?)
 }
-
 #[allow(clippy::too_many_arguments)]
 pub fn create_server(
     db: &Db,
@@ -584,12 +640,13 @@ pub fn create_server(
     memory_mb: i64,
     disk_mb: i64,
     cpu_percent: i64,
+    network_mbps: i64,
 ) -> Result<i64> {
     let conn = db.get()?;
     let t = now();
     conn.execute(
-        "INSERT INTO servers(uuid,name,user_id,blueprint_id,runtime_hint,startup,memory_mb,disk_mb,cpu_percent,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'offline',?10,?10)",
-        params![uuid, name, user_id, blueprint_id, runtime_hint, startup, memory_mb, disk_mb, cpu_percent, t],
+        "INSERT INTO servers(uuid,name,user_id,blueprint_id,runtime_hint,startup,memory_mb,disk_mb,cpu_percent,network_mbps,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'offline',?11,?11)",
+        params![uuid, name, user_id, blueprint_id, runtime_hint, startup, memory_mb, disk_mb, cpu_percent, network_mbps, t],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -606,7 +663,7 @@ pub fn update_server(db: &Db, s: &Server) -> Result<()> {
          user_id=?5, blueprint_id=?6, status=?7, memory_mb=?8, disk_mb=?9, cpu_percent=?10, \
          suspended=?11, auto_restart=?12, restart_count=?13, crash_detect_clean_exit=?14, \
          crash_restart_budget=?15, crash_restarts=?16, crash_window_start=?17, crash_reason=?18, \
-         updated_at=?19 WHERE id=?20",
+         network_mbps=?19, updated_at=?20 WHERE id=?21",
         params![
             s.name,
             s.description,
@@ -626,6 +683,7 @@ pub fn update_server(db: &Db, s: &Server) -> Result<()> {
             s.crash_restarts,
             s.crash_window_start,
             s.crash_reason,
+            s.network_mbps,
             now(),
             s.id
         ],
@@ -1586,10 +1644,17 @@ pub struct Backup {
     pub is_locked: bool,
     /// Newline-separated glob patterns excluded when the archive was built.
     pub ignored_files: String,
+    /// Whether the archive embeds a Data Lab snapshot tree under
+    /// `.voltp-datalab/`. Always false for remote-node backups (the node
+    /// archives its own root; the panel's Data Lab store is local-only).
+    pub data_lab_included: bool,
+    /// Number of Data Lab databases captured in the archive (0 when
+    /// `data_lab_included` is false).
+    pub db_count: i64,
 }
 
-const BACKUP_COLUMNS: &str =
-    "id,uuid,server_id,name,path,size_bytes,checksum,format,created_at,is_locked,ignored_files";
+const BACKUP_COLUMNS: &str = "id,uuid,server_id,name,path,size_bytes,checksum,format,created_at,\
+    is_locked,ignored_files,data_lab_included,db_count";
 
 fn backup_from_row(r: &Row) -> rusqlite::Result<Backup> {
     Ok(Backup {
@@ -1604,6 +1669,8 @@ fn backup_from_row(r: &Row) -> rusqlite::Result<Backup> {
         created_at: r.get(8)?,
         is_locked: r.get::<_, i64>(9)? != 0,
         ignored_files: r.get(10)?,
+        data_lab_included: r.get::<_, i64>(11)? != 0,
+        db_count: r.get(12)?,
     })
 }
 
@@ -1641,9 +1708,33 @@ pub fn create_backup(
     format: &str,
     ignored_files: &str,
 ) -> Result<i64> {
+    create_backup_with_vault(
+        db, uuid, server_id, name, path, size_bytes, checksum, format, ignored_files, false, 0,
+    )
+}
+
+/// Like [`create_backup`], plus the Data Lab snapshot metadata. `db_count` is
+/// the number of databases embedded under `.voltp-datalab/` in the archive
+/// (0 when `data_lab_included` is false). Remote-node backups never include a
+/// Data Lab tree, so they keep using [`create_backup`] (false/0).
+pub fn create_backup_with_vault(
+    db: &Db,
+    uuid: &str,
+    server_id: i64,
+    name: &str,
+    path: &str,
+    size_bytes: i64,
+    checksum: &str,
+    format: &str,
+    ignored_files: &str,
+    data_lab_included: bool,
+    db_count: i64,
+) -> Result<i64> {
     let conn = db.get()?;
     conn.execute(
-        "INSERT INTO backups(uuid,server_id,name,path,size_bytes,checksum,format,created_at,ignored_files) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        "INSERT INTO backups(uuid,server_id,name,path,size_bytes,checksum,format,created_at,\
+         ignored_files,data_lab_included,db_count) \
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             uuid,
             server_id,
@@ -1653,10 +1744,30 @@ pub fn create_backup(
             checksum,
             format,
             now(),
-            ignored_files
+            ignored_files,
+            data_lab_included,
+            db_count
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// True when the server has at least one unlocked backup created within the
+/// last `within_hours` hours whose archive includes a Data Lab snapshot
+/// (`.voltp-datalab/` tree). This is the server-deletion guard: a server's
+/// Data Lab store may only be removed permanently when a recent recoverable
+/// copy of it exists, or when the operator forces the purge (API-level
+/// `force` flag; see the `purge` hook in api/servers.rs).
+pub fn has_recent_data_lab_backup(db: &Db, server_id: i64, within_hours: i64) -> Result<bool> {
+    let conn = db.get()?;
+    let cutoff = (Utc::now() - chrono::Duration::hours(within_hours)).to_rfc3339();
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM backups \
+         WHERE server_id=?1 AND data_lab_included=1 AND is_locked=0 AND created_at>=?2",
+        params![server_id, cutoff],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// Lock or unlock a backup. Locked backups survive rotation and refuse
@@ -1983,6 +2094,54 @@ pub fn delete_schedule_task(db: &Db, schedule_id: i64, id: i64) -> Result<bool> 
     )?;
     Ok(n > 0)
 }
+/// One task in a full-chain replace ([`replace_schedule_tasks`]). The
+/// `condition` is the caller-validated canonical Flow Gate JSON (`None` =
+/// unconditional); `payload` is the stored form (empty string = absent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleTaskReplace {
+    pub action: String,
+    pub payload: String,
+    pub sequence: i64,
+    pub condition: Option<String>,
+}
+
+/// Replace a schedule's entire task chain in ONE transaction: validate the
+/// schedule exists, delete the old tasks, then insert the new ones (including
+/// their canonical flow-gate conditions) — all inside a single BEGIN IMMEDIATE
+/// transaction, so a failure at any step rolls the chain back to its previous
+/// state. Validation of the batch (actions, sequences, conditions) is the
+/// caller's job and must happen BEFORE this call so a bad task can never see
+/// the old chain deleted.
+pub fn replace_schedule_tasks(
+    db: &Db,
+    schedule_id: i64,
+    tasks: &[ScheduleTaskReplace],
+) -> Result<()> {
+    let mut conn = db.get()?;
+    // BEGIN IMMEDIATE takes the write lock up front so a concurrent reader
+    // can never observe the chain in its deleted-but-not-yet-reinserted state.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schedules WHERE id=?1)",
+        [schedule_id],
+        |r| r.get::<_, i64>(0).map(|v| v != 0),
+    )?;
+    if !exists {
+        bail!("schedule not found");
+    }
+    tx.execute(
+        "DELETE FROM schedule_tasks WHERE schedule_id=?1",
+        [schedule_id],
+    )?;
+    for task in tasks {
+        tx.execute(
+            "INSERT INTO schedule_tasks(schedule_id,action,payload,sequence,condition) VALUES(?1,?2,?3,?4,?5)",
+            params![schedule_id, task.action, task.payload, task.sequence, task.condition],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
 
 
 
@@ -2064,6 +2223,125 @@ pub fn update_website(db: &Db, w: &Website) -> Result<()> {
 pub fn delete_website(db: &Db, id: i64) -> Result<()> {
     let conn = db.get()?;
     conn.execute("DELETE FROM websites WHERE id=?1", [id])?;
+    Ok(())
+}
+
+// ---------------- Console Watcher ----------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleWatcher {
+    pub id: i64,
+    pub server_id: i64,
+    pub name: String,
+    pub pattern: String,
+    pub is_regex: bool,
+    /// One of: notify | restart | stop | command
+    pub action: String,
+    /// For `command` the text to send to stdin; for `notify` the level
+    /// (info|warn|error); ignored for restart/stop.
+    pub action_payload: String,
+    pub enabled: bool,
+    pub cooldown_secs: i64,
+    pub last_fired_at: Option<String>,
+    pub trigger_count: i64,
+    pub created_at: String,
+}
+
+const WATCHER_COLS: &str =
+    "id,server_id,name,pattern,is_regex,action,action_payload,enabled,cooldown_secs,last_fired_at,trigger_count,created_at";
+
+fn watcher_from_row(r: &Row) -> rusqlite::Result<ConsoleWatcher> {
+    Ok(ConsoleWatcher {
+        id: r.get(0)?,
+        server_id: r.get(1)?,
+        name: r.get(2)?,
+        pattern: r.get(3)?,
+        is_regex: r.get::<_, i64>(4)? != 0,
+        action: r.get(5)?,
+        action_payload: r.get(6)?,
+        enabled: r.get::<_, i64>(7)? != 0,
+        cooldown_secs: r.get(8)?,
+        last_fired_at: r.get(9)?,
+        trigger_count: r.get(10)?,
+        created_at: r.get(11)?,
+    })
+}
+
+pub fn list_watchers(db: &Db, server_id: i64) -> Result<Vec<ConsoleWatcher>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WATCHER_COLS} FROM console_watchers WHERE server_id=?1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([server_id], watcher_from_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+/// Enabled watchers for one server, for the console evaluation hot path.
+pub fn list_enabled_watchers(db: &Db, server_id: i64) -> Result<Vec<ConsoleWatcher>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WATCHER_COLS} FROM console_watchers WHERE server_id=?1 AND enabled=1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([server_id], watcher_from_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+pub fn get_watcher(db: &Db, id: i64) -> Result<ConsoleWatcher> {
+    let conn = db.get()?;
+    conn.query_row(
+        &format!("SELECT {WATCHER_COLS} FROM console_watchers WHERE id=?1"),
+        [id],
+        watcher_from_row,
+    )
+    .context("watcher not found")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_watcher(
+    db: &Db,
+    server_id: i64,
+    name: &str,
+    pattern: &str,
+    is_regex: bool,
+    action: &str,
+    action_payload: &str,
+    cooldown_secs: i64,
+) -> Result<i64> {
+    let conn = db.get()?;
+    conn.execute(
+        "INSERT INTO console_watchers(server_id,name,pattern,is_regex,action,action_payload,cooldown_secs,created_at) \
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![server_id, name, pattern, is_regex as i64, action, action_payload, cooldown_secs, now()],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_watcher(db: &Db, w: &ConsoleWatcher) -> Result<()> {
+    let conn = db.get()?;
+    conn.execute(
+        "UPDATE console_watchers SET name=?1,pattern=?2,is_regex=?3,action=?4,action_payload=?5,enabled=?6,cooldown_secs=?7 WHERE id=?8",
+        params![
+            w.name, w.pattern, w.is_regex as i64, w.action, w.action_payload,
+            w.enabled as i64, w.cooldown_secs, w.id
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_watcher(db: &Db, id: i64) -> Result<()> {
+    let conn = db.get()?;
+    conn.execute("DELETE FROM console_watchers WHERE id=?1", [id])?;
+    Ok(())
+}
+
+/// Stamp a watcher as fired now and bump its trigger count. Called by the
+/// engine after an action dispatches; `last_fired_at` is the debounce clock.
+pub fn record_watcher_fire(db: &Db, id: i64) -> Result<()> {
+    let conn = db.get()?;
+    conn.execute(
+        "UPDATE console_watchers SET last_fired_at=?1, trigger_count=trigger_count+1 WHERE id=?2",
+        params![now(), id],
+    )?;
     Ok(())
 }
 
@@ -2789,6 +3067,151 @@ mod tests {
         assert_eq!(tasks, 0, "failed create must leave no task rows");
     }
 
+    #[test]
+    fn replace_schedule_tasks_preserves_conditions_and_order() {
+        let t = TestDb::new();
+        let id = create_schedule_with_tasks(
+            &t.db,
+            t.server_id,
+            "flow",
+            "0 3 * * *",
+            true,
+            0,
+            30,
+            false,
+            &[("start".to_string(), "".to_string(), 1)],
+        )
+        .unwrap();
+        let batch = vec![
+            ScheduleTaskReplace {
+                action: "notify".into(),
+                payload: "first".into(),
+                sequence: 1,
+                condition: None,
+            },
+            ScheduleTaskReplace {
+                action: "restart".into(),
+                payload: "".into(),
+                sequence: 2,
+                condition: Some(
+                    r#"{"kind":"exit","task_index":0,"code":0}"#.into(),
+                ),
+            },
+            ScheduleTaskReplace {
+                action: "notify".into(),
+                payload: "last".into(),
+                sequence: 3,
+                condition: None,
+            },
+        ];
+        replace_schedule_tasks(&t.db, id, &batch).unwrap();
+        let conn = t.db.get().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT action,payload,sequence,condition FROM schedule_tasks WHERE schedule_id=?1 ORDER BY sequence, id",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        drop(stmt);
+        drop(conn);
+        // Stored form: canonical exit gate JSON as validated, absent condition
+        // stays NULL, and the ORDER BY (sequence, id) returns request order.
+        assert_eq!(rows[0], ("notify".into(), "first".into(), 1, None));
+        assert_eq!(
+            rows[1],
+            (
+                "restart".into(),
+                "".into(),
+                2,
+                Some(r#"{"kind":"exit","task_index":0,"code":0}"#.into())
+            )
+        );
+        assert_eq!(rows[2], ("notify".into(), "last".into(), 3, None));
+    }
+
+    #[test]
+    fn replace_schedule_tasks_rolls_back_on_mid_insert_error() {
+        let t = TestDb::new();
+        let id = create_schedule_with_tasks(
+            &t.db,
+            t.server_id,
+            "flow",
+            "0 3 * * *",
+            true,
+            0,
+            30,
+            false,
+            &[
+                ("start".to_string(), "".to_string(), 1),
+                ("notify".to_string(), "keep".to_string(), 2),
+            ],
+        )
+        .unwrap();
+        // A unique index on (schedule_id, action) makes the second insert of
+        // the same action fail mid-batch, deterministically.
+        let conn = t.db.get().unwrap();
+        conn.execute(
+            "CREATE UNIQUE INDEX tmp_uq_schedule_action ON schedule_tasks(schedule_id, action)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let batch = vec![
+            ScheduleTaskReplace {
+                action: "kill".into(),
+                payload: "".into(),
+                sequence: 1,
+                condition: None,
+            },
+            ScheduleTaskReplace {
+                action: "kill".into(),
+                payload: "".into(),
+                sequence: 2,
+                condition: None,
+            },
+        ];
+        assert!(replace_schedule_tasks(&t.db, id, &batch).is_err());
+        // The DELETE and the first INSERT rolled back: the old chain survives
+        // exactly as it was before the failed replace.
+        let got = get_schedule(&t.db, id).unwrap();
+        let pairs: Vec<(String, String, i64)> = got
+            .tasks
+            .into_iter()
+            .map(|x| (x.action, x.payload, x.sequence))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("start".to_string(), "".to_string(), 1),
+                ("notify".to_string(), "keep".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_schedule_tasks_rejects_missing_schedule() {
+        let t = TestDb::new();
+        let batch = vec![ScheduleTaskReplace {
+            action: "start".into(),
+            payload: "".into(),
+            sequence: 1,
+            condition: None,
+        }];
+        assert!(replace_schedule_tasks(&t.db, 999_999, &batch).is_err());
+        let conn = t.db.get().unwrap();
+        let tasks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schedule_tasks", [], |r| r.get(0))
+            .unwrap();
+        drop(conn);
+        assert_eq!(tasks, 0, "failed replace must not insert task rows");
+    }
+
     // ---------------- Crash budget (G8) ----------------
 
     #[test]
@@ -3096,5 +3519,139 @@ mod tests {
             )
             .unwrap();
         assert_eq!(members, 0);
+    }
+
+    #[test]
+    fn recovery_codes_are_stored_hashed_and_replaced_atomically() {
+        let t = TestDb::new();
+        let first: Vec<String> = (0..10).map(|i| format!("CODE{i:02}")).collect();
+        replace_recovery_codes(&t.db, t.owner_id, &first).unwrap();
+
+        let stored = |db: &Db, uid: i64| -> Vec<(String, Option<String>)> {
+            let conn = db.get().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT code_hash, used_at FROM user_recovery_codes \
+                     WHERE user_id=?1 ORDER BY id",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([uid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+
+        let stored1 = stored(&t.db, t.owner_id);
+        assert_eq!(stored1.len(), 10);
+        for (hash, used_at) in &stored1 {
+            assert_eq!(hash.len(), 64, "codes must be stored as SHA-256 hex");
+            assert!(used_at.is_none(), "fresh codes are unused");
+            assert!(
+                !first.contains(hash),
+                "plaintext codes must never appear at rest"
+            );
+        }
+
+        // Replacing revokes the previous set and installs only the new one.
+        let second: Vec<String> = vec!["ONLYONE".to_string()];
+        replace_recovery_codes(&t.db, t.owner_id, &second).unwrap();
+        let stored2 = stored(&t.db, t.owner_id);
+        assert_eq!(stored2.len(), 1, "old codes must be revoked on replace");
+        assert_eq!(
+            stored2[0].0,
+            crate::auth::hash_recovery_code(&second[0]),
+            "the replacement hash must match the new code"
+        );
+        // A different user is untouched.
+        let other_id = seed_user(&t.db, "other");
+        assert!(stored(&t.db, other_id).is_empty());
+    }
+
+    #[test]
+    fn consume_recovery_code_is_single_use_and_replay_fails() {
+        let t = TestDb::new();
+        let codes: Vec<String> = vec!["AAAA1111".to_string(), "BBBB2222".to_string()];
+        replace_recovery_codes(&t.db, t.owner_id, &codes).unwrap();
+
+        assert!(
+            consume_recovery_code(&t.db, t.owner_id, &codes[0]).unwrap(),
+            "first use consumes the code"
+        );
+        assert!(
+            !consume_recovery_code(&t.db, t.owner_id, &codes[0]).unwrap(),
+            "replaying an already-used code must fail"
+        );
+        // Separator/case variants hash to the same canonical code.
+        assert!(
+            !consume_recovery_code(&t.db, t.owner_id, "aaaa-1111").unwrap(),
+            "a consumed code cannot be replayed even through normalization"
+        );
+        // The untouched code still works exactly once.
+        assert!(consume_recovery_code(&t.db, t.owner_id, "bbbb2222").unwrap());
+        assert!(!consume_recovery_code(&t.db, t.owner_id, &codes[1]).unwrap());
+        // Unknown codes never consume anything.
+        assert!(!consume_recovery_code(&t.db, t.owner_id, "ZZZZ9999").unwrap());
+    }
+
+    #[test]
+    fn consume_recovery_code_is_atomic_under_races() {
+        let t = TestDb::new();
+        let codes: Vec<String> = vec!["RACE0001".to_string()];
+        replace_recovery_codes(&t.db, t.owner_id, &codes).unwrap();
+
+        // Two consumers race the same unused code; SQLite serializes the
+        // conditional UPDATE, so exactly one may claim it.
+        let (db_a, db_b) = (t.db.clone(), t.db.clone());
+        let owner_id = t.owner_id;
+        let code_a = codes[0].clone();
+        let code_b = codes[0].clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+        let handle_a = std::thread::spawn(move || {
+            b1.wait();
+            consume_recovery_code(&db_a, owner_id, &code_a).unwrap()
+        });
+        let handle_b = std::thread::spawn(move || {
+            b2.wait();
+            consume_recovery_code(&db_b, owner_id, &code_b).unwrap()
+        });
+        barrier.wait();
+        let a = handle_a.join().unwrap();
+        let b = handle_b.join().unwrap();
+        assert_ne!(a, b, "exactly one racer may consume the code");
+
+        // The loser's retry sees it consumed.
+        assert!(!consume_recovery_code(&t.db, t.owner_id, &codes[0]).unwrap());
+        let used: i64 = t
+            .db
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id=?1 AND used_at IS NOT NULL",
+                [t.owner_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(used, 1, "exactly one row may be marked used");
+    }
+
+    #[test]
+    fn delete_recovery_codes_clears_the_set() {
+        let t = TestDb::new();
+        let codes: Vec<String> = (0..5).map(|i| format!("DEL{i:02}")).collect();
+        replace_recovery_codes(&t.db, t.owner_id, &codes).unwrap();
+        delete_recovery_codes(&t.db, t.owner_id).unwrap();
+        let left: i64 = t
+            .db
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id=?1",
+                [t.owner_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "disable must delete every recovery code");
     }
 }

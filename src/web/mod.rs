@@ -11,7 +11,7 @@ const APP_JS: &str = include_str!("../../static/js/app.js");
 /// an upgraded panel serves new JS/CSS under fresh URLs, so browsers can never
 /// keep a stale bundle across releases. `index.html` references
 /// `?v=__ASSET_VERSION__`; the placeholder is stamped at serve time.
-pub const ASSET_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const ASSET_VERSION: &str = include!(concat!(env!("OUT_DIR"), "/asset_version.rs"));
 
 /// The SPA shell with the version stamp baked in. Compiled once.
 static INDEX_HTML: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {

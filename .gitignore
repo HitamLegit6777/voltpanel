@@ -6,6 +6,7 @@
 /backups/
 /logs/
 /websites/
+/voltd-data/
 config.toml
 voltd.toml
 *.db

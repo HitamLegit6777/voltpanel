@@ -96,9 +96,22 @@ mod tests {
     fn test_state() -> (tempfile::TempDir, AppState) {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::open(tmp.path().join("t.db").to_str().unwrap()).unwrap();
-        let cfg = crate::config::Config::default();
+        let mut cfg = crate::config::Config::default();
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
-        let procs = Arc::new(crate::services::proc::ProcManager::new(db.clone(), hub.clone()));
+        let procs = Arc::new(crate::services::proc::ProcManager::new(
+            db.clone(),
+            hub.clone(),
+            cfg.paths.datalab_dir.clone(),
+        ));
+        let watcher_engine = Arc::new(crate::services::watcher::WatcherEngine::new(
+            db.clone(),
+            Arc::new(crate::services::proc::Notifier::new()),
+            Arc::downgrade(&hub),
+            procs.clone(),
+            Arc::new(crate::services::node::NodeClient::new().unwrap()),
+            tokio::runtime::Handle::current(),
+        ));
         let state = AppState {
             db,
             cfg,
@@ -109,6 +122,7 @@ mod tests {
             node_client: Arc::new(crate::services::node::NodeClient::new().unwrap()),
             node_nonces: Arc::new(crate::services::node::NonceCache::default()),
             running: Arc::new(AtomicBool::new(true)),
+            watcher_engine,
         };
         (tmp, state)
     }

@@ -478,7 +478,7 @@ impl NodeClient {
         node: &Node,
         uuid: &str,
         operation: &FileOperation,
-    ) -> Result<bool> {
+    ) -> Result<serde_json::Value> {
         let path = format!("/v1/servers/{uuid}/files/operation");
         self.request(node, Method::POST, &path, Some(operation))
             .await
@@ -1017,6 +1017,9 @@ mod tests {
             updated_at: String::new(),
             tls_fingerprint: fp.into(),
             expected_fingerprint: String::new(),
+            drain_mode: String::new(),
+            drain_reason: String::new(),
+            drain_deadline: None,
         }
     }
 

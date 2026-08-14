@@ -596,7 +596,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         nonces.persist()?;
         return Ok(());
     }
-    let sans = voltpanel::tls::default_sans(&host_sans(&runtime.config.public_url));
+    let sans = voltpanel::tls::agent_sans(&host_sans(&runtime.config.public_url));
     let material = voltpanel::tls::ensure_material(&runtime.config.tls_dir(), &sans)?;
     let server_config = voltpanel::tls::server_config(&material)?;
     tracing::info!(
@@ -711,7 +711,7 @@ fn heartbeat_value(runtime: &DaemonRuntime) -> NodeHeartbeat {
     let tls_fingerprint = if runtime.config.plaintext {
         String::new()
     } else {
-        let sans = voltpanel::tls::default_sans(&host_sans(&runtime.config.public_url));
+        let sans = voltpanel::tls::agent_sans(&host_sans(&runtime.config.public_url));
         match voltpanel::tls::ensure_material(&runtime.config.tls_dir(), &sans) {
             Ok(m) => m.fingerprint,
             Err(e) => {
@@ -1329,7 +1329,7 @@ async fn file_operation(
     Path(uuid): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> DResult<Json<NodeApiResponse<bool>>> {
+) -> DResult<Json<NodeApiResponse<serde_json::Value>>> {
     let path = format!("/v1/servers/{uuid}/files/operation");
     authenticated(&state, &headers, "POST", &path, &body).await?;
     let operation: FileOperation = serde_json::from_slice(&body)?;

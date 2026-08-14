@@ -31,6 +31,7 @@ pub struct LoginReq {
     pub remember: bool,
     #[serde(default)]
     pub totp_code: Option<String>,
+    pub recovery_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -148,8 +149,32 @@ pub async fn login(
     }
     if state.cfg.features.enable_2fa {
         if let Some(secret) = &user.twofa_secret {
-            let code = req.totp_code.as_deref().unwrap_or("");
-            if !auth::verify_totp_replay(user.id, secret, code) {
+            // Two second factors are accepted: the live TOTP code (replay
+            // tracked per 30s window) or a single-use recovery code. The
+            // recovery path atomically consumes the code in the DB, so a
+            // replay — including a racing double-submit — fails; see
+            // `models::consume_recovery_code`. A failed TOTP or a bogus
+            // recovery code falls through to the needs-2FA challenge.
+            let totp_ok = {
+                let code = req.totp_code.as_deref().unwrap_or("");
+                !code.is_empty() && auth::verify_totp_replay(user.id, secret, code)
+            };
+            let recovery_ok = if totp_ok {
+                true
+            } else {
+                let code = req.recovery_code.as_deref().unwrap_or("");
+                if code.is_empty() {
+                    false
+                } else {
+                    let uid = user.id;
+                    let code = code.to_string();
+                    blocking(state.db.clone(), move |db| {
+                        models::consume_recovery_code(&db, uid, &code)
+                    })
+                    .await?
+                }
+            };
+            if !totp_ok && !recovery_ok {
                 return Ok(Json(LoginResp {
                     user: None,
                     needs_2fa: true,
@@ -326,7 +351,14 @@ pub async fn update_profile(
         models::update_user(&db, &u)?;
         Ok(u)
     })
-    .await?;
+    .await
+    .map_err(|e| {
+        if create_constraint_violation(&e) {
+            ApiError::conflict("email already in use")
+        } else {
+            ApiError::from(e)
+        }
+    })?;
     Ok(Json(u))
 }
 
@@ -457,8 +489,13 @@ pub async fn confirm_2fa(
         return Err(ApiError::bad_request("invalid code"));
     }
     let secret = pending.clone();
+    // Enrollment mints the recovery-code set up front: the codes are hashed
+    // at rest and the plaintext is returned in this response exactly once.
+    let codes = auth::generate_recovery_codes();
+    let codes_store = codes.clone();
     blocking(state.db.clone(), move |db| {
-        models::set_twofa_secret(&db, u.id, Some(&secret))
+        models::set_twofa_secret(&db, u.id, Some(&secret))?;
+        models::replace_recovery_codes(&db, u.id, &codes_store)
     })
     .await?;
     auth::clear_pending_totp(u.id);
@@ -473,7 +510,7 @@ pub async fn confirm_2fa(
         )
     })
     .await?;
-    Ok(ok(serde_json::json!({ "ok": true })))
+    Ok(ok(serde_json::json!({ "ok": true, "recovery_codes": codes })))
 }
 
 pub async fn disable_2fa(
@@ -497,7 +534,8 @@ pub async fn disable_2fa(
         return Err(ApiError::bad_request("invalid code"));
     }
     blocking(state.db.clone(), move |db| {
-        models::set_twofa_secret(&db, u.id, None)
+        models::set_twofa_secret(&db, u.id, None)?;
+        models::delete_recovery_codes(&db, u.id)
     })
     .await?;
     blocking(state.db.clone(), move |db| {
@@ -512,6 +550,78 @@ pub async fn disable_2fa(
     })
     .await?;
     Ok(ok(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct RecoveryRegenerateReq {
+    pub password: String,
+    pub code: String,
+}
+
+/// Mint a fresh recovery-code set. Re-authentication with BOTH the current
+/// password and a live TOTP code is required, so neither a stolen session
+/// alone nor a leaked (already-used) recovery code can rotate the set. The
+/// old codes are revoked in the same transaction that stores the new ones;
+/// the plaintext is returned exactly once.
+pub async fn regenerate_recovery_codes(
+    State(state): State<AppState>,
+    AuthUser(u): AuthUser,
+    Json(req): Json<RecoveryRegenerateReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let cfg = state.cfg.clone();
+    let key = format!("2fa-regenerate:{}", u.id);
+    if !blocking(state.db.clone(), move |db| auth::rate_limit(&db, &cfg, &key)).await? {
+        return Err(ApiError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "too many verification attempts; try again later",
+        ));
+    }
+    if !state.cfg.features.enable_2fa {
+        return Err(ApiError::not_found("2FA is disabled"));
+    }
+    let user = blocking(state.db.clone(), move |db| models::get_user(&db, u.id)).await?;
+    let secret = user
+        .twofa_secret
+        .ok_or_else(|| ApiError::bad_request("2FA is not enabled"))?;
+    // Password check is argon2 work → blocking pool. A wrong password is
+    // rejected before any TOTP state is touched.
+    let stored = state
+        .db
+        .call(move |conn| {
+            conn.query_row("SELECT password_hash FROM users WHERE id=?1", [u.id], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(|_| anyhow::anyhow!("user not found"))
+        })
+        .await?;
+    let password_ok = blocking(state.db.clone(), move |_db| {
+        Ok(auth::verify_password(&stored, &req.password))
+    })
+    .await?;
+    if !password_ok {
+        return Err(ApiError::bad_request("invalid password"));
+    }
+    if !auth::verify_totp_replay(u.id, &secret, &req.code) {
+        return Err(ApiError::bad_request("invalid code"));
+    }
+    let codes = auth::generate_recovery_codes();
+    let codes_store = codes.clone();
+    blocking(state.db.clone(), move |db| {
+        models::replace_recovery_codes(&db, u.id, &codes_store)
+    })
+    .await?;
+    blocking(state.db.clone(), move |db| {
+        models::audit(
+            &db,
+            Some(u.id),
+            "2fa_recovery_regenerate",
+            "user",
+            "",
+            "recovery codes regenerated",
+        )
+    })
+    .await?;
+    Ok(ok(serde_json::json!({ "ok": true, "recovery_codes": codes })))
 }
 
 // ---------------- Admin: user management ----------------
@@ -692,7 +802,14 @@ pub async fn admin_update_user(
         models::update_user(&db, &u)?;
         user_json_with_squads(&db, &u)
     })
-    .await?;
+    .await
+    .map_err(|e| {
+        if create_constraint_violation(&e) {
+            ApiError::conflict("email already in use")
+        } else {
+            ApiError::from(e)
+        }
+    })?;
     Ok(Json(json))
 }
 
@@ -708,6 +825,41 @@ pub async fn admin_get_user(
     })
     .await?;
     Ok(data(json))
+}
+
+/// Admin 2FA reset: clears the target user's TOTP secret and recovery codes,
+/// and drops any pending in-memory enrollment, so the user must re-enroll
+/// from scratch. A root admin may reset any account except their own — the
+/// self case goes through the normal Profile → disable flow (which requires
+/// the user's own TOTP, proving possession). Audited with the actor id.
+pub async fn admin_reset_2fa(
+    State(state): State<AppState>,
+    a: AdminUser,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if id == a.0.id {
+        return Err(ApiError::bad_request(
+            "reset your own 2FA from Profile → Two-Factor Auth instead",
+        ));
+    }
+    let target = blocking(state.db.clone(), move |db| models::get_user(&db, id)).await?;
+    let actor_id = a.0.id;
+    let target_username = target.username;
+    blocking(state.db.clone(), move |db| {
+        models::set_twofa_secret(&db, id, None)?;
+        models::delete_recovery_codes(&db, id)?;
+        models::audit(
+            &db,
+            Some(actor_id),
+            "2fa_reset",
+            &format!("user #{id}"),
+            "",
+            &format!("2FA reset for {target_username}"),
+        )
+    })
+    .await?;
+    auth::clear_pending_totp(id);
+    Ok(ok(serde_json::json!({ "ok": true })))
 }
 
 pub async fn admin_delete_user(
@@ -835,8 +987,21 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.paths.logs_dir = tmp.path().join("logs");
         cfg.paths.servers_dir = tmp.path().join("servers");
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
-        let procs = Arc::new(crate::services::proc::ProcManager::new(db.clone(), hub.clone()));
+        let procs = Arc::new(crate::services::proc::ProcManager::new(
+            db.clone(),
+            hub.clone(),
+            cfg.paths.datalab_dir.clone(),
+        ));
+        let watcher_engine = Arc::new(crate::services::watcher::WatcherEngine::new(
+            db.clone(),
+            Arc::new(crate::services::proc::Notifier::new()),
+            Arc::downgrade(&hub),
+            procs.clone(),
+            Arc::new(crate::services::node::NodeClient::new().unwrap()),
+            tokio::runtime::Handle::current(),
+        ));
         let state = AppState {
             db,
             cfg,
@@ -847,6 +1012,7 @@ mod tests {
             node_client: Arc::new(crate::services::node::NodeClient::new().unwrap()),
             node_nonces: Arc::new(crate::services::node::NonceCache::default()),
             running: Arc::new(AtomicBool::new(true)),
+            watcher_engine,
         };
         (tmp, state)
     }
@@ -1054,5 +1220,259 @@ mod tests {
         assert_eq!(body["squads"].as_array().unwrap().len(), 1);
         assert_eq!(body["squads"][0]["id"], squad_id);
         assert_eq!(body["squads"][0]["role"], "manager");
+    }
+
+    fn totp_now(secret: &str) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        crate::auth::totp_from_secret(secret).unwrap().generate(now)
+    }
+
+    /// A user with 2FA enabled, a real password, and a recovery-code set.
+    fn seed_2fa_user(
+        state: &AppState,
+        name: &str,
+        password: &str,
+    ) -> (i64, String, String, Vec<String>, String) {
+        let hash = crate::auth::hash_password(&state.cfg, password).unwrap();
+        let uid = models::create_user(
+            &state.db,
+            name,
+            &format!("{name}@x.io"),
+            &hash,
+            false,
+            "en",
+            "dark",
+        )
+        .unwrap();
+        let secret = crate::auth::generate_totp_secret().unwrap();
+        models::set_twofa_secret(&state.db, uid, Some(&secret)).unwrap();
+        let codes = crate::auth::generate_recovery_codes();
+        models::replace_recovery_codes(&state.db, uid, &codes).unwrap();
+        let (raw, _) = crate::auth::create_session(
+            &state.db,
+            &state.cfg,
+            uid,
+            "test-agent",
+            "127.0.0.1",
+            false,
+        )
+        .unwrap();
+        (uid, secret, format!("vp_session={raw}"), codes, hash)
+    }
+
+    fn json_post(uri: &str, body: serde_json::Value, cookie: Option<&str>) -> axum::http::Request<Body> {
+        let mut builder = Request::builder().method("POST").uri(uri);
+        if let Some(c) = cookie {
+            builder = builder.header("cookie", c);
+        }
+        let mut req = builder
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo("127.0.0.1:5000".parse::<std::net::SocketAddr>().unwrap()));
+        req
+    }
+
+    async fn read_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let value = if bytes.is_empty() {
+            serde_json::json!(null)
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::json!(null))
+        };
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn login_accepts_single_use_recovery_code_when_2fa_enabled() {
+        let (_tmp, state) = test_state();
+        let (uid, _secret, _cookie, codes, _hash) = seed_2fa_user(&state, "rc-login", "hunter2pass");
+        let app = axum::Router::new()
+            .route("/api/login", axum::routing::post(login))
+            .with_state(state.clone());
+
+        let attempt = |recovery: Option<String>| {
+            let app = app.clone();
+            async move {
+                let body = serde_json::json!({
+                    "username": "rc-login",
+                    "password": "hunter2pass",
+                    "remember": false,
+                    "recovery_code": recovery,
+                });
+                let resp = app.clone().oneshot(json_post("/api/login", body, None)).await.unwrap();
+                let (status, value) = read_json(resp).await;
+                (status, value)
+            }
+        };
+
+        // A bogus code is answered with the 2FA challenge, not a session.
+        let (status, body) = attempt(Some("NOTACODE".to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["needs_2fa"], true, "failed recovery code keeps the challenge");
+
+        // The real code logs the user in and issues a session.
+        let (status, body) = attempt(Some(codes[0].clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["needs_2fa"], false);
+        assert_eq!(body["user"]["id"], uid);
+
+        // Replay of the consumed code fails and re-raises the challenge.
+        let (_, body) = attempt(Some(codes[0].clone())).await;
+        assert_eq!(body["needs_2fa"], true, "replayed recovery code must fail");
+
+        // A separate unused code still works: consumption is per code.
+        let (status, body) = attempt(Some(codes[1].clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["needs_2fa"], false);
+
+        // Normalization on the wire: separators/lowercase map to the code.
+        let (status, body) = attempt(Some(format!(
+            "{}-{}",
+            codes[2][..5].to_ascii_lowercase(),
+            codes[2][5..].to_ascii_lowercase()
+        )))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["needs_2fa"], false);
+    }
+
+    #[tokio::test]
+    async fn regenerate_recovery_codes_requires_password_and_totp_and_rotates() {
+        let (_tmp, state) = test_state();
+        let (uid, secret, cookie, old, _hash) = seed_2fa_user(&state, "rc-regen", "hunter2pass");
+        let app = axum::Router::new()
+            .route(
+                "/api/2fa/recovery/regenerate",
+                axum::routing::post(regenerate_recovery_codes),
+            )
+            .with_state(state.clone());
+
+        let count_hashes = |db: &crate::db::Db| -> Vec<String> {
+            let conn = db.get().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT code_hash FROM user_recovery_codes WHERE user_id=?1 ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([uid], |r| r.get::<_, String>(0))
+                .unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        let old_hashes: std::collections::HashSet<String> = count_hashes(&state.db).into_iter().collect();
+        assert_eq!(old_hashes.len(), 10);
+
+        // Wrong password: refused, codes untouched.
+        let req = json_post(
+            "/api/2fa/recovery/regenerate",
+            serde_json::json!({ "password": "wrong", "code": totp_now(&secret) }),
+            Some(&cookie),
+        );
+        let (status, _) = read_json(app.clone().oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Right password, wrong TOTP: refused.
+        let req = json_post(
+            "/api/2fa/recovery/regenerate",
+            serde_json::json!({ "password": "hunter2pass", "code": "000000" }),
+            Some(&cookie),
+        );
+        let (status, _) = read_json(app.clone().oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let unchanged: std::collections::HashSet<String> = count_hashes(&state.db).into_iter().collect();
+        assert_eq!(unchanged, old_hashes, "failed attempts must not rotate codes");
+
+        // Correct credentials: 10 fresh codes returned once, old set revoked.
+        let req = json_post(
+            "/api/2fa/recovery/regenerate",
+            serde_json::json!({ "password": "hunter2pass", "code": totp_now(&secret) }),
+            Some(&cookie),
+        );
+        let (status, body) = read_json(app.oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        let new_codes: Vec<String> = body["recovery_codes"]
+            .as_array()
+            .expect("new codes must be returned")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(new_codes.len(), 10);
+        assert!(
+            new_codes.iter().all(|c| !old.contains(c)),
+            "rotated codes must differ from the revoked set"
+        );
+        let new_hashes: std::collections::HashSet<String> = count_hashes(&state.db).into_iter().collect();
+        assert_eq!(new_hashes.len(), 10);
+        assert!(
+            new_hashes.iter().all(|h| !old_hashes.contains(h)),
+            "the old hashes must be revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_reset_2fa_clears_secret_and_codes_and_audits_but_refuses_self() {
+        let (_tmp, state) = test_state();
+        let (admin_id, cookie) = seed_admin(&state, "reset-admin");
+        let (victim, _secret, _cookie, _codes, _hash) =
+            seed_2fa_user(&state, "victim-2fa", "victim-pass");
+        let app = axum::Router::new()
+            .route(
+                "/api/admin/users/:id/2fa/reset",
+                axum::routing::post(admin_reset_2fa),
+            )
+            .with_state(state.clone());
+
+        // A root may not reset their own 2FA here; the Profile flow applies.
+        let req = json_post(
+            &format!("/api/admin/users/{admin_id}/2fa/reset"),
+            serde_json::json!({}),
+            Some(&cookie),
+        );
+        let (status, body) = read_json(app.clone().oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().map(|m| m.to_lowercase().contains("profile")).unwrap_or(false),
+            "self-reset must point at the normal disable flow: {body}"
+        );
+
+        // Resetting another user clears the secret and every code.
+        let req = json_post(
+            &format!("/api/admin/users/{victim}/2fa/reset"),
+            serde_json::json!({}),
+            Some(&cookie),
+        );
+        let (status, _) = read_json(app.oneshot(req).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK);
+        let u = models::get_user(&state.db, victim).unwrap();
+        assert!(u.twofa_secret.is_none(), "admin reset must clear the secret");
+        let left: i64 = state
+            .db
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id=?1",
+                [victim],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "admin reset must delete the recovery codes");
+
+        // The action is audited with the admin as actor and the victim named.
+        let conn = state.db.get().unwrap();
+        let (user_id, action, target, details): (Option<i64>, String, String, String) = conn
+            .query_row(
+                "SELECT user_id,action,target,details FROM audit_logs ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(user_id, Some(admin_id), "actor must be the admin");
+        assert_eq!(action, "2fa_reset");
+        assert_eq!(target, format!("user #{victim}"));
+        assert!(details.contains("victim-2fa"), "details must name the target: {details}");
     }
 }

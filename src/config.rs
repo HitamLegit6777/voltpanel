@@ -23,6 +23,53 @@ pub struct Config {
     /// without the section keep parsing.
     #[serde(default)]
     pub backups: Backups,
+    /// Embedded host-routing gateway settings. Default-disabled so existing
+    /// configs without the section keep parsing.
+    #[serde(default)]
+    pub sites: Sites,
+}
+
+/// Embedded host-routing gateway (`[sites]`).
+///
+/// The gateway listens on its own address and maps the `Host` header to a
+/// website record, serving its static root or reverse-proxying its upstream.
+/// It is a separate listener from the panel's `web.listen`, meant to sit in
+/// front of the public vhost traffic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sites {
+    /// Listen address for the gateway, e.g. `0.0.0.0:8081`. Absent/empty
+    /// disables the gateway entirely.
+    #[serde(default)]
+    pub listen: Option<SocketAddr>,
+    /// Reverse proxies allowed to set `X-Forwarded-Proto` / `X-Forwarded-For`
+    /// on gateway requests. The gateway itself terminates plain HTTP, so
+    /// `force_https` sites are only considered HTTPS when the socket peer is
+    /// one of these CIDRs AND the request carries `X-Forwarded-Proto: https`.
+    /// Empty (default) means forwarded headers are never trusted.
+    #[serde(default)]
+    pub trusted_proxies: Vec<IpNet>,
+    /// Max request body (MiB) the gateway buffers when reverse-proxying a
+    /// request to a site's upstream. Independent of the panel's
+    /// `web.max_body_mb`: public vhost traffic on the gateway gets its own
+    /// ceiling (default 16, validated 1..=64) so a big panel upload cap never
+    /// widens the proxied vhost surface.
+    #[serde(default = "default_sites_max_body_mb")]
+    pub max_body_mb: u64,
+}
+
+fn default_sites_max_body_mb() -> u64 {
+    16
+}
+
+impl Default for Sites {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            trusted_proxies: Vec::new(),
+            max_body_mb: default_sites_max_body_mb(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +351,9 @@ impl Config {
         if !(1..=4096).contains(&self.web.max_body_mb) {
             bail!("web.max_body_mb must be between 1 and 4096");
         }
+        if !(1..=64).contains(&self.sites.max_body_mb) {
+            bail!("sites.max_body_mb must be between 1 and 64");
+        }
         if self.limits.default_memory_mb == 0
             || self.limits.default_memory_mb > self.limits.max_memory_mb
         {
@@ -555,6 +605,7 @@ impl Default for Config {
                 enable_audit_log: true,
             },
             backups: Backups::default(),
+            sites: Sites::default(),
         }
     }
 }
@@ -777,5 +828,48 @@ mod tests {
         cfg.backups.mirror.enabled = false;
         cfg.backups.mirror.path = None;
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn sites_section_defaults_disabled_and_parses() {
+        // Default: gateway disabled, forwarded headers never trusted, body
+        // cap independent of the panel's (16 MiB, not web.max_body_mb 64).
+        let cfg = Config::default();
+        assert!(cfg.sites.listen.is_none());
+        assert!(cfg.sites.trusted_proxies.is_empty());
+        assert_eq!(cfg.sites.max_body_mb, 16);
+        // A legacy config without the [sites] section still parses.
+        let text = toml::to_string(&Config::default()).unwrap();
+        let legacy = text.split("[sites]").next().unwrap().to_string();
+        assert!(toml::from_str::<Config>(&legacy).is_ok());
+        // An explicit listen + trusted proxies parse and round-trip; an
+        // omitted max_body_mb falls back to the default.
+        // (The serialized default already carries a [sites] table, so strip
+        // it and append a fresh one instead of duplicating the header.)
+        let text = toml::to_string(&Config::default()).unwrap();
+        let without_sites = text.split("[sites]").next().unwrap();
+        let text = format!(
+            "{without_sites}[sites]\nlisten = \"0.0.0.0:8081\"\ntrusted_proxies = [\"127.0.0.1\", \"10.0.0.0/8\"]\n"
+        );
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.sites.listen, Some("0.0.0.0:8081".parse().unwrap()));
+        assert_eq!(parsed.sites.trusted_proxies.len(), 2);
+        assert!(parsed.sites.trusted_proxies[0].contains("127.0.0.1".parse().unwrap()));
+        assert_eq!(parsed.sites.max_body_mb, 16);
+        // The gateway body cap is bounded independently of the panel's.
+        let mut bad = Config::default();
+        bad.sites.max_body_mb = 0;
+        assert!(bad.validate().is_err());
+        bad.sites.max_body_mb = 65;
+        assert!(bad.validate().is_err());
+        bad.sites.max_body_mb = 64;
+        assert!(bad.validate().is_ok());
+        // deny_unknown_fields still bites inside the section.
+        let text = toml::to_string(&Config::default()).unwrap();
+        let without_sites = text.split("[sites]").next().unwrap();
+        let text = format!(
+            "{without_sites}[sites]\nlisten = \"0.0.0.0:8081\"\ntrusted_proxie = []\n"
+        );
+        assert!(toml::from_str::<Config>(&text).is_err());
     }
 }

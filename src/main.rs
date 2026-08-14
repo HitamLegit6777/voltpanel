@@ -207,12 +207,30 @@ async fn main() -> Result<()> {
     }
 
     let hub = Arc::new(services::console::ConsoleHub::new(cfg.clone()));
-    let procs = Arc::new(services::proc::ProcManager::new(db.clone(), hub.clone()));
+    let procs = Arc::new(services::proc::ProcManager::new(
+        db.clone(),
+        hub.clone(),
+        cfg.paths.datalab_dir.clone(),
+    ));
     let notifier = Arc::new(services::proc::Notifier::new());
     let monitor = Arc::new(services::Monitor::new());
     let running = Arc::new(AtomicBool::new(true));
     let node_client = Arc::new(services::node::NodeClient::new()?);
     let node_nonces = Arc::new(services::node::NonceCache::new());
+
+    // Console watcher engine: evaluates operator-defined patterns against
+    // completed runtime lines and dispatches notify/restart/stop/command. It
+    // holds a `Weak` back-edge to the hub (the hub owns the engine), so it is
+    // built after both exist and injected once via `set_engine`.
+    let watcher_engine = Arc::new(services::watcher::WatcherEngine::new(
+        db.clone(),
+        notifier.clone(),
+        Arc::downgrade(&hub),
+        procs.clone(),
+        node_client.clone(),
+        tokio::runtime::Handle::current(),
+    ));
+    hub.set_engine(watcher_engine.clone());
 
     // seed
     seed(&db, &cfg)?;
@@ -227,6 +245,7 @@ async fn main() -> Result<()> {
         node_client: node_client.clone(),
         node_nonces: node_nonces.clone(),
         running: running.clone(),
+        watcher_engine: watcher_engine.clone(),
     };
 
     // Register local limits + reconcile local workload state. Remote-node
@@ -252,6 +271,15 @@ async fn main() -> Result<()> {
     // first request.
     LazyLock::force(&REQUEST_COUNTERS);
     let app = build_router(state);
+
+    // ---- host-routing gateway (optional) ----
+    // `[sites].listen` unset → disabled. A bind failure on a configured
+    // address fails fast: the panel refuses to boot with a misconfigured
+    // gateway. A later runtime serve error is logged by the task and the
+    // panel keeps serving.
+    let gateway_task = services::gateway::Gateway::new(db.clone(), cfg.clone())
+        .start(running.clone())
+        .await?;
 
     let addr = cfg.web.listen;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -284,6 +312,12 @@ async fn main() -> Result<()> {
         tracing::warn!("workload drain task failed: {e}");
     }
     serve_result?;
+    // The gateway shares the `running` flag, so it stops accepting new
+    // connections and drains concurrently with the panel; join it so
+    // shutdown completes gracefully before the process exits.
+    if let Some(task) = gateway_task {
+        let _ = task.await;
+    }
     Ok(())
 }
 
@@ -295,6 +329,10 @@ fn shutdown_signal(
     running: Arc<AtomicBool>,
     procs: Arc<services::proc::ProcManager>,
 ) -> (impl Future<Output = ()> + Send + 'static, tokio::task::JoinHandle<()>) {
+    // The drain must not start until the shutdown signal fires: its first act
+    // sets `ProcManager::stopped`, which permanently blocks new server starts.
+    // A oneshot fires the drain exactly once, when SIGTERM/SIGINT arrives.
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let signal = async move {
         #[cfg(unix)]
         {
@@ -310,8 +348,10 @@ fn shutdown_signal(
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("shutting down: draining HTTP connections and workloads");
         running.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = tx.send(());
     };
     let drain = async move {
+        let _ = rx.await;
         procs.set_stop();
         // Graceful stop: ProcManager::stop SIGTERMs the whole process group,
         // then gives it a 10s drain window before its own last-resort SIGKILL
@@ -604,10 +644,11 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/2fa/setup", get(users::setup_2fa))
         .route("/api/2fa/confirm", post(users::confirm_2fa))
         .route("/api/2fa/disable", post(users::disable_2fa))
+        .route("/api/2fa/recovery/regenerate", post(users::regenerate_recovery_codes))
         // ------- servers -------
         .route("/api/servers", get(servers::list))
         .route("/api/servers/all", get(servers::admin_list_all))
-        .route("/api/servers", post(servers::create))
+        .route("/api/servers", post(servers::create).layer(axum::middleware::from_fn_with_state(state.clone(), api::idempotency)))
         .route("/api/servers/:id", get(servers::get))
         .route("/api/servers/:id", patch(servers::update))
         .route("/api/servers/:id", delete(servers::delete))
@@ -666,6 +707,15 @@ fn build_router(state: api::AppState) -> Router {
             "/api/servers/:id/console/crash-policy",
             patch(console::crash_policy),
         )
+        // ------- console watchers -------
+        .route(
+            "/api/servers/:id/console/watchers",
+            get(watchers::list).post(watchers::create),
+        )
+        .route(
+            "/api/servers/:id/console/watchers/:watcher_id",
+            put(watchers::update).delete(watchers::delete),
+        )
         // ------- files -------
         .route("/api/servers/:id/files", get(files::list))
         .route("/api/servers/:id/files/read", get(files::read))
@@ -676,6 +726,7 @@ fn build_router(state: api::AppState) -> Router {
         )
         .route("/api/servers/:id/files/upload_b64", post(files::upload_b64))
         .route("/api/servers/:id/files/download", get(files::download))
+        .route("/api/servers/:id/files/download_multi", get(files::download_multi))
         .route("/api/servers/:id/files/rename", post(files::rename))
         .route("/api/servers/:id/files/copy", post(files::copy))
         .route("/api/servers/:id/files/move", post(files::move_files))
@@ -765,12 +816,12 @@ fn build_router(state: api::AppState) -> Router {
             "/api/schedules/:id/toggle/:enabled",
             post(schedules::toggle),
         )
-        .route("/api/schedules/:id/run", post(schedules::run_now))
+        .route("/api/schedules/:id/run", post(schedules::run_now).layer(axum::middleware::from_fn_with_state(state.clone(), api::idempotency)))
         // ------- backups -------
         .route("/api/servers/:id/backups", get(backups::list))
-        .route("/api/servers/:id/backups", post(backups::create))
+        .route("/api/servers/:id/backups", post(backups::create).layer(axum::middleware::from_fn_with_state(state.clone(), api::idempotency)))
         .route("/api/backups/:id/download", get(backups::download))
-        .route("/api/backups/:id/restore", post(backups::restore))
+        .route("/api/backups/:id/restore", post(backups::restore).layer(axum::middleware::from_fn_with_state(state.clone(), api::idempotency)))
         .route("/api/backups/:id/delete", delete(backups::delete))
         .route("/api/backups/:id/verify", get(backups::verify))
         .route("/api/backups/:id/lock", post(backups::lock))
@@ -792,6 +843,14 @@ fn build_router(state: api::AppState) -> Router {
             get(databases::tables),
         )
         .route("/api/servers/:id/databases/:name", delete(databases::drop))
+        .route(
+            "/api/servers/:id/databases/:name/export",
+            get(databases::export),
+        )
+        .route(
+            "/api/servers/:id/databases/:name/import",
+            post(databases::import),
+        )
         .route(
             "/api/servers/:id/databases/:dbid/credentials",
             get(databases::credentials),
@@ -820,6 +879,11 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/settings/limits", post(settings::update_limits))
         .route("/api/audit", get(settings::audit_logs))
         .route("/api/notifications", get(settings::notifications))
+        .route("/api/notifications/stream", get(settings::notifications_stream))
+        .route(
+            "/api/notifications/:id/read",
+            post(settings::notifications_read),
+        )
         .route(
             "/api/notifications/clear",
             post(settings::notifications_clear),
@@ -840,6 +904,8 @@ fn build_router(state: api::AppState) -> Router {
         )
         .route("/api/system/rate-limits", get(system::rate_limits_status))
         .route("/api/capabilities", get(system::capabilities))
+        .route("/api/meta", get(api::meta))
+        .route("/api/meta/openapi.json", get(api::openapi))
         // ------- multi-node -------
         .route("/api/nodes", get(nodes::list))
         .route("/api/nodes", post(nodes::create))
@@ -850,6 +916,8 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/nodes/:id", delete(nodes::delete))
         .route("/api/nodes/:id/test", post(nodes::test_connection))
         .route("/api/nodes/:id/rotate-secret", post(nodes::rotate_secret))
+        .route("/api/nodes/:id/drain", post(nodes::drain))
+        .route("/api/nodes/:id/drain", delete(nodes::clear_drain))
         .route(
             "/api/nodes/:id/enrollment",
             post(nodes::regenerate_enrollment),
@@ -871,6 +939,10 @@ fn build_router(state: api::AppState) -> Router {
         .route("/api/admin/users/:id", patch(users::admin_update_user))
         .route("/api/admin/users/:id", delete(users::admin_delete_user))
         .route("/api/admin/users/:id", get(users::admin_get_user))
+        .route(
+            "/api/admin/users/:id/2fa/reset",
+            post(users::admin_reset_2fa),
+        )
         .route("/api/admin/sessions", get(users::admin_sessions))
         .route(
             "/api/admin/sessions/:token_prefix",
@@ -1165,6 +1237,7 @@ mod cli_tests {
         let temp = tempfile::tempdir().unwrap();
         let mut cfg = config::Config::default();
         cfg.general.data_dir = temp.path().to_path_buf();
+        cfg.paths.datalab_dir = temp.path().join("datalab");
         let db = db::open(&temp.path().join("voltpanel.db").to_string_lossy()).unwrap();
         let user_id = models::create_user(
             &db,
@@ -1202,13 +1275,18 @@ mod cli_tests {
             1024,
             8192,
             100,
+            0,
         )
         .unwrap();
         models::set_server_node(&db, server_id, "edge-1").unwrap();
         models::set_server_status(&db, server_id, "running").unwrap();
 
         let hub = Arc::new(services::console::ConsoleHub::new(cfg.clone()));
-        let procs = Arc::new(services::proc::ProcManager::new(db.clone(), hub));
+        let procs = Arc::new(services::proc::ProcManager::new(
+            db.clone(),
+            hub,
+            cfg.paths.datalab_dir.clone(),
+        ));
         let monitor = Arc::new(services::Monitor::new());
         let servers = models::list_servers(&db, None, false).unwrap();
         bootstrap_startup_servers(&db, &procs, &monitor, &servers);

@@ -82,6 +82,14 @@ fn normalize_host(host: &str) -> String {
 /// Validate a site domain and return the lowercased canonical form:
 /// optional leading `*.` wildcard, then hostname labels of `[a-z0-9-]` with
 /// no leading/trailing dash; whole name 1..=253 chars, labels <= 63.
+///
+/// A wildcard's body must span at least two labels, so `*.example.com` is
+/// accepted but a bare-TLD wildcard like `*.com` is rejected: `*.com` would
+/// match every `.com` host the gateway sees, hijacking hosts from any tenant
+/// (the cross-tenant wildcard finding). Without a public-suffix list this
+/// label count is the conservative proxy for "covers a registrable domain" —
+/// a two-label body that is itself a public suffix (`*.co.uk`) still passes;
+/// rejecting that class needs a PSL dependency, deliberately not added.
 pub fn validate_hostname(raw: &str) -> Result<String> {
     let domain = raw.trim().to_lowercase();
     let body = domain.strip_prefix("*.").unwrap_or(&domain);
@@ -90,6 +98,12 @@ pub fn validate_hostname(raw: &str) -> Result<String> {
     }
     if domain.len() > 253 {
         bail!("domain must be at most 253 characters");
+    }
+    if domain.starts_with("*.") && body.split('.').count() < 2 {
+        bail!(
+            "wildcard domains must cover at least two labels after '*.' \
+             (e.g. *.example.com, not *.com)"
+        );
     }
     for label in body.split('.') {
         if label.is_empty() {
@@ -529,12 +543,45 @@ pub fn match_host<'a>(sites: &'a [Site], host: &str) -> Option<&'a Site> {
 
 /// Resolve the on-disk root for a website.
 pub fn root_for(cfg: &Config, server_id: i64, w: &Website) -> Result<PathBuf> {
-    validate_root_dir(cfg, server_id, &w.root_dir)?;
+    root_for_dir(cfg, server_id, &w.root_dir)
+}
+
+
+/// Resolve a Host header to an enabled site across ALL servers — the
+/// host-routing gateway's scope. Domains (including wildcards) are globally
+/// unique (`idx_websites_domain`), so an exact match is unambiguous; the
+/// same dot-boundary longest-suffix matcher applies to wildcards.
+pub fn resolve_host(db: &Db, host: &str) -> Result<Option<Site>> {
+    let host = normalize_host(host);
+    let conn = db.get()?;
+    if let Some(s) = conn
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM websites WHERE enabled=1 AND domain=?1"),
+            params![host],
+            site_from_row,
+        )
+        .optional()?
+    {
+        return Ok(Some(s));
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM websites WHERE enabled=1 AND domain LIKE '*.%'"
+    ))?;
+    let rows = stmt.query_map([], site_from_row)?;
+    let wildcards = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(match_host(&wildcards, &host).cloned())
+}
+
+/// Resolve the on-disk root for a site's `root_dir`, re-validating that it
+/// stays inside `website_dir/server_<id>` (lexical pass + symlink-escape
+/// pass). Used by both the site API and the host-routing gateway.
+pub fn root_for_dir(cfg: &Config, server_id: i64, root_dir: &str) -> Result<PathBuf> {
+    validate_root_dir(cfg, server_id, root_dir)?;
     Ok(cfg
         .paths
         .website_dir
         .join(format!("server_{server_id}"))
-        .join(w.root_dir.trim_start_matches('/')))
+        .join(root_dir.trim_start_matches('/')))
 }
 
 #[cfg(test)]
@@ -604,6 +651,31 @@ mod tests {
         assert!(validate_hostname(&format!("*.{}", "a".repeat(252))).is_err());
         assert!(validate_hostname(&format!("{}.com", "a".repeat(63))).is_ok());
         assert!(validate_hostname(&format!("{}.com", "a".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn wildcard_requires_two_label_body() {
+        // A wildcard must cover at least two labels: *.example.com is fine,
+        // but *.com would match every .com host the gateway sees.
+        for ok in [
+            "*.example.com",
+            "*.sub.example.com",
+            // Two-label body ending in a public suffix passes by design —
+            // distinguishing it from *.example.com needs a PSL (documented
+            // in validate_hostname).
+            "*.co.uk",
+            "*.co.jp",
+        ] {
+            assert!(validate_hostname(ok).is_ok(), "{ok} should be accepted");
+        }
+        for bad in ["*.com", "*.net", "*.org", "*.io", "*.uk", "*.co"] {
+            assert!(
+                validate_hostname(bad).is_err(),
+                "{bad:?} must be rejected (would hijack the whole TLD)"
+            );
+        }
+        // Non-wildcard single-label hosts stay valid (e.g. an intranet name).
+        assert!(validate_hostname("intranet").is_ok());
     }
 
     #[test]
@@ -881,6 +953,53 @@ mod tests {
             resolve(&t.db, t.sid, "www.example.com").unwrap().unwrap().domain,
             "www.example.com"
         );
+    }
+
+    #[test]
+    fn resolve_host_matches_across_all_servers() {
+        let t = TestDb::new();
+        let srv2: i64 = {
+            let conn = t.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO servers(uuid,name,user_id,blueprint_id,created_at,updated_at)
+                 VALUES('s2','srv2',?1,?2,'now','now')",
+                rusqlite::params![t.uid, t.bid],
+            )
+            .unwrap();
+            let id = conn.last_insert_rowid();
+            insert_website(&conn, id, "*.example.com");
+            id
+        };
+
+        // the gateway scope crosses server boundaries
+        assert_eq!(
+            resolve_host(&t.db, "www.example.com").unwrap().unwrap().domain,
+            "*.example.com"
+        );
+        assert_eq!(
+            resolve_host(&t.db, "www.example.com").unwrap().unwrap().server_id,
+            srv2
+        );
+        // exact beats wildcard regardless of owning server
+        {
+            let conn = t.db.get().unwrap();
+            insert_website(&conn, t.sid, "www.example.com");
+        }
+        assert_eq!(
+            resolve_host(&t.db, "www.example.com").unwrap().unwrap().server_id,
+            t.sid
+        );
+        // disabled sites and unknown hosts resolve to None
+        {
+            let conn = t.db.get().unwrap();
+            conn.execute(
+                "UPDATE websites SET enabled=0 WHERE domain='*.example.com'",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(resolve_host(&t.db, "other.example.com").unwrap().is_none());
+        assert!(resolve_host(&t.db, "nope.example.net").unwrap().is_none());
     }
 
     #[test]

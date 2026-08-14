@@ -119,16 +119,64 @@ Transfers are offline and integrity-checked:
 
 Failure rollback deletes target state and restarts the source when possible.
 
-## Node maintenance
+## Node drain
 
-Before maintenance:
+Automated drain replaces the manual maintenance dance (`schedulable=false` +
+`maintenance=true` + manual stops). A node in drain is cordoned immediately:
+placement refuses it and no new workloads land on it, while its existing
+workloads keep running until you decide otherwise.
 
-1. Set node `schedulable=false`
-2. Set `maintenance=true`
-3. Transfer or stop workloads
-4. Upgrade and reboot
-5. Run `voltd-manage doctor`
-6. Re-enable scheduling
+**Cordon (hold)** — keep workloads up, stop new placements:
+
+```bash
+curl -X POST /api/nodes/:id/drain \
+  -H 'Authorization: ...' -H 'Content-Type: application/json' \
+  -d '{"mode":"hold","reason":"rack maintenance","deadline_secs":3600}'
+```
+
+**Drain (stop)** — cordon and stop every running workload on the node:
+
+```bash
+curl -X POST /api/nodes/:id/drain \
+  -H 'Authorization: ...' -H 'Content-Type: application/json' \
+  -d '{"mode":"stop","reason":"kernel upgrade","deadline_secs":1800}'
+```
+
+`mode` is `hold` (cordon only) or `stop` (cordon + stop workloads). `reason`
+is free text up to 512 characters; `deadline_secs` (60–86400) is an
+auto-lift deadline — the drain is cleared automatically once it passes, no
+stop escalation is attempted. Both are persisted with the drain.
+
+`stop` mode stops the node's running servers through the signed node
+protocol with bounded concurrency (4 at a time); workloads are not
+transferred in this iteration. A server that does not stop within the wait
+budget is recorded as a node event (`drain_stop`) and its id is returned in
+`failed_ids` — the drain state itself is already committed, so a partial
+stop never leaves the node schedulable.
+
+Workflow:
+
+1. Drain the node (`mode: stop`), note `failed_ids` if any
+2. Upgrade and reboot the node
+3. Run `voltd-manage doctor`
+4. Lift the drain:
+
+```bash
+curl -X DELETE /api/nodes/:id/drain
+```
+
+Lifting the drain clears the drain state and restores scheduling
+(`schedulable=true`, `maintenance=false`). A 15-second reconcile sweep
+atomically clears the drain after the deadline passes, restoring
+`schedulable=1`/`maintenance=0` and recording a `drain_expired` node event;
+lifting manually with `DELETE /api/nodes/:id/drain` applies the same
+restoration immediately. The node GET response carries the current drain
+state as a `drain` object:
+
+```json
+{"active": true, "mode": "stop", "reason": "kernel upgrade",
+ "deadline": "2026-08-10T18:00:00+00:00", "affected_count": 3}
+```
 
 ## Secret rotation and re-enrollment
 

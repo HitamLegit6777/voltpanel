@@ -537,6 +537,9 @@ pub async fn get(
     })))
 }
 
+/// Ceiling for a workspace's symmetric network throttle (100 Gb/s).
+const MAX_NETWORK_MBPS: u64 = 100_000;
+
 #[derive(Deserialize)]
 pub struct CreateServerReq {
     pub name: String,
@@ -547,6 +550,8 @@ pub struct CreateServerReq {
     pub memory_mb: Option<i64>,
     pub disk_mb: Option<i64>,
     pub cpu_percent: Option<i64>,
+    #[serde(default)]
+    pub network_mbps: u64,
     pub variables: Option<std::collections::HashMap<String, String>>,
     pub port: Option<i64>,
     #[serde(default)]
@@ -606,6 +611,12 @@ pub async fn create(
         .await as i64,
     );
     validate_resources(mem, disk, cpu)?;
+    let network_mbps = req.network_mbps;
+    if network_mbps > MAX_NETWORK_MBPS {
+        return Err(ApiError::bad_request(format!(
+            "network speed must not exceed {MAX_NETWORK_MBPS} Mb/s"
+        )));
+    }
     if let Some(port) = req.port {
         models::validate_port(port).map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
@@ -641,6 +652,14 @@ pub async fn create(
             _ => None,
         }
     };
+    if let Some(node) = &chosen_node {
+        if !node.online() {
+            return Err(ApiError::new(
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("agent '{}' is offline — start the node agent and retry", node.name),
+            ));
+        }
+    }
     let uuid = uuid::Uuid::new_v4().to_string();
     let runtime_hint = match req.runtime_hint.clone() {
         Some(hint) => {
@@ -730,8 +749,8 @@ pub async fn create(
             }
             let ts = chrono::Utc::now().to_rfc3339();
             tx.execute(
-                "INSERT INTO servers(uuid,name,user_id,blueprint_id,runtime_hint,startup,memory_mb,disk_mb,cpu_percent,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'offline',?10,?10)",
-                params![uuid, name, owner_id, bp_id, runtime_hint, launch_command, mem, disk, cpu, ts],
+                "INSERT INTO servers(uuid,name,user_id,blueprint_id,runtime_hint,startup,memory_mb,disk_mb,cpu_percent,network_mbps,status,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'offline',?11,?11)",
+                params![uuid, name, owner_id, bp_id, runtime_hint, launch_command, mem, disk, cpu, network_mbps as i64, ts],
             )?;
             let id = tx.last_insert_rowid();
             if let Some(node) = &chosen_node {
@@ -759,7 +778,14 @@ pub async fn create(
         .map_err(|e| match e.downcast_ref::<CreateTxError>() {
             Some(CreateTxError::Quota) => ApiError::bad_request("owner reached workspace limit"),
             Some(CreateTxError::PortConflict(msg)) => ApiError::conflict(msg),
-            None => ApiError::from(e),
+            None => {
+                let msg = e.to_string();
+                if msg.contains("no online node") {
+                    ApiError::conflict("no online agent has enough free capacity for this workspace")
+                } else {
+                    ApiError::from(e)
+                }
+            }
         })?;
     let mut rollback = CreateRollback {
         db: state.db.clone(),
@@ -817,6 +843,7 @@ pub async fn create(
                 memory_mb: mem as u64,
                 disk_mb: disk as u64,
                 cpu_percent: cpu as u64,
+                network_mbps,
                 port: port_req.and_then(|p| u16::try_from(p).ok()),
                 ports: models::ports_for_server(&db, srv2.id)?
                     .into_iter()
@@ -921,6 +948,7 @@ pub struct UpdateServerReq {
     pub disk_mb: Option<i64>,
     pub cpu_percent: Option<i64>,
     pub auto_restart: Option<bool>,
+    pub network_mbps: Option<u64>,
 }
 
 pub async fn update(
@@ -983,6 +1011,14 @@ pub async fn update(
     if let Some(ar) = req.auto_restart {
         s.auto_restart = ar;
     }
+    if let Some(mbps) = req.network_mbps {
+        if mbps > MAX_NETWORK_MBPS {
+            return Err(ApiError::bad_request(format!(
+                "network speed must not exceed {MAX_NETWORK_MBPS} Mb/s"
+            )));
+        }
+        s.network_mbps = mbps as i64;
+    }
 
     s = blocking(state.db.clone(), move |db| {
         models::update_server(&db, &s)?;
@@ -1006,6 +1042,7 @@ pub async fn update(
                 memory_mb: s2.memory_mb as u64,
                 disk_mb: s2.disk_mb as u64,
                 cpu_percent: s2.cpu_percent as u64,
+                network_mbps: s2.network_mbps as u64,
                 port: s2.port.and_then(|p| u16::try_from(p).ok()),
                 ports,
                 env: blueprint::env_for_server(&db, &s2),
@@ -1136,6 +1173,7 @@ pub async fn update_vars(
                 memory_mb: s2.memory_mb as u64,
                 disk_mb: s2.disk_mb as u64,
                 cpu_percent: s2.cpu_percent as u64,
+                network_mbps: s2.network_mbps as u64,
                 port: s2.port.and_then(|p| u16::try_from(p).ok()),
                 ports,
                 env: blueprint::env_for_server(&db, &s2),
@@ -1260,13 +1298,47 @@ pub async fn delete(
     Ok(ok(serde_json::json!({"ok":true})))
 }
 
+/// Query params for physical removal of a server.
+#[derive(Deserialize)]
+pub struct PurgeQuery {
+    /// Bypass the recent-Data-Lab-backup gate. Recorded in the audit entry.
+    #[serde(default)]
+    pub force: bool,
+}
+
 /// Physical removal of dir + DB row (admin).
+///
+/// A server whose Data Lab store is non-empty may only be removed while a
+/// recent recoverable copy exists: an unlocked backup created within the
+/// last 24h whose archive includes the Data Lab tree
+/// ([`models::has_recent_data_lab_backup`]). The gate runs before any
+/// workload stop or file deletion, so a refused purge leaves the server
+/// fully intact; `?force=true` bypasses it and is recorded in the audit
+/// details.
 pub async fn purge(
     State(state): State<AppState>,
     a: AdminUser,
     Path(id): Path<i64>,
+    Query(q): Query<PurgeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let s = blocking(state.db.clone(), move |db| models::get_server_any(&db, id)).await?;
+
+    // Data Lab gate: check emptiness and backup recency in one blocking unit
+    // before anything is stopped or deleted. `s` is cloned for the closure
+    // because both branches below use it afterwards.
+    let dl_root = state.cfg.paths.datalab_dir.clone();
+    let srv_for_gate = s.clone();
+    let (datalab_nonempty, recent_backup) = blocking(state.db.clone(), move |db| {
+        let nonempty = !services::databases::list(&srv_for_gate, &dl_root)?.is_empty();
+        let recent = models::has_recent_data_lab_backup(&db, srv_for_gate.id, 24)?;
+        Ok((nonempty, recent))
+    })
+    .await?;
+    if datalab_nonempty && !recent_backup && !q.force {
+        return Err(ApiError::conflict(
+            "recent Data Lab Vault backup required; retry with ?force=true",
+        ));
+    }
     if s.node != "local" {
         // The node row may already be gone (a node holding only soft-deleted
         // servers can be removed, since the delete guard counts deleted=0
@@ -1320,6 +1392,7 @@ pub async fn purge(
     let sid = s.id;
     let sname = s.name.clone();
     let snode = s.node.clone();
+    let force = q.force;
     blocking(state.db.clone(), move |db| {
         models::free_ports(&db, sid)?;
         models::delete_server_vars(&db, sid)?;
@@ -1330,7 +1403,7 @@ pub async fn purge(
             "server_purge",
             &format!("server #{id}"),
             "",
-            &format!("{sname} node={snode}"),
+            &format!("{sname} node={snode} force={force}"),
             Some(sid),
         )
     })
@@ -2444,6 +2517,7 @@ mod tests {
             crash_restarts: 0,
             crash_window_start: String::new(),
             crash_reason: String::new(),
+            network_mbps: 0,
             created_at: "now".into(),
             updated_at: "now".into(),
         }
@@ -2541,10 +2615,20 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.paths.logs_dir = tmp.path().join("logs");
         cfg.paths.servers_dir = tmp.path().join("servers");
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
         let procs = Arc::new(crate::services::proc::ProcManager::new(
             db.clone(),
             hub.clone(),
+            cfg.paths.datalab_dir.clone(),
+        ));
+        let watcher_engine = Arc::new(crate::services::watcher::WatcherEngine::new(
+            db.clone(),
+            Arc::new(crate::services::proc::Notifier::new()),
+            Arc::downgrade(&hub),
+            procs.clone(),
+            Arc::new(crate::services::node::NodeClient::new().unwrap()),
+            tokio::runtime::Handle::current(),
         ));
         let state = AppState {
             db,
@@ -2556,6 +2640,7 @@ mod tests {
             node_client: Arc::new(crate::services::node::NodeClient::new().unwrap()),
             node_nonces: Arc::new(crate::services::node::NonceCache::default()),
             running: Arc::new(AtomicBool::new(true)),
+            watcher_engine,
         };
         (tmp, state)
     }
@@ -2599,6 +2684,7 @@ mod tests {
             512,
             1024,
             100,
+            0,
         )
         .unwrap();
         if let Some(name) = node {
@@ -2729,6 +2815,165 @@ mod tests {
         assert!(models::get_server_any(&state.db, server_id).is_err());
     }
 
+    /// Seed a non-empty Data Lab store (one `.db` file) plus an optional
+    /// backup archive on disk for the server, mirroring what `create` leaves
+    /// behind in production.
+    fn seed_datalab_and_backup(
+        state: &AppState,
+        uuid: &str,
+        server_id: i64,
+        included: bool,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let srv = models::get_server(&state.db, server_id).unwrap();
+        let dl_dir = services::databases::db_dir(&srv, &state.cfg.paths.datalab_dir);
+        std::fs::create_dir_all(&dl_dir).unwrap();
+        std::fs::write(dl_dir.join("lab.db"), b"x").unwrap();
+        let bpath = state
+            .cfg
+            .paths
+            .servers_dir
+            .join(uuid)
+            .join("v.tar");
+        std::fs::create_dir_all(bpath.parent().unwrap()).unwrap();
+        std::fs::write(&bpath, b"b").unwrap();
+        models::create_backup_with_vault(
+            &state.db,
+            "b1",
+            server_id,
+            "vault",
+            bpath.to_str().unwrap(),
+            1,
+            "c",
+            "tar",
+            "",
+            included,
+            i64::from(included),
+        )
+        .unwrap();
+        (dl_dir, bpath)
+    }
+
+    #[tokio::test]
+    async fn purge_refuses_nonempty_datalab_without_recent_vault_backup() {
+        let (_tmp, state) = test_state();
+        let (server_id, cookie) = seed(&state, "uuid-gate", None);
+        let (dl_dir, bpath) = seed_datalab_and_backup(&state, "uuid-gate", server_id, false);
+        let (status, body) = request(
+            state.clone(),
+            "DELETE",
+            &format!("/api/servers/{server_id}/purge"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("recent Data Lab Vault backup required"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("?force=true"));
+        // Nothing was destroyed: DB row, Data Lab store and the backup
+        // archive (even a non-included one) all survive.
+        assert!(models::get_server_any(&state.db, server_id).is_ok());
+        assert!(dl_dir.join("lab.db").exists());
+        assert!(bpath.exists());
+        assert_eq!(models::list_backups(&state.db, server_id).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn purge_succeeds_with_recent_unlocked_included_vault_backup() {
+        let (_tmp, state) = test_state();
+        let (server_id, cookie) = seed(&state, "uuid-gate-ok", None);
+        let (dl_dir, bpath) = seed_datalab_and_backup(&state, "uuid-gate-ok", server_id, true);
+        let (status, _) = request(
+            state.clone(),
+            "DELETE",
+            &format!("/api/servers/{server_id}/purge"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(models::get_server_any(&state.db, server_id).is_err());
+        assert!(!dl_dir.exists());
+        assert!(!bpath.exists());
+    }
+
+    #[tokio::test]
+    async fn purge_gate_ignores_locked_or_stale_included_backups() {
+        let (_tmp, state) = test_state();
+        let (server_id, cookie) = seed(&state, "uuid-gate-lock", None);
+        let (dl_dir, bpath) = seed_datalab_and_backup(&state, "uuid-gate-lock", server_id, true);
+        let vid = models::list_backups(&state.db, server_id).unwrap()[0].id;
+
+        // Locked backups are not recoverable, so they must not open the gate.
+        models::set_backup_locked(&state.db, vid, true).unwrap();
+        let (status, _) = request(
+            state.clone(),
+            "DELETE",
+            &format!("/api/servers/{server_id}/purge"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // A vaulted backup older than the 24h window must not open the gate.
+        models::set_backup_locked(&state.db, vid, false).unwrap();
+        let old = (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        state
+            .db
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE backups SET created_at=?1 WHERE id=?2",
+                params![old, vid],
+            )
+            .unwrap();
+        let (status, _) = request(
+            state.clone(),
+            "DELETE",
+            &format!("/api/servers/{server_id}/purge"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // Nothing removed by the refused purges.
+        assert!(models::get_server_any(&state.db, server_id).is_ok());
+        assert!(dl_dir.join("lab.db").exists());
+        assert!(bpath.exists());
+    }
+
+    #[tokio::test]
+    async fn purge_force_flag_bypasses_datalab_gate() {
+        let (_tmp, state) = test_state();
+        let (server_id, cookie) = seed(&state, "uuid-gate-force", None);
+        let (dl_dir, _) = seed_datalab_and_backup(&state, "uuid-gate-force", server_id, false);
+        let (status, _) = request(
+            state.clone(),
+            "DELETE",
+            &format!("/api/servers/{server_id}/purge?force=true"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(models::get_server_any(&state.db, server_id).is_err());
+        assert!(!dl_dir.exists());
+        // The audit entry records the bypass.
+        let details: String = state
+            .db
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT details FROM audit_logs WHERE action='server_purge' AND server_id=?1",
+                [server_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(details.contains("force=true"));
+    }
+
     #[tokio::test]
     async fn list_paginates_with_defaults_and_reports_total() {
         let (_tmp, state) = test_state();
@@ -2769,6 +3014,7 @@ mod tests {
                 512,
                 1024,
                 100,
+                0,
             )
             .unwrap();
         }

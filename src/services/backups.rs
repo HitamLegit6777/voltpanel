@@ -114,9 +114,33 @@ pub async fn create(
         fs::create_dir_all(&cfg.paths.backups_dir)?;
         // tar.gz to match the archive format node snapshots produce, so local
         // and remote backups behave identically end to end.
-        let size = crate::services::files::tar_gz_dir_excluding(&cfg, &server, ".", &out, &ignore)?;
+        // Data Lab: capture every server database into a temp `.voltp-datalab/`
+        // tree via the SQLite online backup API (consistency-safe even against
+        // a live store) and embed it in the archive under that virtual prefix.
+        // A missing or empty store yields no tree and the metadata stays 0/false.
+        let vault_dir = tempfile::Builder::new()
+            .prefix(".vault-")
+            .tempdir_in(&cfg.paths.backups_dir)?;
+        let vault_dbs = crate::services::databases::snapshot_server(
+            &server,
+            &cfg.paths.datalab_dir,
+            vault_dir.path(),
+        )?;
+        let size = if vault_dbs > 0 {
+            crate::services::files::tar_gz_dir_excluding_with_extra(
+                &cfg,
+                &server,
+                ".",
+                vault_dir.path(),
+                ".voltp-datalab",
+                &out,
+                &ignore,
+            )?
+        } else {
+            crate::services::files::tar_gz_dir_excluding(&cfg, &server, ".", &out, &ignore)?
+        };
         let checksum = checksum_file(&out)?;
-        let id = models::create_backup(
+        let id = models::create_backup_with_vault(
             &db,
             &uuid,
             server_id,
@@ -126,6 +150,8 @@ pub async fn create(
             &checksum,
             "tar.gz",
             &ignored,
+            vault_dbs > 0,
+            vault_dbs as i64,
         )?;
         // Offsite mirror: best-effort copy + retention trim once the primary
         // archive is durable. Failures are warn-only (see mirror_archive).
@@ -198,6 +224,29 @@ pub async fn restore(db: &Db, cfg: &Config, backup_id: i64) -> Result<()> {
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
+        // Data Lab: when the archive carries a `.voltp-datalab/` tree, it is
+        // restored into the panel-owned store. Ordering matters:
+        //   1. Integrity-check every extracted database BEFORE anything is
+        //      mutated — a corrupt snapshot must never overwrite the live
+        //      store, and a rejected restore leaves live server + live Data
+        //      Lab byte-identical.
+        //   2. Copy the tree to a `.restore-vault-*` staging NEXT to the live
+        //      Data Lab dir (same filesystem, so the final swap is pure
+        //      rename). This is the only fallible step, so it runs before the
+        //      server-dir swap: a failure aborts with nothing touched.
+        //   3. Drop the tree from the server staging before prepare_root, so
+        //      isolation never chowns panel-owned DB files to the workload UID.
+        //   4. After the server-dir swap succeeds, atomically exchange the
+        //      whole `<uuid>` dir (renameat2, same mechanism as the server
+        //      swap) — the Data Lab store is never absent mid-swap.
+        let vault_src = staging.join(".voltp-datalab");
+        let vault_staging = match prepare_vault_restore(&cfg, &vault_src) {
+            Ok(dir) => dir,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        };
         crate::isolation::prepare_root(&staging, &server.uuid)?;
         crate::isolation::own_tree(&staging, &server.uuid)?;
         // Atomic two-phase swap. The old code renamed the live dir aside and
@@ -221,6 +270,28 @@ pub async fn restore(db: &Db, cfg: &Config, backup_id: i64) -> Result<()> {
             }
         } else {
             fs::rename(&staging, &dir)?;
+        }
+        // Commit the Data Lab swap only after the server dir is in place. The
+        // staging lives beside the live dir (same filesystem), so this is pure
+        // rename; on failure, roll the server swap back best-effort — both
+        // dirs still exist at this point.
+        if let Some(vault_staging) = &vault_staging {
+            let live = cfg.paths.datalab_dir.join(&server.uuid);
+            let result = if live.exists() {
+                exchange_dirs(&live, vault_staging)
+                    .and_then(|()| fs::remove_dir_all(vault_staging).map_err(Into::into))
+            } else {
+                fs::rename(vault_staging, &live).map_err(Into::into)
+            };
+            if let Err(error) = result {
+                tracing::error!("could not swap Data Lab dir into place: {error}");
+                if dir.exists() && staging.exists() {
+                    if let Err(rollback) = exchange_dirs(&dir, &staging) {
+                        tracing::error!("rollback of server dir swap failed: {rollback}");
+                    }
+                }
+                return Err(error);
+            }
         }
         Ok(())
     })
@@ -258,6 +329,57 @@ pub async fn restore(db: &Db, cfg: &Config, backup_id: i64) -> Result<()> {
         }
     }
     result
+}
+
+/// Stage the extracted `.voltp-datalab/` tree for restore, or return `None`
+/// when the archive carries no Data Lab tree.
+///
+/// Validates every extracted database (integrity check) so a corrupt snapshot
+/// is refused before anything is mutated, copies the tree to a
+/// `.restore-vault-*` staging beside the live Data Lab dir (same filesystem as
+fn prepare_vault_restore(cfg: &Config, vault_src: &Path) -> Result<Option<PathBuf>> {
+    if !vault_src.exists() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(vault_src)? {
+        let entry = entry?;
+        if entry.path().extension().is_some_and(|e| e == "db") {
+            crate::services::databases::integrity_check(&entry.path())?;
+        }
+    }
+    fs::create_dir_all(&cfg.paths.datalab_dir)?;
+    let target = cfg
+        .paths
+        .datalab_dir
+        .join(format!(".restore-vault-{}", uuid::Uuid::new_v4().simple()));
+    if let Err(error) = copy_tree(vault_src, &target) {
+        let _ = fs::remove_dir_all(&target);
+        return Err(error);
+    }
+    fs::remove_dir_all(vault_src)?;
+    Ok(Some(target))
+}
+
+/// Recursively copy a panel-owned directory tree (regular files + directories;
+/// symlinks are dropped). The target root is created `0700` to match the
+/// panel-owned `db_dir` posture. The source is panel-owned and slip-safe
+/// (freshly extracted, integrity-checked), so a plain copy suffices.
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dst)?;
+    fs::set_permissions(dst, fs::Permissions::from_mode(0o700))?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_tree(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Atomically exchange `a` and `b` (both must exist, on the same filesystem)
@@ -413,7 +535,13 @@ fn exchange_dirs_fallback(a: &Path, b: &Path) -> Result<()> {
 /// `cfg.ensure_dirs()` and before any request is served (called from main.rs
 /// boot, next to the database open) — never concurrently with a restore.
 pub fn recover_stale_dirs(cfg: &Config) -> Result<usize> {
-    recover_stale_dirs_in(&cfg.paths.servers_dir)
+    // Servers dir plus the Data Lab store: the datalab swap uses the same
+    // exchange machinery (and the same `.restore-vault-*` / `.previous-*`
+    // leftovers), so a crash mid-datalab-swap leaves identical artifacts with
+    // identical safety semantics — the staging is never the only copy of
+    // anything, the aside may be.
+    Ok(recover_stale_dirs_in(&cfg.paths.servers_dir)?
+        + recover_stale_dirs_in(&cfg.paths.datalab_dir)?)
 }
 
 /// Live server dir names are hyphenated (UUIDs, or test names); pre-change
@@ -879,6 +1007,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.paths.servers_dir = tmp.path().join("servers");
         cfg.paths.backups_dir = tmp.path().join("backups");
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         std::fs::create_dir_all(&cfg.paths.servers_dir).unwrap();
         std::fs::create_dir_all(&cfg.paths.backups_dir).unwrap();
         let conn = db.get().unwrap();
@@ -1344,5 +1473,183 @@ mod tests {
         assert_eq!(report.removed, 0);
         assert_eq!(report.failed, 0);
         assert_eq!(mirror_status(&cfg), "ok");
+    }
+    /// Create a Data Lab database file for `server_uuid` with a seeded row.
+    fn seed_datalab(cfg: &Config, server_uuid: &str, name: &str, value: &str) {
+        let dir = cfg.paths.datalab_dir.join(server_uuid);
+        fs::create_dir_all(&dir).unwrap();
+        let conn = rusqlite::Connection::open(dir.join(format!("{name}.db"))).unwrap();
+        conn.execute_batch("CREATE TABLE kv(k TEXT PRIMARY KEY, v TEXT);")
+            .unwrap();
+        conn.execute("INSERT INTO kv(k,v) VALUES('v',?1)", [value]).unwrap();
+        drop(conn);
+    }
+
+    fn read_datalab_value(cfg: &Config, server_uuid: &str, name: &str) -> String {
+        let file = cfg
+            .paths
+            .datalab_dir
+            .join(server_uuid)
+            .join(format!("{name}.db"));
+        let conn = rusqlite::Connection::open(file).unwrap();
+        conn.query_row("SELECT v FROM kv WHERE k='v'", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn create_embeds_datalab_snapshot() {
+        let (db, cfg, sid, _tmp) = test_env();
+        let srv_dir = cfg.paths.servers_dir.join("srv-uuid");
+        fs::create_dir_all(&srv_dir).unwrap();
+        fs::write(srv_dir.join("hello.txt"), b"one").unwrap();
+        seed_datalab(&cfg, "srv-uuid", "lab", "alpha");
+
+        let (id, _, _) = rt().block_on(create(&db, &cfg, sid, "b", "")).unwrap();
+        let backup = models::get_backup(&db, id).unwrap();
+        assert!(backup.data_lab_included);
+        assert_eq!(backup.db_count, 1);
+
+        // The archive really embeds the snapshot under `.voltp-datalab/`.
+        let check = tempfile::tempdir().unwrap();
+        extract_tar_gz(&PathBuf::from(&backup.path), check.path()).unwrap();
+        let snap = check.path().join(".voltp-datalab/lab.db");
+        assert!(snap.exists(), "archive must carry .voltp-datalab/lab.db");
+        let conn = rusqlite::Connection::open(&snap).unwrap();
+        let v: String = conn
+            .query_row("SELECT v FROM kv WHERE k='v'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, "alpha");
+        drop(conn);
+    }
+
+    #[test]
+    fn create_without_datalab_marks_metadata_false() {
+        let (db, cfg, sid, _tmp) = test_env();
+        let srv_dir = cfg.paths.servers_dir.join("srv-uuid");
+        fs::create_dir_all(&srv_dir).unwrap();
+        fs::write(srv_dir.join("hello.txt"), b"one").unwrap();
+        let (id, _, _) = rt().block_on(create(&db, &cfg, sid, "b", "")).unwrap();
+        let backup = models::get_backup(&db, id).unwrap();
+        assert!(!backup.data_lab_included);
+        assert_eq!(backup.db_count, 0);
+    }
+
+    #[test]
+    fn restore_roundtrips_datalab_tree() {
+        let (db, cfg, sid, _tmp) = test_env();
+        let srv_dir = cfg.paths.servers_dir.join("srv-uuid");
+        fs::create_dir_all(&srv_dir).unwrap();
+        fs::write(srv_dir.join("hello.txt"), b"one").unwrap();
+        seed_datalab(&cfg, "srv-uuid", "lab", "alpha");
+        let (id, _, _) = rt().block_on(create(&db, &cfg, sid, "b", "")).unwrap();
+
+        // Mutate the live server file and the live Data Lab DB after the
+        // backup; restore must roll both back to the archived state.
+        fs::write(srv_dir.join("hello.txt"), b"two").unwrap();
+        {
+            let file = cfg.paths.datalab_dir.join("srv-uuid/lab.db");
+            let conn = rusqlite::Connection::open(file).unwrap();
+            conn.execute("UPDATE kv SET v='beta' WHERE k='v'", []).unwrap();
+        }
+        rt().block_on(restore(&db, &cfg, id)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(srv_dir.join("hello.txt")).unwrap(),
+            "one"
+        );
+        assert_eq!(read_datalab_value(&cfg, "srv-uuid", "lab"), "alpha");
+        // No staging leftovers in either store.
+        assert_eq!(fs::read_dir(&cfg.paths.datalab_dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn restore_refuses_corrupt_datalab_snapshot_and_touches_nothing() {
+        let (db, cfg, sid, _tmp) = test_env();
+        let srv_dir = cfg.paths.servers_dir.join("srv-uuid");
+        fs::create_dir_all(&srv_dir).unwrap();
+        fs::write(srv_dir.join("hello.txt"), b"one").unwrap();
+        seed_datalab(&cfg, "srv-uuid", "lab", "alpha");
+
+        // Hand-build an archive whose `.voltp-datalab/bad.db` is not a SQLite
+        // database at all.
+        let server = models::get_server(&db, sid).unwrap();
+        let archive = cfg.paths.backups_dir.join("corrupt.tar.gz");
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(vault.path().join("bad.db"), b"this is not a sqlite database").unwrap();
+        let ignore = crate::services::files::IgnoreList::parse("").unwrap();
+        let size = crate::services::files::tar_gz_dir_excluding_with_extra(
+            &cfg,
+            &server,
+            ".",
+            vault.path(),
+            ".voltp-datalab",
+            &archive,
+            &ignore,
+        )
+        .unwrap();
+        let checksum = checksum_file(&archive).unwrap();
+        let id = models::create_backup(
+            &db,
+            "u-bad",
+            sid,
+            "b",
+            &archive.to_string_lossy(),
+            size as i64,
+            &checksum,
+            "tar.gz",
+            "",
+        )
+        .unwrap();
+
+        let err = rt().block_on(restore(&db, &cfg, id)).unwrap_err();
+        assert!(!err.to_string().is_empty());
+        // Live server dir untouched (restore aborted before any swap) and the
+        // live Data Lab DB still holds the seeded row.
+        assert_eq!(
+            fs::read_to_string(srv_dir.join("hello.txt")).unwrap(),
+            "one"
+        );
+        assert_eq!(read_datalab_value(&cfg, "srv-uuid", "lab"), "alpha");
+        // No `.restore-*` / `.restore-vault-*` staging may leak.
+        for root in [&cfg.paths.servers_dir, &cfg.paths.datalab_dir] {
+            for entry in fs::read_dir(root).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                assert!(
+                    !name.starts_with(".restore-"),
+                    "staging leaked: {name} in {}",
+                    root.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn datalab_delete_gate_requires_recent_unlocked_vault_backup() {
+        let (db, cfg, sid, _tmp) = test_env();
+        assert!(!models::has_recent_data_lab_backup(&db, sid, 24).unwrap());
+        let srv_dir = cfg.paths.servers_dir.join("srv-uuid");
+        fs::create_dir_all(&srv_dir).unwrap();
+        fs::write(srv_dir.join("f.txt"), b"x").unwrap();
+
+        // A backup without a Data Lab tree must not satisfy the gate.
+        rt().block_on(create(&db, &cfg, sid, "plain", "")).unwrap();
+        assert!(!models::has_recent_data_lab_backup(&db, sid, 24).unwrap());
+
+        // A vaulted backup opens the gate.
+        seed_datalab(&cfg, "srv-uuid", "lab", "alpha");
+        let (vid, _, _) = rt().block_on(create(&db, &cfg, sid, "vaulted", "")).unwrap();
+        assert!(models::has_recent_data_lab_backup(&db, sid, 24).unwrap());
+
+        // Locked backups are not recoverable and must not count.
+        models::set_backup_locked(&db, vid, true).unwrap();
+        assert!(!models::has_recent_data_lab_backup(&db, sid, 24).unwrap());
+        models::set_backup_locked(&db, vid, false).unwrap();
+
+        // A vaulted backup older than the window must not count either.
+        let old = (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        db.get()
+            .unwrap()
+            .execute("UPDATE backups SET created_at=?1 WHERE id=?2", params![old, vid])
+            .unwrap();
+        assert!(!models::has_recent_data_lab_backup(&db, sid, 24).unwrap());
     }
 }

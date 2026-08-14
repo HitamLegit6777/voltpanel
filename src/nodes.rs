@@ -91,6 +91,18 @@ pub struct Node {
     /// enrollment so a rotated node re-enrolls against the same declared
     /// identity.
     pub expected_fingerprint: String,
+    /// Automated cordon/drain state (v19): `''` = idle, `'hold'` = cordoned
+    /// (no new placements, running workloads stay up), `'stop'` = cordoned
+    /// with the node's running workloads being stopped. Placement refuses
+    /// any node whose `drain_mode` is non-empty, independently of the
+    /// schedulable/maintenance flags. `drain_reason` is the operator-
+    /// supplied reason; `drain_deadline` the optional RFC3339 instant by
+    /// which the drain must complete — an auto-lift deadline: the reconcile
+    /// sweep clears the drain (recording a `drain_expired` node event) once
+    /// it passes, with no stop escalation.
+    pub drain_mode: String,
+    pub drain_reason: String,
+    pub drain_deadline: Option<String>,
 }
 impl Node {
 
@@ -162,10 +174,13 @@ fn from_row(r: &Row) -> rusqlite::Result<Node> {
         updated_at: r.get(25)?,
         tls_fingerprint: r.get(26)?,
         expected_fingerprint: r.get::<_, Option<String>>(27)?.unwrap_or_default(),
+        drain_mode: r.get(28)?,
+        drain_reason: r.get(29)?,
+        drain_deadline: r.get(30)?,
     })
 }
 
-const COLS: &str = "id,uuid,name,public_url,secret,enrollment_token,enrolled,enabled,maintenance,schedulable,location,tags,memory_limit_mb,disk_limit_mb,cpu_limit_percent,memory_overallocate,disk_overallocate,daemon_version,hostname,os,arch,capacity_json,last_heartbeat,last_error,created_at,updated_at,tls_fingerprint,expected_fingerprint";
+const COLS: &str = "id,uuid,name,public_url,secret,enrollment_token,enrolled,enabled,maintenance,schedulable,location,tags,memory_limit_mb,disk_limit_mb,cpu_limit_percent,memory_overallocate,disk_overallocate,daemon_version,hostname,os,arch,capacity_json,last_heartbeat,last_error,created_at,updated_at,tls_fingerprint,expected_fingerprint,drain_mode,drain_reason,drain_deadline";
 
 /// Validate a node's public URL: http/https scheme and a non-empty host.
 /// Returns the URL with trailing slashes trimmed, exactly as persisted.
@@ -595,7 +610,8 @@ fn pick_node_tx(
     drop(stmt);
     let mut candidates: Vec<Node> = Vec::new();
     for n in nodes {
-        if !n.online() || !n.enabled || !n.schedulable || n.maintenance {
+        if !n.online() || !n.enabled || !n.schedulable || n.maintenance || !n.drain_mode.is_empty()
+        {
             continue;
         }
         if let Some(loc) = location {
@@ -627,7 +643,7 @@ fn pick_node_tx(
     candidates
         .into_iter()
         .next()
-        .context("no online node has enough capacity")
+        .context("no online node has enough capacity (nodes in drain are never selected)")
 }
 
 /// Dry-run placement: the same candidate rules as the real provisioning path
@@ -698,6 +714,109 @@ pub fn port_available_on_node(db: &Db, node: &str, port: i64) -> Result<bool> {
         |r| r.get(0),
     )?;
     Ok(used == 0)
+}
+
+/// Number of live (non-deleted) servers assigned to the node — the drain
+/// `affected_count` the API reports.
+pub fn server_count(db: &Db, node_name: &str) -> Result<i64> {
+    let conn = db.get()?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM servers WHERE node=?1 AND deleted=0",
+        [node_name],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+/// Cordon a node and record the drain intent. `mode` is `"hold"` (cordon
+/// only) or `"stop"` (cordon + the operator stops the running workloads);
+/// the API layer validates the mode before calling. `deadline` is an
+/// RFC3339 instant, or `None` for no deadline. Returns the number of live
+/// servers affected by the drain (the `affected_count` the API reports).
+pub fn set_drain(
+    db: &Db,
+    id: i64,
+    mode: &str,
+    reason: &str,
+    deadline: Option<&str>,
+) -> Result<i64> {
+    let conn = db.get()?;
+    let changed = conn.execute(
+        "UPDATE nodes SET schedulable=0, maintenance=1, drain_mode=?1, drain_reason=?2, drain_deadline=?3, updated_at=?4 WHERE id=?5",
+        params![mode, reason, deadline, now(), id],
+    )?;
+    if changed == 0 {
+        bail!("node not found");
+    }
+    let name: String = conn.query_row(
+        "SELECT name FROM nodes WHERE id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let affected: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM servers WHERE node=?1 AND deleted=0",
+        [&name],
+        |r| r.get(0),
+    )?;
+    Ok(affected)
+}
+
+/// Lift a drain: clear the drain state and restore scheduling. A no-op for
+/// a node that is not draining; a missing node is an error.
+pub fn clear_drain(db: &Db, id: i64) -> Result<()> {
+    let conn = db.get()?;
+    let changed = conn.execute(
+        "UPDATE nodes SET schedulable=1, maintenance=0, drain_mode='', drain_reason='', drain_deadline=NULL, updated_at=?1 WHERE id=?2",
+        params![now(), id],
+    )?;
+    if changed == 0 {
+        bail!("node not found");
+    }
+    Ok(())
+}
+
+/// Lift every drain whose deadline has passed, returning the affected nodes
+/// as they were before the lift. `now` is the RFC3339 instant the sweep
+/// compares against; the caller computes it once per sweep. This is an
+/// auto-lift only — no stop escalation happens here.
+///
+/// The clear is atomic: a `BEGIN IMMEDIATE` transaction serializes against
+/// concurrent `set_drain`/`clear_drain` writers, so a drain replaced with a
+/// fresh future deadline between the SELECT and the UPDATE is never lifted.
+/// After the commit, one `drain_expired` node event is recorded per affected
+/// node.
+pub fn clear_expired_drains(db: &Db, now: &str) -> Result<Vec<Node>> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Deadline comparison excludes NULL deadlines (NULL<=? is NULL), so a
+    // drain without a deadline is never swept.
+    let sql = format!("SELECT {COLS} FROM nodes WHERE drain_mode<>'' AND drain_deadline<=?1");
+    // The statement borrows the transaction; scope it so the commit below can
+    // consume `tx`.
+    let expired = {
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(params![now], from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    tx.execute(
+        "UPDATE nodes SET schedulable=1, maintenance=0, drain_mode='', drain_reason='', drain_deadline=NULL, updated_at=?1 WHERE drain_mode<>'' AND drain_deadline<=?1",
+        params![now],
+    )?;
+    tx.commit()?;
+    for n in &expired {
+        record_event(
+            db,
+            n.id,
+            "info",
+            "drain_expired",
+            "drain deadline reached; drain lifted and scheduling restored",
+            &serde_json::json!({
+                "mode": n.drain_mode,
+                "deadline": n.drain_deadline,
+            }),
+        )?;
+    }
+    Ok(expired)
 }
 
 #[cfg(test)]
@@ -1151,5 +1270,148 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 0, "heartbeat sweep must delete lapsed claims");
+    }
+
+    #[test]
+    fn set_and_clear_drain_state() {
+        let db = test_db();
+        let n = online_node_with_limits(&db, "node-drain", 8192, 16384);
+        assert_eq!(server_count(&db, "node-drain").unwrap(), 0);
+        // Two servers on the node form the drain's affected set.
+        let conn = db.get().unwrap();
+        conn.execute(
+            "INSERT INTO users (username,email,password_hash,created_at,updated_at) VALUES ('u','u@example.com','x','t','t')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blueprints (uuid,name,created_at,updated_at) VALUES ('bp-d','e','t','t')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO servers (uuid,name,user_id,blueprint_id,node,created_at,updated_at) VALUES ('srv-d1','s1',1,1,'node-drain','t','t'),('srv-d2','s2',1,1,'node-drain','t','t')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let deadline = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        let affected = set_drain(&db, n.id, "hold", "rack upgrade", Some(&deadline)).unwrap();
+        assert_eq!(affected, 2, "both live servers must count as affected");
+        let drained = get(&db, n.id).unwrap();
+        assert!(!drained.schedulable, "drain must cordon the node");
+        assert!(drained.maintenance, "drain must mark the node in maintenance");
+        assert_eq!(drained.drain_mode, "hold");
+        assert_eq!(drained.drain_reason, "rack upgrade");
+        assert_eq!(drained.drain_deadline.as_deref(), Some(deadline.as_str()));
+
+        // clear_drain restores scheduling and wipes the drain state.
+        clear_drain(&db, n.id).unwrap();
+        let restored = get(&db, n.id).unwrap();
+        assert!(restored.schedulable);
+        assert!(!restored.maintenance);
+        assert_eq!(restored.drain_mode, "");
+        assert_eq!(restored.drain_reason, "");
+        assert!(restored.drain_deadline.is_none());
+
+        // Missing nodes are rejected loudly on both paths.
+        assert!(set_drain(&db, 999_999, "hold", "x", None).is_err());
+        assert!(clear_drain(&db, 999_999).is_err());
+    }
+
+    #[test]
+    fn expired_drain_deadline_is_auto_lifted_with_event() {
+        let db = test_db();
+        let n = online_node_with_limits(&db, "node-exp", 8192, 16384);
+        let past = (Utc::now() - Duration::minutes(5)).to_rfc3339();
+        set_drain(&db, n.id, "hold", "stale", Some(&past)).unwrap();
+
+        let cleared = clear_expired_drains(&db, &Utc::now().to_rfc3339()).unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].id, n.id);
+        let after = get(&db, n.id).unwrap();
+        assert!(after.schedulable, "expired drain must be lifted");
+        assert!(!after.maintenance, "lift must clear the maintenance flag");
+        assert_eq!(after.drain_mode, "");
+        assert!(after.drain_deadline.is_none());
+        let evs = events(&db, n.id, 10).unwrap();
+        assert!(
+            evs.iter().any(|e| e["kind"] == "drain_expired"),
+            "lift must record a drain_expired node event: {evs:?}"
+        );
+    }
+
+    #[test]
+    fn future_and_absent_deadlines_survive_the_sweep() {
+        let db = test_db();
+        let fut = online_node_with_limits(&db, "node-fut", 8192, 16384);
+        let none = online_node_with_limits(&db, "node-none", 8192, 16384);
+        let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        set_drain(&db, fut.id, "hold", "later", Some(&future)).unwrap();
+        set_drain(&db, none.id, "hold", "no-deadline", None).unwrap();
+
+        let cleared = clear_expired_drains(&db, &Utc::now().to_rfc3339()).unwrap();
+        assert!(cleared.is_empty(), "nothing must be swept: {cleared:?}");
+        let after_fut = get(&db, fut.id).unwrap();
+        assert!(!after_fut.schedulable, "future deadline must stay drained");
+        let after_none = get(&db, none.id).unwrap();
+        assert!(!after_none.schedulable, "no deadline must stay drained");
+        assert!(events(&db, fut.id, 10).unwrap().is_empty());
+        assert!(events(&db, none.id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn replaced_drain_with_fresh_future_deadline_is_not_swept() {
+        let db = test_db();
+        let n = online_node_with_limits(&db, "node-repl", 8192, 16384);
+        let past = (Utc::now() - Duration::minutes(5)).to_rfc3339();
+        set_drain(&db, n.id, "hold", "old", Some(&past)).unwrap();
+        // The operator replaces the drain with a fresh future deadline before
+        // the sweep runs; the stale past deadline must not linger.
+        clear_drain(&db, n.id).unwrap();
+        let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        set_drain(&db, n.id, "stop", "new", Some(&future)).unwrap();
+
+        let cleared = clear_expired_drains(&db, &Utc::now().to_rfc3339()).unwrap();
+        assert!(cleared.is_empty(), "a fresh future deadline must not be swept");
+        let after = get(&db, n.id).unwrap();
+        assert!(!after.schedulable, "the replacement drain must stay active");
+        assert_eq!(after.drain_mode, "stop");
+        assert_eq!(after.drain_deadline.as_deref(), Some(future.as_str()));
+    }
+
+    #[test]
+    fn placement_refuses_drained_nodes() {
+        let db = test_db();
+        let a = online_node_with_limits(&db, "node-a", 8192, 16384);
+        let b = online_node_with_limits(&db, "node-b", 8192, 16384);
+
+        // Both schedulable: a pick succeeds (either candidate).
+        let picked = select_for_server(&db, 1000, 1024, &[], None).unwrap();
+        assert!(picked.id == a.id || picked.id == b.id);
+
+        // Draining one node must not silently place onto it: the other is
+        // chosen instead.
+        set_drain(&db, a.id, "hold", "maintenance", None).unwrap();
+        let picked = select_for_server(&db, 1000, 1024, &[], None).unwrap();
+        assert_eq!(picked.id, b.id, "placement must skip a drained node");
+
+        // Draining the last candidate leaves no placement at all, with a
+        // reason that names the drain rule — and the real provisioning path
+        // refuses identically.
+        set_drain(&db, b.id, "stop", "reboot", None).unwrap();
+        let err = select_for_server(&db, 1000, 1024, &[], None).unwrap_err();
+        assert!(
+            err.to_string().contains("drain"),
+            "placement error must name the drain rule: {err}"
+        );
+        let mut conn = db.get().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let err = reserve_capacity_tx(&tx, 1000, 1024, &[], None).unwrap_err();
+        assert!(err.to_string().contains("drain"));
+        drop(tx);
     }
 }

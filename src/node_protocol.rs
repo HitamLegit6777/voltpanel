@@ -504,6 +504,9 @@ pub struct ServerSpec {
     pub memory_mb: u64,
     pub disk_mb: u64,
     pub cpu_percent: u64,
+    /// Symmetric network throttle in Mbps; 0 = unlimited.
+    #[serde(default)]
+    pub network_mbps: u64,
     pub port: Option<u16>,
     #[serde(default)]
     pub ports: Vec<u16>,
@@ -602,6 +605,8 @@ pub enum FileOperation {
     Move { from: String, destination: String },
     Delete { path: String },
     Chmod { path: String, mode: u32 },
+    Archive { paths: Vec<String>, format: String },
+    Extract { archive: String, dest: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -819,6 +819,56 @@ pub fn zip_dir(cfg: &Config, server: &Server, rel: &str, out_abs: &Path) -> Resu
     Ok(total)
 }
 
+/// Archive several paths (files and/or directories) into one zip. Each entry
+/// is named after its basename; directories are walked recursively with the
+/// same `O_NOFOLLOW` / symlink-skip guarantees as `zip_dir`. Powers the file
+/// manager's bulk "Archive" and bulk "Download" actions.
+pub fn zip_paths(cfg: &Config, server: &Server, rels: &[String], out_abs: &Path) -> Result<u64> {
+    let root = server_root(cfg, server);
+    let rootfd = open_root_dir(&root)?;
+    let file = fs::File::create(out_abs)?;
+    let out_id = file_identity(&file);
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut total: u64 = 0;
+    for rel in rels {
+        resolve(cfg, server, rel)?;
+        let fd = match open_relative(&rootfd, rel, false, libc::O_RDONLY, 0) {
+            Ok(fd) => fd,
+            Err(e) if is_eloop(&e) => continue, // symlink entries are skipped
+            Err(e) => return Err(e),
+        };
+        let base = Path::new(rel)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "item".into());
+        let f = fs::File::from(fd);
+        if file_identity(&f) == out_id {
+            continue; // never let the archive consume its own output
+        }
+        let meta = f.metadata()?;
+        if meta.is_dir() {
+            add_dir_to_zip(&mut zip, &f, &base, &out_id, &options, &mut total)?;
+        } else if meta.is_file() {
+            zip.start_file(base, options)?;
+            total = total.saturating_add(meta.len());
+            std::io::copy(&mut &f, &mut zip)?;
+        }
+    }
+    zip.finish()?;
+    Ok(total)
+}
+
+/// True when the error chain bottoms out in `ELOOP` (a symlink we refused to
+/// follow), so bulk archiving skips symlinks instead of failing the whole run.
+fn is_eloop(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .map_or(false, |io| io.raw_os_error() == Some(libc::ELOOP))
+    })
+}
+
 /// Walk a pinned directory fd into the zip archive. Every entry is opened
 /// with `openat` + `O_NOFOLLOW` (mirroring `copy_dir_entries`), so a swapped
 /// directory or a symlinked entry can never make the panel read outside the
@@ -1060,6 +1110,40 @@ pub fn tar_gz_dir_excluding(
     let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(enc);
     add_dir_to_tar(&mut tar, &startfd, "", &out_id, ignore)?;
+    let enc = tar.into_inner()?;
+    let file = enc.finish()?;
+    let size = file.metadata()?.len();
+    Ok(size)
+}
+
+/// Like [`tar_gz_dir_excluding`], but also appends the panel-owned directory
+/// tree at `extra_src` into the archive under the virtual prefix
+/// `extra_prefix` (e.g. `.voltp-datalab`). Used by backup create to embed Data
+/// Lab snapshots next to the server tree.
+///
+/// The extra tree is walked with the same openat + `O_NOFOLLOW` hardening as
+/// the server dir, and it is never subject to `ignore` patterns — Data Lab
+/// snapshots are always included regardless of the operator's ignore list.
+pub fn tar_gz_dir_excluding_with_extra(
+    cfg: &Config,
+    server: &Server,
+    rel: &str,
+    extra_src: &Path,
+    extra_prefix: &str,
+    out_abs: &Path,
+    ignore: &IgnoreList,
+) -> Result<u64> {
+    let _ = resolve(cfg, server, rel)?;
+    let root = server_root(cfg, server);
+    let rootfd = open_root_dir(&root)?;
+    let startfd = open_relative(&rootfd, rel, false, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+    let file = fs::File::create(out_abs)?;
+    let out_id = file_identity(&file);
+    let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut tar = tar::Builder::new(enc);
+    add_dir_to_tar(&mut tar, &startfd, "", &out_id, ignore)?;
+    let extrafd = open_root_dir(extra_src)?;
+    add_dir_to_tar(&mut tar, &extrafd, extra_prefix, &out_id, &IgnoreList::default())?;
     let enc = tar.into_inner()?;
     let file = enc.finish()?;
     let size = file.metadata()?.len();
@@ -1924,6 +2008,7 @@ mod tests {
             crash_restarts: 0,
             crash_window_start: String::new(),
             crash_reason: String::new(),
+            network_mbps: 0,
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -1983,6 +2068,7 @@ mod tests {
                 enable_audit_log: true,
             },
             backups: Backups::default(),
+            sites: crate::config::Sites::default(),
         }
     }
 
@@ -2652,6 +2738,31 @@ mod tests {
                     .is_symlink()
             );
         });
+    }
+
+    #[test]
+    fn zip_paths_archives_multiple_files_and_dirs() {
+        use std::io::Read;
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = test_config(temp.path());
+        let server = test_server("zip-paths-uuid");
+        let root = server_root(&cfg, &server);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+        fs::write(root.join("sub/b.txt"), b"world").unwrap();
+
+        let out = temp.path().join("out.zip");
+        let size = zip_paths(&cfg, &server, &["/a.txt".into(), "/sub".into()], &out).unwrap();
+        assert!(size > 0);
+
+        let file = fs::File::open(&out).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut buf = Vec::new();
+        zip.by_name("a.txt").unwrap().read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"hello");
+        buf.clear();
+        zip.by_name("sub/b.txt").unwrap().read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"world");
     }
 
 }

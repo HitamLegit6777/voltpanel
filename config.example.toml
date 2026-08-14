@@ -66,3 +66,21 @@ enable_api_keys = true
 enable_2fa = true
 enable_websites = true
 enable_audit_log = true
+
+# Embedded host-routing gateway. Maps the Host header of each request to a
+# website record on its own listener — put it in front of the public vhost
+# traffic, away from the admin panel (web.listen).
+[sites]
+# Listen address, e.g. "0.0.0.0:8081". Unset (default) disables the gateway.
+# A bind failure on a configured address aborts startup (fail fast).
+# listen = "0.0.0.0:8081"
+# Reverse proxies allowed to set X-Forwarded-Proto on gateway requests
+# (CIDR list). The gateway terminates plain HTTP, so force_https sites are
+# only served when a trusted proxy reports "X-Forwarded-Proto: https".
+# Empty (default) means the header is never trusted.
+trusted_proxies = []
+# Max request body (MiB) the gateway buffers when reverse-proxying to a
+# site's upstream. Independent of web.max_body_mb (the panel's own cap):
+# public vhost traffic gets its own ceiling so a large panel upload cap
+# never widens the proxied surface. Default 16, range 1..=64.
+max_body_mb = 16

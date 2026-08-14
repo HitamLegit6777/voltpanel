@@ -19,6 +19,22 @@ pub struct Sample {
     pub tx_bytes: u64,
 }
 
+impl Sample {
+    /// Map an agent's `RemoteServerStats` onto a telemetry row. Network
+    /// counters are cumulative (mirroring the local `ProcessInfo` sampling);
+    /// cpu/mem/disk are instantaneous gauges.
+    pub fn from_remote(ts: i64, s: &crate::node_protocol::RemoteServerStats) -> Self {
+        Self {
+            ts,
+            cpu_percent: s.cpu_percent,
+            memory_bytes: s.memory_bytes,
+            disk_bytes: s.disk_bytes,
+            rx_bytes: s.network_rx_bytes,
+            tx_bytes: s.network_tx_bytes,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Summary {
     pub cpu_avg: f64,
@@ -856,8 +872,10 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.paths.logs_dir =
             std::env::temp_dir().join(format!("voltpanel-metrics-logs-{}", std::process::id()));
-        let hub = std::sync::Arc::new(crate::services::console::ConsoleHub::new(cfg));
-        let procs = crate::services::proc::ProcManager::new(db.db.clone(), hub);
+        cfg.paths.datalab_dir =
+            std::env::temp_dir().join(format!("voltpanel-metrics-datalab-{}", std::process::id()));
+        let hub = std::sync::Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
+        let procs = crate::services::proc::ProcManager::new(db.db.clone(), hub, cfg.paths.datalab_dir.clone());
         procs.procs.insert(
             db.sid,
             std::sync::Arc::new(crate::services::proc::ProcessState {

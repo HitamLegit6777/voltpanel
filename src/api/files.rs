@@ -511,6 +511,7 @@ pub async fn touch(
 #[derive(Deserialize)]
 pub struct ArchiveReq {
     pub path: String,
+    pub paths: Option<Vec<String>>, // bulk: several sources → one zip
     pub format: Option<String>, // zip | tar.gz
 }
 
@@ -524,30 +525,129 @@ pub async fn create_archive(
     let s = access_ok(&state, u, id).await?;
     super::require_capability(&state, &user, id, Capability::FilesWrite).await?;
     if s.node != "local" {
-        return Err(ApiError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "remote archive creation is not implemented yet",
-        ));
+        let node_name = s.node.clone();
+        let node = blocking(state.db.clone(), move |db| {
+            crate::nodes::get_by_name(&db, &node_name)
+        })
+        .await?;
+        let paths = req.paths.clone().unwrap_or_else(|| vec![req.path.clone()]);
+        let format = req.format.clone().unwrap_or_else(|| "zip".into());
+        let value = state
+            .node_client
+            .file_operation(
+                &node,
+                &s.uuid,
+                &crate::node_protocol::FileOperation::Archive { paths, format },
+            )
+            .await?;
+        let path = value.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let size = value.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+        return Ok(ok(serde_json::json!({ "path": path, "size": size })));
     }
     let fmt = req.format.as_deref().unwrap_or("zip");
+    let ext = if fmt == "tar.gz" { "tar.gz" } else { "zip" };
+
+    // Bulk: several selected paths → one zip in their shared directory.
+    if let Some(paths) = req.paths.as_deref() {
+        if !paths.is_empty() {
+            let out_rel = sibling_of(paths[0].as_str(), "archive.zip");
+            let out_abs = files::resolve(&state.cfg, &s, &out_rel)?;
+            let size = files::zip_paths(&state.cfg, &s, paths, &out_abs)?;
+            return Ok(ok(serde_json::json!({ "path": out_rel, "size": size })));
+        }
+    }
+
     let out_name = format!(
         "{}.{}",
         std::path::Path::new(&req.path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "archive".into()),
-        if fmt == "tar.gz" { "tar.gz" } else { "zip" }
+        ext
     );
-    let out_rel = format!("/{}", out_name);
+    let out_rel = sibling_of(&req.path, &out_name);
     let out_abs = files::resolve(&state.cfg, &s, &out_rel)?;
     let (size, _) = if fmt == "tar.gz" {
         let size = files::tar_gz_dir(&state.cfg, &s, &req.path, &out_abs)?;
         (size, 0u64)
     } else {
-        let size = files::zip_dir(&state.cfg, &s, &req.path, &out_abs)?;
+        // zip: directories keep zip_dir (entries at archive root); single
+        // files use zip_paths (one entry named by its basename).
+        let abs = files::resolve(&state.cfg, &s, &req.path)?;
+        let meta = std::fs::symlink_metadata(&abs)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let size = if meta.is_dir() {
+            files::zip_dir(&state.cfg, &s, &req.path, &out_abs)?
+        } else if meta.is_file() {
+            files::zip_paths(&state.cfg, &s, &[req.path.clone()], &out_abs)?
+        } else {
+            return Err(ApiError::bad_request("cannot archive this path"));
+        };
         (size, 0u64)
     };
     Ok(ok(serde_json::json!({ "path": out_rel, "size": size })))
+}
+
+/// Place a produced archive next to its source (the source's parent directory)
+/// rather than always at the server root.
+fn sibling_of(src: &str, name: &str) -> String {
+    let parent = std::path::Path::new(src)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/".into());
+    let parent = parent.trim_end_matches('/');
+    if parent.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MultiDownloadQuery {
+    #[serde(default)]
+    pub paths: Vec<String>, // repeated `paths=` query params
+}
+
+/// Download several files/folders as one zip, streamed on the fly and never
+/// persisted inside the server directory.
+pub async fn download_multi(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i64>,
+    Query(q): Query<MultiDownloadQuery>,
+) -> ApiResult<Response> {
+    let u = &user.0;
+    let s = access_ok(&state, u, id).await?;
+    super::require_capability(&state, &user, id, Capability::FilesRead).await?;
+    if s.node != "local" {
+        return Err(ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "remote multi-file download is not implemented yet",
+        ));
+    }
+    let paths = q.paths;
+    if paths.is_empty() {
+        return Err(ApiError::bad_request("paths is required"));
+    }
+    let out_name = format!("files-{}.zip", uuid::Uuid::new_v4().simple());
+    let out_abs = std::env::temp_dir().join(format!(
+        ".voltpanel-dl-{}.zip",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| -> ApiResult<Response> {
+        files::zip_paths(&state.cfg, &s, &paths, &out_abs)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let file = std::fs::File::open(&out_abs)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let size = file
+            .metadata()
+            .map_err(|e| ApiError::bad_request(e.to_string()))?
+            .len();
+        Ok(file_response(out_name, file, size))
+    })();
+    let _ = std::fs::remove_file(&out_abs);
+    Ok(result?)
 }
 
 #[derive(Deserialize)]
@@ -566,10 +666,23 @@ pub async fn extract(
     let s = access_ok(&state, u, id).await?;
     super::require_capability(&state, &user, id, Capability::FilesWrite).await?;
     if s.node != "local" {
-        return Err(ApiError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "remote archive extraction is not implemented yet",
-        ));
+        let node_name = s.node.clone();
+        let node = blocking(state.db.clone(), move |db| {
+            crate::nodes::get_by_name(&db, &node_name)
+        })
+        .await?;
+        state
+            .node_client
+            .file_operation(
+                &node,
+                &s.uuid,
+                &crate::node_protocol::FileOperation::Extract {
+                    archive: req.archive.clone(),
+                    dest: req.dest.clone(),
+                },
+            )
+            .await?;
+        return Ok(ok(serde_json::json!({ "ok": true })));
     }
     if req.archive.ends_with(".tar.gz") || req.archive.ends_with(".tgz") {
         files::extract_tar_gz_into(&state.cfg, &s, &req.archive, &req.dest)

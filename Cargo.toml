@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
-rusqlite = { version = "0.31", features = ["bundled", "chrono", "hooks"] }
+rusqlite = { version = "0.31", features = ["bundled", "chrono", "hooks", "backup"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde", "fast-rng"] }
 argon2 = "0.5"
@@ -51,7 +51,7 @@ async-stream = "0.3"
 dashmap = "6"
 hmac = "0.12"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 hostname = "0.4"
 tokio-util = { version = "0.7", features = ["io"] }
 rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring", "x509-parser"] }

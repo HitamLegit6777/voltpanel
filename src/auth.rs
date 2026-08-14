@@ -113,6 +113,55 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+// ---------------- 2FA recovery codes ----------------
+
+/// How many one-time recovery codes every 2FA-enabled user holds.
+pub const RECOVERY_CODE_COUNT: usize = 10;
+
+/// Alphabet for recovery codes: uppercase letters and digits with the
+/// confusable pairs removed (0/O, 1/I/l). 32 symbols = 5 bits each, so a
+/// 10-character code carries 50 bits of entropy — infeasible to guess
+/// online while staying short enough to type.
+const RECOVERY_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+/// A fresh single-use 2FA recovery code. Codes are shown to the user exactly
+/// once at generation time; only the SHA-256 digest is ever stored.
+pub fn generate_recovery_code() -> String {
+    let mut buf = [0u8; 10];
+    rand::thread_rng().fill(&mut buf);
+    // 256 % 32 == 0, so the modulo draw is unbiased.
+    buf.iter()
+        .map(|b| RECOVERY_ALPHABET[*b as usize % RECOVERY_ALPHABET.len()] as char)
+        .collect()
+}
+
+/// Generate a fresh set of single-use recovery codes (plaintext). Callers
+/// persist only [`hash_recovery_code`] results and return these strings in
+/// the response exactly once.
+pub fn generate_recovery_codes() -> Vec<String> {
+    (0..RECOVERY_CODE_COUNT)
+        .map(|_| generate_recovery_code())
+        .collect()
+}
+
+/// Canonicalize user input before hashing/consuming: strip separators (the
+/// UI groups codes as `ABCDE-FGHJK`) and force uppercase, so `abcde-fghjk`
+/// and `ABCDEFGHJK` are the same code.
+pub fn normalize_recovery_code(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// Hash a recovery code at rest (SHA-256 hex, same primitive as session
+/// tokens). The codes are 50-bit random values, so a plain digest is safe:
+/// there is no low-entropy dictionary to brute-force.
+pub fn hash_recovery_code(code: &str) -> String {
+    hash_token(&normalize_recovery_code(code))
+}
+
 // ---------------- Sessions ----------------
 
 pub fn create_session(
@@ -872,5 +921,60 @@ mod tests {
         let second = generate_totp_secret().unwrap();
         store_pending_totp(7, &second);
         assert_eq!(get_pending_totp(7).as_deref(), Some(second.as_str()));
+    }
+
+    #[test]
+    fn recovery_codes_are_unique_high_entropy_and_normalizable() {
+        let codes = generate_recovery_codes();
+        assert_eq!(codes.len(), RECOVERY_CODE_COUNT);
+        // All distinct: a collision would let one code open two accounts.
+        let unique: std::collections::HashSet<&String> = codes.iter().collect();
+        assert_eq!(unique.len(), codes.len(), "recovery codes must be unique");
+        // Each code is 10 chars drawn from the confusable-free alphabet.
+        let valid: std::collections::HashSet<char> =
+            RECOVERY_ALPHABET.iter().map(|b| *b as char).collect();
+        for code in &codes {
+            assert_eq!(code.len(), 10, "code must be 10 chars: {code}");
+            assert!(
+                code.chars().all(|c| valid.contains(&c)),
+                "code must draw from the recovery alphabet: {code}"
+            );
+            // Codes are generated already-normalized: hashing must be stable.
+            assert_eq!(
+                hash_recovery_code(code),
+                hash_recovery_code(&normalize_recovery_code(code)),
+                "generated codes must already be in canonical form"
+            );
+        }
+        // Normalization strips separators and uppercases, so a UI grouping
+        // like ABCDE-FGHJK and a lowercased entry are the same code.
+        assert_eq!(normalize_recovery_code("abcde-fghjk"), "ABCDEFGHJK");
+        assert_eq!(normalize_recovery_code(" ab cd "), "ABCD");
+        assert_eq!(
+            hash_recovery_code("abcde-fghjk"),
+            hash_recovery_code("ABCDEFGHJK")
+        );
+        assert_eq!(
+            hash_recovery_code("abcde-fghjk"),
+            hash_token("ABCDEFGHJK"),
+            "hash is the plain SHA-256 of the canonical code"
+        );
+    }
+
+    #[test]
+    fn recovery_code_hashes_never_leak_plaintext_or_collide() {
+        let codes = generate_recovery_codes();
+        let hashes: std::collections::HashSet<String> =
+            codes.iter().map(|c| hash_recovery_code(c)).collect();
+        assert_eq!(hashes.len(), codes.len(), "hashes must not collide");
+        for code in &codes {
+            let h = hash_recovery_code(code);
+            assert_eq!(h.len(), 64, "hash must be SHA-256 hex");
+            assert_ne!(h, *code, "stored hash must never equal the plaintext");
+            assert!(
+                !hashes.iter().any(|other| other == code),
+                "no stored hash may reveal a plaintext code"
+            );
+        }
     }
 }

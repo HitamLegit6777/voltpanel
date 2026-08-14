@@ -6,7 +6,7 @@
 sudo voltpanel-manage upgrade
 ```
 
-The command downloads and verifies the release, validates the existing config with the new binary, creates a panel database/files backup, then replaces and restarts the service. If startup fails, it restores and restarts the previous binary automatically. Database migrations still require the matching database backup for a manual downgrade.
+The command downloads and verifies the release, validates the existing config with the new binary, creates a full panel backup (online SQLite backup, data directories including `datalab/`, and the config tree — see OPERATIONS.md), then replaces and restarts the service. If startup fails, it restores and restarts the previous binary automatically. Database migrations still require the matching database backup for a manual downgrade; `sudo voltpanel-manage restore ARCHIVE` performs a verified restore with automatic rollback.
 
 Pin a specific release when required:
 
@@ -30,9 +30,24 @@ sudo voltd-manage upgrade
 sudo voltd-manage doctor
 ```
 
-The node manager validates its config before replacement and restores the previous binary automatically if the upgraded service fails to start. A release can be pinned with `sudo voltd-manage upgrade v0.1.1`.
+`upgrade` refuses to run while workloads are live on the node, so the swap can
+never interrupt a running server. Stop or drain the workloads first, or pass
+`--force` to stop them as part of the upgrade:
 
-Running workloads are tied to the execution-agent lifecycle. Plan a maintenance window or transfer workloads first.
+```bash
+sudo voltd-manage upgrade --force
+```
+
+The node manager validates its config before replacement and restores the
+previous binary automatically if the upgraded service fails to start. A release
+can be pinned with `sudo voltd-manage upgrade v0.1.1`.
+
+For support, create a diagnostics bundle (refused while workloads run unless
+`--force` is passed):
+
+```bash
+sudo voltd-manage doctor --bundle ./voltd-diag.tar.gz
+```
 
 ## Manual rollback
 
@@ -43,6 +58,13 @@ Before every upgrade, retain:
 - `/etc/voltpanel-node/voltd.toml`
 - SQLite online backup
 - Workload/snapshot backups
+
+The same state can be restored from the backup archive created by the upgrade
+itself with one command (validated, with automatic rollback on failure):
+
+```bash
+sudo voltpanel-manage restore /var/backups/voltpanel/panel-<timestamp>.tar.gz
+```
 
 Panel rollback:
 

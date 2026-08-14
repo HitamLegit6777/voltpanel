@@ -2,10 +2,18 @@
 use super::{data, ok, AdminUser, ApiError, ApiResult, AppState, AuthUser};
 use crate::models;
 use crate::db::blocking;
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::response::sse::{Event, KeepAlive};
+use axum::response::Sse;
 use axum::Json;
+use futures::stream::Stream;
 use serde::Deserialize;
 use serde_json::json;
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 // ---- DB execution off the async worker ----
 //
@@ -132,11 +140,28 @@ pub async fn audit_logs(
 
 // ---------------- Notifications ----------------
 
+/// List the notification ring (newest last) plus the unread count, so the
+/// shell badge and drawer render from a single round-trip. Entry fields:
+/// `id`, `level`, `title`, `message`, `server_id`, `created_at`, `read_at`
+/// (null until marked), `link` (optional panel deep link).
 pub async fn notifications(
     State(state): State<AppState>,
     _a: AdminUser,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(data(json!(state.notifier.history())))
+    let entries = state.notifier.history();
+    let unread_count = entries.iter().filter(|n| n.read_at.is_none()).count();
+    Ok(data(json!({ "entries": entries, "unread_count": unread_count })))
+}
+
+pub async fn notifications_read(
+    State(state): State<AppState>,
+    _a: AdminUser,
+    Path(id): Path<u64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state.notifier.mark_read(id) {
+        return Err(ApiError::not_found(format!("notification {id} not found")));
+    }
+    Ok(ok(json!({ "ok": true })))
 }
 
 pub async fn notifications_clear(
@@ -145,6 +170,47 @@ pub async fn notifications_clear(
 ) -> ApiResult<Json<serde_json::Value>> {
     state.notifier.clear();
     Ok(ok(json!({ "ok": true })))
+}
+
+/// Live notification feed over SSE (`notification` events, each carrying the
+/// full entry JSON and an `id:` equal to the notification id). Ends on
+/// graceful shutdown — the process-wide `running` flag — like the console
+/// stream, so the client's EventSource auto-reconnect restores the feed.
+pub async fn notifications_stream(
+    State(state): State<AppState>,
+    _a: AdminUser,
+) -> ApiResult<Sse<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>> {
+    let mut rx = state.notifier.subscribe();
+    let running = state.running.clone();
+    let stream = async_stream::stream! {
+        loop {
+            let recv = tokio::select! {
+                recv = rx.recv() => recv,
+                _ = wait_shutdown(&running) => break,
+            };
+            match recv {
+                Some(n) => {
+                    let payload = serde_json::to_string(&n).unwrap_or_default();
+                    yield Ok(Event::default()
+                        .event("notification")
+                        .id(n.id.to_string())
+                        .data(payload));
+                }
+                None => break, // sender dropped: notifier is gone
+            }
+        }
+    };
+    let stream: Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> = Box::pin(stream);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+/// Complete once graceful shutdown begins: the process-wide `running` flag
+/// clears, polled every 100 ms. Long-lived SSE streams must not hold axum's
+/// drain open, so when this completes the stream simply ends.
+async fn wait_shutdown(running: &Arc<AtomicBool>) {
+    while running.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 // ---------------- VoltSpec Registry signing ----------------
@@ -270,8 +336,21 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.paths.logs_dir = tmp.path().join("logs");
         cfg.paths.servers_dir = tmp.path().join("servers");
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
-        let procs = Arc::new(crate::services::proc::ProcManager::new(db.clone(), hub.clone()));
+        let procs = Arc::new(crate::services::proc::ProcManager::new(
+            db.clone(),
+            hub.clone(),
+            cfg.paths.datalab_dir.clone(),
+        ));
+        let watcher_engine = Arc::new(crate::services::watcher::WatcherEngine::new(
+            db.clone(),
+            Arc::new(crate::services::proc::Notifier::new()),
+            Arc::downgrade(&hub),
+            procs.clone(),
+            Arc::new(crate::services::node::NodeClient::new().unwrap()),
+            tokio::runtime::Handle::current(),
+        ));
         let state = AppState {
             db,
             cfg,
@@ -282,6 +361,7 @@ mod tests {
             node_client: Arc::new(crate::services::node::NodeClient::new().unwrap()),
             node_nonces: Arc::new(crate::services::node::NonceCache::default()),
             running: Arc::new(AtomicBool::new(true)),
+            watcher_engine,
         };
         (tmp, state)
     }
@@ -309,6 +389,13 @@ mod tests {
                 "/api/settings/registry/signing-key",
                 post(registry_set_signing_key),
             )
+            .route("/api/notifications", get(notifications))
+            .route("/api/notifications/stream", get(notifications_stream))
+            .route(
+                "/api/notifications/:id/read",
+                post(notifications_read),
+            )
+            .route("/api/notifications/clear", post(notifications_clear))
             .with_state(state)
     }
 
@@ -480,5 +567,103 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["enabled"], false);
         assert!(body["public_key"].is_null());
+    }
+    #[tokio::test]
+    async fn notifications_list_mark_read_and_clear() {
+        let (_tmp, state) = test_state();
+        let (_admin_id, cookie) = seed_admin(&state);
+        state.notifier.notify_link(
+            "error",
+            "boom",
+            "details",
+            Some(7),
+            Some("#/server/7".into()),
+        );
+        state.notifier.notify("info", "ok", "done", None);
+
+        // List: entries plus unread_count in one envelope.
+        let (status, body) = request(state.clone(), "GET", "/api/notifications", &cookie, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let data = &body["data"];
+        assert_eq!(data["unread_count"], 2);
+        let entries = data["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["title"], "boom");
+        assert_eq!(entries[0]["server_id"], 7);
+        assert_eq!(entries[0]["link"], "#/server/7");
+        assert!(entries[0]["id"].is_u64());
+        assert!(entries[0]["read_at"].is_null(), "fresh entries are unread");
+        let id = entries[0]["id"].as_u64().unwrap();
+
+        // Mark one read: unread drops, read_at stamps.
+        let (status, body) = request(
+            state.clone(),
+            "POST",
+            &format!("/api/notifications/{id}/read"),
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        let (status, body) = request(state.clone(), "GET", "/api/notifications", &cookie, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["unread_count"], 1);
+        assert!(
+            body["data"]["entries"][0]["read_at"].is_string(),
+            "read entry carries a timestamp"
+        );
+
+        // Unknown id → 404, history untouched.
+        let (status, _body) = request(
+            state.clone(),
+            "POST",
+            "/api/notifications/999999/read",
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_status, body) = request(state.clone(), "GET", "/api/notifications", &cookie, None).await;
+        assert_eq!(body["data"]["unread_count"], 1);
+
+        // Clear all: history empties and unread drops to zero.
+        let (status, body) = request(
+            state.clone(),
+            "POST",
+            "/api/notifications/clear",
+            &cookie,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        let (status, body) = request(state.clone(), "GET", "/api/notifications", &cookie, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["entries"].as_array().unwrap().len(), 0);
+        assert_eq!(body["data"]["unread_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn notifications_stream_serves_sse_to_admin() {
+        let (_tmp, state) = test_state();
+        let (_admin_id, cookie) = seed_admin(&state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/notifications/stream")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap_or(""))
+            .unwrap_or("");
+        assert!(
+            ct.contains("text/event-stream"),
+            "stream must be served as SSE, got: {ct}"
+        );
     }
 }

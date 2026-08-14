@@ -5,17 +5,23 @@ pub mod blueprint;
 pub mod console;
 pub mod databases;
 pub mod files;
+pub mod gateway;
 pub mod keys;
 pub mod metrics;
 pub mod node;
 pub mod proc;
 pub mod scheduler;
+pub mod watcher;
 pub mod webhooks;
 pub mod websites;
 
 use crate::config::Config;
 use crate::db::{blocking, Db};
 use crate::models;
+use crate::node_protocol::{PowerAction, RemoteServerStats};
+use crate::nodes::Node;
+use crate::services::node::NodeClient;
+use futures::StreamExt;
 pub use console::ConsoleHub;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -30,9 +36,12 @@ pub use proc::{Notification, Notifier, ProcManager, ProcessInfo};
 // argument so its body can call pool-based models without capturing a `Db`
 // (which would force a per-closure move). Never unwrapped: a join failure
 // surfaces as a `db worker failed` error. See `crate::db::blocking`.
-
-// ---------------- Resource monitor (per-server limits + auto-kill) ----------------
-
+/// Per-server resource caps enforced by the monitor sweep every 5s.
+///
+/// `bandwidth_rx`/`bandwidth_tx` are **bytes per 5s interval**: the sweep
+/// compares the delta of the cumulative network counters between consecutive
+/// sweeps against the cap. `0` disables the cap. `memory_mb`/`cpu_percent`
+/// are also `0` = disabled (the API rejects an explicit `0` for those).
 #[derive(Clone, Debug)]
 pub struct ServerLimits {
     pub server_id: i64,
@@ -83,7 +92,9 @@ impl Monitor {
     }
 
     /// Called every ~5s: refresh the shared per-server sample cache, then
-    /// enforce memory/cpu/bandwidth caps, auto-kill + notify.
+    /// enforce memory/cpu/bandwidth caps for **local** servers, auto-kill +
+    /// notify. Remote servers are enforced by [`Self::sweep_remote`] from the
+    /// async worker (their stats live on the agent node, not in `procs`).
     ///
     /// One `list_servers` replaces the old per-limit `get_server` calls, and
     /// the `cached_info` pass reuses samples younger than 2s (an API fallback
@@ -96,68 +107,140 @@ impl Monitor {
             return;
         };
         for server in &servers {
+            // Remote workloads run on agent nodes: sampling them here would
+            // only cache bogus "offline" rows; `sweep_remote` enforces them
+            // from `RemoteServerStats`.
+            if server.node != "local" {
+                continue;
+            }
             let sid = server.id;
             let info = self.cached_info(procs, server, Duration::from_secs(2));
             let Some(lim) = limits.get(&sid) else {
                 continue;
             };
-            if info.status != "running" {
-                continue;
+            let prev = self.last_bandwidth.lock().get(&sid).copied();
+            let (verdict, new_prev) = decide(lim, &LimitSample::from_info(&info), prev);
+            if let Some(bw) = new_prev {
+                self.last_bandwidth.lock().insert(sid, bw);
             }
-            let mut over = false;
-            let mut reason = String::new();
-            if lim.memory_mb > 0 && info.memory_bytes > lim.memory_mb * 1024 * 1024 {
-                over = true;
-                reason = format!(
-                    "memory {}MB > {}MB",
-                    info.memory_bytes / 1024 / 1024,
-                    lim.memory_mb
-                );
-            }
-            if lim.cpu_percent > 0 && info.cpu_percent > lim.cpu_percent as f64 {
-                over = true;
-                reason = format!("cpu {:.1}% > {}%", info.cpu_percent, lim.cpu_percent);
-            }
-            // bandwidth delta
-            if lim.bandwidth_rx > 0 || lim.bandwidth_tx > 0 {
-                let prev = self.last_bandwidth.lock().get(&sid).copied();
-                let (prx, ptx) = prev.unwrap_or((info.bandwidth_rx_bytes, info.bandwidth_tx_bytes));
-                let drx = info.bandwidth_rx_bytes.saturating_sub(prx);
-                let dtx = info.bandwidth_tx_bytes.saturating_sub(ptx);
-                self.last_bandwidth
-                    .lock()
-                    .insert(sid, (info.bandwidth_rx_bytes, info.bandwidth_tx_bytes));
-                if lim.bandwidth_rx > 0 && drx > lim.bandwidth_rx {
-                    over = true;
-                    reason = format!("rx {}KB > {}KB", drx / 1024, lim.bandwidth_rx / 1024);
-                }
-                if lim.bandwidth_tx > 0 && dtx > lim.bandwidth_tx {
-                    over = true;
-                    reason = format!("tx {}KB > {}KB", dtx / 1024, lim.bandwidth_tx / 1024);
-                }
-            }
-            if over {
-                let n = *self.overs.lock().entry(sid).or_insert(0) + 1;
-                self.overs.lock().insert(sid, n);
+            if let Some(reason) = self.settle(notifier, sid, &server.name, verdict) {
                 notifier.notify(
-                    "warn",
-                    &format!("Server '{}' over limit", server.name),
-                    &format!("{reason} (strike {n})"),
+                    "error",
+                    &format!("Server '{}' killed", server.name),
+                    &format!("exceeded limits: {reason}"),
                     Some(sid),
                 );
-                if n >= 3 {
-                    // auto-kill after 3 strikes
-                    notifier.notify(
-                        "error",
-                        &format!("Server '{}' killed", server.name),
-                        &format!("exceeded limits: {reason}"),
-                        Some(sid),
-                    );
-                    self.overs.lock().remove(&sid);
-                    let _ = procs.stop(sid);
+                let _ = procs.stop(sid);
+            }
+        }
+    }
+
+    /// Remote enforcement pass for the 5s monitor sweep. Fetches fresh stats
+    /// from the agent of every remote server that has limits and enforces the
+    /// same memory/cpu/bandwidth caps as [`Self::sweep`], auto-killing via the
+    /// agent's power endpoint after 3 strikes.
+    ///
+    /// Node HTTP calls run with bounded concurrency so one dead node's 20s
+    /// request timeouts can never stall the rest of the sweep — each `stats`
+    /// GET self-times out inside `NodeClient` (connect 5s, request 20s, one
+    /// retry).
+    pub async fn sweep_remote(&self, db: &Db, notifier: &Notifier, node_client: &NodeClient) {
+        const CONCURRENCY: usize = 8;
+        let limits = self.limits.lock().clone();
+        let Ok(servers) = blocking(db.clone(), |db| models::list_servers(&db, None, false)).await
+        else {
+            return;
+        };
+        let nodes = match blocking(db.clone(), |db| crate::nodes::list(&db)).await {
+            Ok(v) => v
+                .into_iter()
+                .filter(|n| n.online())
+                .map(|n| (n.name.clone(), n))
+                .collect::<HashMap<String, Node>>(),
+            Err(_) => return,
+        };
+        let targets: Vec<(models::Server, Node)> = servers
+            .into_iter()
+            .filter(|s| s.node != "local" && limits.contains_key(&s.id))
+            .filter_map(|s| nodes.get(&s.node).cloned().map(|n| (s, n)))
+            .collect();
+        futures::stream::iter(targets.into_iter().map(|(server, node)| {
+            let client = node_client.clone();
+            let lim = limits.get(&server.id).cloned();
+            async move {
+                let Some(lim) = lim else {
+                    return;
+                };
+                match client.stats(&node, &server.uuid).await {
+                    Ok(stats) => {
+                        let prev = self.last_bandwidth.lock().get(&server.id).copied();
+                        let (verdict, new_prev) =
+                            decide(&lim, &LimitSample::from_remote(&stats), prev);
+                        if let Some(bw) = new_prev {
+                            self.last_bandwidth.lock().insert(server.id, bw);
+                        }
+                        if let Some(reason) =
+                            self.settle(notifier, server.id, &server.name, verdict)
+                        {
+                            notifier.notify(
+                                "error",
+                                &format!("Server '{}' killed", server.name),
+                                &format!("exceeded limits: {reason}"),
+                                Some(server.id),
+                            );
+                            if let Err(e) = client
+                                .power(&node, &server.uuid, PowerAction::Kill)
+                                .await
+                            {
+                                tracing::warn!(server_id = server.id, node = %node.name, "monitor: remote auto-kill failed: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Node unreachable: enforcement is impossible this
+                        // tick; the reconcile loop records the node error.
+                        tracing::debug!(server_id = server.id, node = %node.name, "monitor: remote stats failed: {e}");
+                    }
                 }
-            } else {
-                self.overs.lock().remove(&sid);
+            }
+        }))
+        .buffer_unordered(CONCURRENCY)
+        .for_each(|()| async {})
+        .await;
+    }
+
+    /// Fold one tick's verdict into the server's strike streak and notify on
+    /// violations. Returns `Some(reason)` when the 3-strike auto-kill
+    /// threshold was crossed this tick; the caller performs the actual kill
+    /// (local `ProcManager::stop`, or the agent's `power kill` for remote).
+    fn settle(
+        &self,
+        notifier: &Notifier,
+        server_id: i64,
+        name: &str,
+        verdict: Verdict,
+    ) -> Option<String> {
+        match verdict {
+            Verdict::Skip => None,
+            Verdict::Ok => {
+                self.overs.lock().remove(&server_id);
+                None
+            }
+            Verdict::Over { reason } => {
+                let n = *self.overs.lock().entry(server_id).or_insert(0) + 1;
+                self.overs.lock().insert(server_id, n);
+                notifier.notify(
+                    "warn",
+                    &format!("Server '{name}' over limit"),
+                    &format!("{reason} (strike {n})"),
+                    Some(server_id),
+                );
+                if n >= 3 {
+                    self.overs.lock().remove(&server_id);
+                    Some(reason)
+                } else {
+                    None
+                }
             }
         }
     }
@@ -184,6 +267,105 @@ impl Monitor {
         let info = procs.info(server);
         self.samples.lock().insert(server.id, (info.clone(), now));
         info
+    }
+}
+
+// ---------------- Limit decision (shared local + remote) ----------------
+
+/// One server's enforcement inputs for a sweep tick, normalized so the local
+/// (`ProcessInfo`) and remote (`RemoteServerStats`) paths share one pure
+/// decision function.
+struct LimitSample {
+    status: String,
+    cpu_percent: f64,
+    memory_bytes: u64,
+    rx_bytes: u64,
+    tx_bytes: u64,
+}
+
+impl LimitSample {
+    fn from_info(info: &ProcessInfo) -> Self {
+        Self {
+            status: info.status.clone(),
+            cpu_percent: info.cpu_percent,
+            memory_bytes: info.memory_bytes,
+            rx_bytes: info.bandwidth_rx_bytes,
+            tx_bytes: info.bandwidth_tx_bytes,
+        }
+    }
+
+    fn from_remote(stats: &RemoteServerStats) -> Self {
+        Self {
+            status: stats.state.clone(),
+            cpu_percent: stats.cpu_percent,
+            memory_bytes: stats.memory_bytes,
+            rx_bytes: stats.network_rx_bytes,
+            tx_bytes: stats.network_tx_bytes,
+        }
+    }
+}
+
+/// Outcome of one tick's limit comparison.
+enum Verdict {
+    /// Not running: nothing enforced this tick; any strike streak is kept.
+    Skip,
+    /// Under every cap: clears the strike streak.
+    Ok,
+    /// Over a cap: `reason` describes the violation.
+    Over { reason: String },
+}
+
+/// Pure limit decision shared by the local and remote sweeps.
+///
+/// Bandwidth limits are cumulative-counter deltas expressed in **bytes per
+/// 5s sweep interval**. `prev_bw` holds the previous tick's (rx, tx) counter
+/// readings; the first sample for a server seeds the baseline and never trips
+/// a bandwidth cap (a restart resets the counters, which `saturating_sub`
+/// absorbs). The returned `Some((rx, tx))` is the new baseline to store — only
+/// when a bandwidth cap is active and the server is running, mirroring the
+/// legacy sweep.
+fn decide(
+    lim: &ServerLimits,
+    s: &LimitSample,
+    prev_bw: Option<(u64, u64)>,
+) -> (Verdict, Option<(u64, u64)>) {
+    if s.status != "running" {
+        return (Verdict::Skip, None);
+    }
+    let mut over = false;
+    let mut reason = String::new();
+    if lim.memory_mb > 0 && s.memory_bytes > lim.memory_mb * 1024 * 1024 {
+        over = true;
+        reason = format!(
+            "memory {}MB > {}MB",
+            s.memory_bytes / 1024 / 1024,
+            lim.memory_mb
+        );
+    }
+    if lim.cpu_percent > 0 && s.cpu_percent > lim.cpu_percent as f64 {
+        over = true;
+        reason = format!("cpu {:.1}% > {}%", s.cpu_percent, lim.cpu_percent);
+    }
+    let new_prev = if lim.bandwidth_rx > 0 || lim.bandwidth_tx > 0 {
+        let (prx, ptx) = prev_bw.unwrap_or((s.rx_bytes, s.tx_bytes));
+        let drx = s.rx_bytes.saturating_sub(prx);
+        let dtx = s.tx_bytes.saturating_sub(ptx);
+        if lim.bandwidth_rx > 0 && drx > lim.bandwidth_rx {
+            over = true;
+            reason = format!("rx {}KB > {}KB", drx / 1024, lim.bandwidth_rx / 1024);
+        }
+        if lim.bandwidth_tx > 0 && dtx > lim.bandwidth_tx {
+            over = true;
+            reason = format!("tx {}KB > {}KB", dtx / 1024, lim.bandwidth_tx / 1024);
+        }
+        Some((s.rx_bytes, s.tx_bytes))
+    } else {
+        None
+    };
+    if over {
+        (Verdict::Over { reason }, new_prev)
+    } else {
+        (Verdict::Ok, new_prev)
     }
 }
 
@@ -276,12 +458,15 @@ pub async fn spawn_background(
     node_client: Arc<crate::services::node::NodeClient>,
     running: Arc<AtomicBool>,
 ) {
-    // resource monitor sweep every 5s
+    // resource monitor sweep every 5s: local servers on the blocking pool
+    // (disk//proc walks), remote servers via agent HTTP stats with bounded
+    // concurrency inside `sweep_remote`.
     {
         let db = db.clone();
         let procs = procs.clone();
         let monitor = monitor.clone();
         let notifier = notifier.clone();
+        let node_client = node_client.clone();
         let running = running.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -294,12 +479,19 @@ pub async fn spawn_background(
                 let procs = procs.clone();
                 let monitor = monitor.clone();
                 let notifier = notifier.clone();
-                // Sampling walks disk and /proc: run on the blocking pool so
-                // the async worker stays free for request handling.
+                // Local sampling walks disk and /proc: run on the blocking
+                // pool so the async worker stays free for request handling.
+                let monitor_local = monitor.clone();
+                let db_local = db.clone();
+                let procs_local = procs.clone();
+                let notifier_local = notifier.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    monitor.sweep(&db, &procs, &notifier)
+                    monitor_local.sweep(&db_local, &procs_local, &notifier_local)
                 })
                 .await;
+                // Remote servers: node stats are HTTP calls; sweep_remote
+                // bounds concurrency so a dead node cannot stall the sweep.
+                monitor.sweep_remote(&db, &notifier, &node_client).await;
             }
         });
     }
@@ -338,6 +530,23 @@ pub async fn spawn_background(
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
+                // Auto-lift any drain whose deadline has passed. Runs once
+                // per loop; a failing sweep is logged, never fatal.
+                if let Err(e) = blocking(db.clone(), |db| {
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let cleared = crate::nodes::clear_expired_drains(&db, &now)?;
+                    if !cleared.is_empty() {
+                        tracing::info!(
+                            count = cleared.len(),
+                            "reconcile: auto-lifted expired node drain(s)"
+                        );
+                    }
+                    Ok(())
+                })
+                .await
+                {
+                    tracing::warn!("reconcile: drain deadline sweep failed: {e}");
+                }
                 let servers =
                     match blocking(db.clone(), |db| crate::models::list_servers(&db, None, false))
                         .await
@@ -357,8 +566,22 @@ pub async fn spawn_background(
                     match client.stats(&node, &server.uuid).await {
                         Ok(stats) => {
                             let state = stats.state.clone();
+                            // Remote servers have no local process to sample
+                            // in the 30s telemetry loop (that one is
+                            // local-only), so this reconcile tick is the
+                            // metrics source for them: persist one row via the
+                            // same telemetry helpers the history API reads.
+                            let sample =
+                                metrics::Sample::from_remote(chrono::Utc::now().timestamp(), &stats);
                             let _ = blocking(db.clone(), move |db| {
-                                crate::models::set_server_status(&db, server.id, &state)
+                                crate::models::set_server_status(&db, server.id, &state)?;
+                                if let Err(e) = metrics::record(&db, server.id, &sample) {
+                                    tracing::warn!(
+                                        "reconcile: metrics record server {}: {e}",
+                                        server.id
+                                    );
+                                }
+                                Ok(())
                             })
                             .await;
                         }
@@ -451,4 +674,134 @@ pub async fn spawn_background(
         });
     }
     let _ = cfg;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lim(mem: u64, cpu: u64, rx: u64, tx: u64) -> ServerLimits {
+        ServerLimits {
+            server_id: 1,
+            memory_mb: mem,
+            cpu_percent: cpu,
+            bandwidth_rx: rx,
+            bandwidth_tx: tx,
+        }
+    }
+
+    fn running(cpu: f64, mem: u64, rx: u64, tx: u64) -> LimitSample {
+        LimitSample {
+            status: "running".into(),
+            cpu_percent: cpu,
+            memory_bytes: mem,
+            rx_bytes: rx,
+            tx_bytes: tx,
+        }
+    }
+
+    #[test]
+    fn decide_memory_and_cpu_caps() {
+        let l = lim(1024, 100, 0, 0);
+        // Under both caps.
+        let (v, _) = decide(&l, &running(50.0, 512 * 1024 * 1024, 0, 0), None);
+        assert!(matches!(v, Verdict::Ok));
+        // Memory over.
+        let (v, _) = decide(&l, &running(50.0, 1025 * 1024 * 1024, 0, 0), None);
+        assert!(matches!(v, Verdict::Over { .. }));
+        // CPU over.
+        let (v, _) = decide(&l, &running(101.0, 0, 0, 0), None);
+        assert!(matches!(v, Verdict::Over { .. }));
+    }
+
+    #[test]
+    fn decide_zero_limits_never_over() {
+        let l = lim(0, 0, 0, 0);
+        let (v, new_prev) = decide(&l, &running(1e9, u64::MAX, u64::MAX, u64::MAX), None);
+        assert!(matches!(v, Verdict::Ok));
+        assert!(new_prev.is_none(), "no bandwidth cap => no baseline stored");
+    }
+
+    #[test]
+    fn decide_non_running_skips_and_keeps_baseline() {
+        let l = lim(1, 1, 1, 1);
+        let s = LimitSample {
+            status: "stopped".into(),
+            cpu_percent: 99.0,
+            memory_bytes: u64::MAX,
+            rx_bytes: 0,
+            tx_bytes: 0,
+        };
+        let (v, new_prev) = decide(&l, &s, Some((10, 10)));
+        assert!(matches!(v, Verdict::Skip));
+        assert!(new_prev.is_none(), "baseline untouched while not running");
+    }
+
+    #[test]
+    fn decide_bandwidth_is_bytes_per_5s_delta() {
+        let l = lim(0, 0, 1000, 0); // 1000 bytes per 5s interval
+        // First sample seeds the baseline: cumulative 0 -> 1000.
+        let (v, prev) = decide(&l, &running(0.0, 0, 1000, 50), None);
+        assert!(matches!(v, Verdict::Ok), "first sample must not trip");
+        let prev = prev.expect("bandwidth cap active => baseline stored");
+        assert_eq!(prev, (1000, 50));
+        // Next sweep: 2500 more bytes in the interval -> over the 1000 cap.
+        let (v, _) = decide(&l, &running(0.0, 0, 3500, 50), Some(prev));
+        assert!(matches!(v, Verdict::Over { .. }));
+        // 900 bytes in the interval -> under.
+        let (v, _) = decide(&l, &running(0.0, 0, 1900, 50), Some(prev));
+        assert!(matches!(v, Verdict::Ok));
+    }
+
+    #[test]
+    fn decide_counter_reset_absorbs_restart() {
+        let l = lim(0, 0, 1000, 0);
+        let (_, prev) = decide(&l, &running(0.0, 0, 10_000, 0), None);
+        // Counters reset (workload restart): 10_000 -> 100 is not a 9900-byte
+        // burst; saturating_sub must not trip the cap.
+        let (v, _) = decide(&l, &running(0.0, 0, 100, 0), prev);
+        assert!(matches!(v, Verdict::Ok));
+    }
+
+    #[test]
+    fn settle_kills_after_three_strikes_and_clears_on_recovery() {
+        let monitor = Monitor::new();
+        let notifier = Notifier::new();
+        let l = lim(1024, 0, 0, 0);
+        let over = |m: &Monitor, n: &Notifier| -> Option<String> {
+            let (v, _) = decide(&l, &running(50.0, 2048 * 1024 * 1024, 0, 0), None);
+            m.settle(n, 7, "s7", v)
+        };
+        assert!(over(&monitor, &notifier).is_none(), "strike 1: warn only");
+        assert!(over(&monitor, &notifier).is_none(), "strike 2: warn only");
+        assert_eq!(
+            over(&monitor, &notifier).as_deref(),
+            Some("memory 2048MB > 1024MB"),
+            "strike 3: auto-kill threshold crossed"
+        );
+        // Recovery clears the streak and re-arms it.
+        let (v, _) = decide(&l, &running(50.0, 512 * 1024 * 1024, 0, 0), None);
+        assert!(monitor.settle(&notifier, 7, "s7", v).is_none());
+        assert!(monitor.overs.lock().get(&7).is_none());
+    }
+
+    #[test]
+    fn settle_skip_keeps_strike_streak() {
+        let monitor = Monitor::new();
+        let notifier = Notifier::new();
+        let l = lim(1024, 0, 0, 0);
+        let (v, _) = decide(&l, &running(50.0, 2048 * 1024 * 1024, 0, 0), None);
+        monitor.settle(&notifier, 9, "s9", v); // strike 1
+        // Not running: verdict Skip must not clear the streak.
+        let stopped = LimitSample {
+            status: "stopped".into(),
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            rx_bytes: 0,
+            tx_bytes: 0,
+        };
+        let (v, _) = decide(&l, &stopped, Some((0, 0)));
+        monitor.settle(&notifier, 9, "s9", v);
+        assert_eq!(monitor.overs.lock().get(&9), Some(&1), "streak preserved");
+    }
 }

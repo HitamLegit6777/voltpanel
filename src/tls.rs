@@ -149,6 +149,30 @@ pub fn default_sans(extra: &[String]) -> Vec<String> {
     sans
 }
 
+/// SANs for an agent certificate: loopback, hostname, and the configured
+/// public-URL host only. The panel dials the agent by its configured URL, so
+/// transient container/tailscale host IPs must NOT be embedded — every host-IP
+/// churn would otherwise regenerate the certificate and rotate the pinned
+/// fingerprint, breaking in-flight panel→agent requests.
+pub fn agent_sans(extra: &[String]) -> Vec<String> {
+    let mut sans: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
+    if let Ok(h) = hostname::get() {
+        let h = h.to_string_lossy().to_string();
+        if !h.is_empty() {
+            sans.push(h);
+        }
+    }
+    for e in extra {
+        let e = e.trim();
+        if !e.is_empty() {
+            sans.push(e.to_string());
+        }
+    }
+    sans.sort();
+    sans.dedup();
+    sans
+}
+
 /// True when the stored leaf already carries every SAN we would embed today.
 ///
 /// The SAN extension is parsed structurally (via `rcgen`'s x509-parser-backed

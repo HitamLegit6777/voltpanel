@@ -4,26 +4,34 @@
 "use strict";
 
 const API = "/api";
-const state = { user: null, page: "boot", server: null, servers: [], blueprints: [], pollers: [], consoleEs: null, consoleServer: null, lang: "en", charts: {}, sparks: {}, sparkKey: "", filePath: "/", fileId: null, pendingLogin: null };
+const state = { user: null, page: "boot", server: null, servers: [], blueprints: [], pollers: [], consoleEs: null, consoleServer: null, lang: "en", charts: {}, sparks: {}, sparkKey: "", filePath: "/", fileId: null, pendingLogin: null, notifs: [], unread: 0, notifEs: null };
 
 /* ---------- i18n ---------- */
 const I18N = {
   en: {
-    dashboard: "Fleet", servers: "Workspaces", profile: "Profile", settings: "Settings",
-    admin: "Control Center", logout: "Logout", loading: "Loading…", none: "None",
-    node: "Fabric", ram: "RAM", disk: "Disk", cpu: "CPU", load: "Load", uptime: "Uptime", processes: "Processes",
+    dashboard: "Dashboard", servers: "Servers", profile: "Profile", settings: "Settings",
+    admin: "Admin", logout: "Logout", loading: "Loading…", none: "None",
+    node: "Nodes", ram: "RAM", disk: "Disk", cpu: "CPU", load: "Load", uptime: "Uptime", processes: "Processes",
     status: "Status", name: "Name", owner: "Owner", actions: "Actions", size: "Size", type: "Type", modified: "Modified",
     start: "Start", restart: "Restart", stop: "Stop", kill: "Kill", save: "Save", cancel: "Cancel", create: "Create",
-    delete: "Delete", edit: "Edit", download: "Download", upload: "Upload", copy: "Copy", rename: "Rename",
-    console: "Terminal", files: "Storage", databases: "Data Lab", backups: "Vault", schedules: "Flows",
+    delete: "Delete", edit: "Edit", download: "Download", upload: "Upload", copy: "Copy", rename: "Rename", archive: "Archive", extract: "Extract",
+    console: "Console", files: "Files", databases: "Databases", backups: "Backups", schedules: "Schedules",
     sites: "Sites", domain: "Domain", enabled: "Enabled", ssl: "TLS",
-    users: "Team", blueprints: "Blueprint Studio", system: "Observatory", create_server: "New Workspace", create_user: "New Member",
+    users: "Users", blueprints: "Eggs", system: "System", create_server: "New Server", create_user: "New User",
     suspend: "Suspend", unsuspend: "Unsuspend", reinstall: "Rebuild",
-    metrics: "Metrics", allocations: "Endpoints",
-    login: "Sign in", username: "Username", password: "Password", remember: "Remember me",
-    welcome: "Linux-native workload control plane", no_servers: "No workspaces yet",
-    all_servers: "Workspace Fleet", notifications: "Signals", api_keys: "Access Tokens",
-    confirm_delete: "Delete?", confirm_restore: "Restore snapshot? Workspace will be stopped.",
+    metrics: "Metrics", allocations: "Network",
+    login: "Sign in", signing_in: "Signing in…", verifying: "Verifying…", username: "Username", password: "Password", remember: "Remember me",
+    welcome: "Linux-native workload control plane", no_servers: "No servers yet",
+    auth_tagline: "Sandboxed Linux workloads, one control plane, zero container runtime.",
+    auth_feat_1: "Bare-process isolation — no Docker daemon",
+    auth_feat_2: "Per-workload CPU, RAM & bandwidth caps",
+    auth_feat_3: "argon2id logins, TOTP + recovery codes",
+    auth_signin: "Sign in", auth_signin_sub: "Enter your operator credentials.",
+    auth_foot: "VoltPanel · encrypted sessions, no third-party auth",
+    all_servers: "Servers", notifications: "Notifications", api_keys: "API Keys",
+    notif_open: "Notifications", notif_empty: "No notifications yet", notif_all_read: "All caught up",
+    notif_clear_all: "Clear all", notif_cleared: "Notifications cleared", notif_unread: "{n} unread",
+    confirm_delete: "Delete?", confirm_restore: "Restore snapshot? Server will be stopped.",
     saved: "Saved", created: "Created", deleted: "Deleted", uploaded: "Uploaded",
     twofa: "Two-Factor Auth", enable_2fa: "Enable 2FA", verify: "Verify",
     retry: "Retry",
@@ -43,7 +51,7 @@ const I18N = {
     err_load_blueprints: "Could not load blueprints", err_load_agents: "Could not load agents",
     err_load_flows: "Could not load flows", err_load_revisions: "Could not load revisions",
     err_load_drift: "Could not load drift",
-    err_observatory: "Observatory unavailable",
+    err_observatory: "System unavailable",
     obs_title: "Panel self-metrics", obs_since: "since", obs_requests: "Requests",
     obs_ok: "ok", obs_errors: "errors", obs_rate: "req / min", obs_last: "last",
     obs_minutes: "min", obs_pool: "DB pool", obs_idle: "idle",
@@ -52,15 +60,22 @@ const I18N = {
     obs_last_tick: "last tick", obs_pool_saturated: "pool saturated",
     err_write_blocked: "Write blocked", err_query_failed: "Query failed",
     runway_title: "Launch runway", runway_sub: "Three steps to your first live workload",
-    runway_workspace: "Launch a workspace", runway_workspace_desc: "Pick a VoltSpec blueprint and compose it",
+    runway_workspace: "Launch a server", runway_workspace_desc: "Pick a blueprint and compose it",
     runway_node: "Attach an execution agent", runway_node_desc: "Extend the execution fabric beyond this machine",
-    runway_backup: "Take the first snapshot", runway_backup_desc: "Lock in a verified Vault backup",
+    runway_backup: "Take the first snapshot", runway_backup_desc: "Lock in a verified backup",
     runway_compose: "Compose", runway_attach: "Attach agent", runway_ask_admin: "Ask an administrator",
-    runway_waiting: "Waits for a workspace", runway_progress: "Launch progress", runway_dismiss: "Dismiss",
+    runway_waiting: "Waits for a server", runway_progress: "Launch progress", runway_dismiss: "Dismiss",
     runway_port_hint: "reserved on the agent", runway_start_on_create: "Launch immediately after create",
     runway_no_vars: "This blueprint declares no launch inputs.", runway_no_launch: "This blueprint has no launch command.",
-    runway_need_blueprint: "No blueprints yet — create one in Blueprint Studio first.", runway_preview: "Live launch preview",
+    runway_need_blueprint: "No blueprints yet — create one in Eggs first.", runway_preview: "Live launch preview",
     runway_launch_cmd: "Launch command", runway_resources: "Resources", runway_endpoint: "Endpoint", runway_blueprint: "Blueprint", close: "Close",
+    place_label: "Placement", place_auto: "Auto — best-fit agent",
+    place_hint_auto: "VoltPanel scores every eligible agent by free headroom and pins the winner.",
+    place_node_online: "online", place_node_offline: "offline", place_need_node: "Attach an execution agent first",
+    place_free: "{mem} free · {disk} disk", place_tags: "Required tags", place_tags_ph: "gpu, eu-west (comma-separated)",
+    place_location: "Location", place_location_ph: "any", place_target: "Target agent",
+    place_no_room: "{node} is short on capacity for this size — launch may be refused.",
+    place_auto_pool: "Auto picks from {n} eligible agent(s).", place_auto_none: "No agent matches those tags/location yet.",
     registry: "Registry", reg_library: "Library", reg_search_ph: "Search packages…",
     reg_install: "Install", reg_publish: "Publish", reg_published: "Published", reg_installed: "Installed",
     reg_signed: "Signed", reg_unsigned: "Unsigned", reg_bad_sig: "Signature invalid",
@@ -83,7 +98,8 @@ const I18N = {
     member_remove_confirm: "Remove {name} from this squad?", member_role_updated: "Role updated",
     squad_memberships: "Squad memberships", squad_no_memberships: "Not a member of any squad",
     squad_my_role: "You are {role}",
-    user_detail: "User detail", back: "Back",
+    user_detail: "User detail", back: "Back", control_center: "Admin", control_center_only: "Admin is for administrators only",
+    obs_endpoints: "Endpoints", obs_host_resources: "Host resources",
     role_viewer: "Viewer", role_operator: "Operator", role_developer: "Developer", role_manager: "Manager",
     err_load_squads: "Could not load squads", err_load_squad: "Could not load squad", err_load_user_detail: "Could not load user detail",
     mirror_status_ok: "mirror ok", mirror_status_ok_title: "Offsite mirror healthy",
@@ -91,23 +107,149 @@ const I18N = {
     mirror_status_disabled: "mirror off", mirror_status_disabled_title: "Offsite mirror is disabled",
     mirror_sync: "Sync mirror", mirror_sync_confirm: "Re-sync the offsite mirror now? Missing archives are copied from the primary store and mirror retention is enforced.",
     mirror_sync_running: "Syncing…", mirror_sync_done: "Mirror synced — {copied} copied, {removed} removed · {status}",
+    gate: "Gate", gate_none: "none", gate_exit: "exit", gate_signal: "signal",
+    gate_after_task: "after task {n} exits {code}", gate_wait_signal: "wait {event} ≤{s}s",
+    gate_unknown: "unknown gate: {raw}", gate_task_opt: "task {n}", gate_no_earlier: "no earlier task",
+    gate_previous_task: "Previous task", gate_expected_code: "Expected exit code",
+    gate_event: "Event", gate_timeout: "Timeout (s)", gate_custom: "custom…",
+    gate_custom_ph: "event name, e.g. deploy.done", gate_lock: "server locked",
+    gate_lock_title: "Signal gates wait for webhook events of this server",
+    gate_err_index: "exit gate must reference an earlier task",
+    gate_err_code: "exit code must be an integer",
+    gate_err_event: "signal event is required",
+    gate_err_timeout: "timeout must be an integer 1–3600",
+    gate_warn_unknown: "Preserving unrecognized gate — {raw}",
+    palette_search: "Search commands and pages…", palette_scoped_hint: "Tip: s: servers · u: users · bp: blueprints · ev: events",
+    palette_servers: "Servers", palette_users: "Users", palette_blueprints: "Eggs", palette_events: "Events",
+    palette_commands: "Commands", palette_create: "Create", palette_theme: "Toggle theme",
+    palette_no_results: "No matches", palette_loading: "Loading…",
+    palette_new_workspace: "New server", palette_new_user: "New user", palette_new_squad: "New squad",
+    palette_new_blueprint: "New blueprint", palette_attach_node: "Attach agent",
+    sel_all: "Select all", sel_n: "{n} selected", sel_clear: "Clear selection",
+    bulk_start: "Start", bulk_stop: "Stop", bulk_restart: "Restart", bulk_suspend: "Suspend", bulk_unsuspend: "Unsuspend",
+    bulk_confirm_stop: "Stop {n} selected server(s)? Running processes will be terminated.",
+    bulk_done: "Bulk action complete — {ok} ok, {fail} failed",
+    node_detail: "Agent detail", node_identity: "Identity", node_heartbeat: "Heartbeat", node_never_hb: "never",
+    node_agent_version: "Agent version", node_host: "Hostname", node_os_arch: "OS / arch",
+    node_last_error: "Last error", node_tls_fp: "TLS fingerprint",
+    node_edit: "Edit agent", node_edit_hint: "Updates are applied atomically by the panel.",
+    node_new_title: "Attach an execution agent", node_new_sub: "Register a machine, then run one command on it to enroll.",
+    node_name_ph: "agent-eu-1", node_url_hint: "Where the panel reaches the agent (host:port).",
+    node_location_ph: "id-jakarta", node_location_hint: "Free-form region label used for auto-placement.",
+    node_fp: "Pinned TLS fingerprint", node_fp_create_ph: "64-hex SHA-256 (optional)",
+    node_fp_hint: "If set, enrollment is refused unless the agent presents this exact certificate.",
+    node_enroll_title: "One command to finish", node_enroll_sub: "Run this on the agent machine — the token is single-use and expires.",
+    node_copy_cmd: "Copy command", node_name_req: "Name needs at least 2 characters.", node_url_req: "Enter the agent endpoint URL.",
+    node_fp_bad: "Fingerprint must be 64 hex characters.",
+    node_url: "Endpoint", node_location: "Location", node_tags: "Tags", node_tags_ph: "comma, separated, tags",
+    node_limits: "Limits", node_mem_limit: "Memory limit (MB)", node_disk_limit: "Disk limit (MB)",
+    node_mem_over: "Memory overallocation (%)", node_disk_over: "Disk overallocation (%)",
+    node_sched: "Scheduling", node_enabled: "Accept enrollments", node_schedulable: "Schedulable", node_maintenance: "Maintenance mode",
+    node_expected_fp: "Expected fingerprint", node_fp_ph: "64-hex SHA-256 (empty clears)", node_saved: "Agent updated",
+    node_drain: "Drain", node_drain_active: "draining ({mode})", node_drain_hold: "Hold", node_drain_stop: "Hold + stop",
+    node_drain_hold_hint: "Cordon: no new placements, running workloads stay up.",
+    node_drain_stop_hint: "Cordon and stop running workloads.",
+    node_drain_reason: "Reason", node_drain_reason_ph: "e.g. rack maintenance",
+    node_drain_deadline: "Deadline (hours)", node_drain_deadline_ph: "empty = no auto-lift",
+    node_drain_started: "Drain set", node_drain_cleared: "Drain lifted", node_drain_clear: "Lift drain",
+    node_drain_failed: "Stop failures", node_drain_clear_confirm: "Lift the drain and restore scheduling?",
+    node_events: "Events", node_no_events: "No agent events yet", node_updated: "updated",
+    skip_link: "Skip to content", sort_asc: "Sorted ascending", sort_desc: "Sorted descending", sort_none: "Click to sort",
+    es_db_t: "No databases yet", es_db_h: "Spin up a SQLite database this server can read and write through Databases.",
+    es_bk_t: "No snapshots yet", es_bk_h: "Capture a verified archive of this server you can restore or download later.",
+    es_sch_t: "No schedules yet", es_sch_h: "Automate power, commands, backups or alerts on a cron cadence.",
+    es_site_t: "No sites yet", es_site_h: "Route a domain to this server as a static host or reverse proxy.",
+    es_alloc_t: "No endpoints yet", es_alloc_h: "Reserve a port; the first one becomes this server's primary endpoint.",
+    es_key_t: "No access tokens", es_key_h: "Create a scoped token to reach the API without your session cookie.",
+    es_wh_t: "No webhooks", es_wh_h: "Get signed HTTP callbacks when server and fleet events fire.",
+    es_notif_t: "No notifications", es_notif_h: "Notifications and audit-worthy events will surface here.",
+    es_runs_t: "No runs yet", es_runs_h: "This schedule hasn't fired — trigger it or wait for its next window.",
+    es_deliv_t: "No deliveries yet", es_deliv_h: "Delivery attempts appear once a matching event fires.",
+    es_files_none_t: "This folder is empty", es_search_none_t: "No matches",
+    cut: "Cut", clear: "Clear", paste_here: "Paste here", add_task: "Add task", save_changes: "Save changes",
+    new_webhook: "New webhook", webhooks: "Webhooks", new_blueprint: "New blueprint",
+    flows_eyebrow: "EVENT-DRIVEN CONTROL", flows_title: "Schedule runway", flows_sub: "Coordinate lifecycle commands, snapshots, and tasks across every server.",
+    bp_eyebrow: "VOLT SPECIFICATION", bp_title: "Eggs", bp_sub: "Compose portable launch plans, then publish and install them through the registry.",
+    fabric_eyebrow: "EXECUTION FABRIC", fabric_title: "Nodes", fabric_sub: "Capacity, isolation, placement, and health across every execution host.",
+    es_nodes_t: "No agents attached", es_nodes_h: "Local isolated execution keeps working. Attach an agent to spread workloads across machines.",
+    a_start: "Start server", a_restart: "Restart server", a_stop: "Stop server", a_kill: "Force kill server",
+    a_refresh: "Refresh", a_new_file: "New file", a_new_folder: "New folder", a_pull_url: "Pull from URL",
+    a_rename: "Rename", a_more: "More actions", a_run_now: "Run now", a_run_history: "Run history",
+    a_test_node: "Test agent", a_reenroll: "Re-enroll", a_delete_node: "Delete agent",
+    a_toggle_wh: "Toggle webhook", a_test_ping: "Send test ping", a_deliveries: "Deliveries",
+    a_open_palette: "Open command palette", a_open_nav: "Open navigation", a_make_primary: "Make primary",
+    a_copy_endpoint: "Copy endpoint", a_edit_notes: "Edit notes", a_detach: "Detach", a_verify: "Verify checksum",
+    edit_schedule: "Edit schedule", new_schedule: "New schedule", pulling_file: "Pulling file",
+    bp_new_sub: "Define how this server starts.", search: "Search",
+    protected: "Protected", isolation_on: "Server isolation enabled", filter_files: "Filter files", filter_ph: "Filter…", isolation_ns: "Namespace + cgroup isolation",
+    bp_category: "Category", bp_category_hint: "For grouping in the catalog.", bp_runtime: "Runtime",
+    bp_launch: "Launch command", bp_launch_hint: "The command executed inside the isolated server directory.",
+    bp_name_hint: "Shown when creating a server.", bp_create: "Create blueprint", bp_copied: "VoltSpec copied to clipboard",
+    sch_name_ph: "daily restart", sch_cron_label: "Cron", sch_tasks: "Tasks", sch_backoff: "backoff s", retries: "retries",
+    sch_cmd_ph: "command to send", sch_backup_ph: "backup name (optional)", sch_payload_ph: "payload (optional)", sch_payload_label: "Task payload",
+    bk_name_opt: "Name", bk_optional: "optional", bk_ignore: "Ignore patterns", bk_ignore_hint: ".gitignore-style globs, one per line",
+    bk_ignore_note: "Excluded from the archive. Local servers only — remote agents reject ignore patterns.", bk_create_title: "New snapshot",
+    copied: "Copied", moved: "Moved", extracted: "Extracted", downloaded: "Downloaded",
+    t_perms_updated: "Permissions updated", t_crash_saved: "Crash policy saved", t_crash_reset: "Crash burst reset",
+    t_upload_failed: "Upload failed", t_install_queued: "Install queued", t_restored: "Restored — server refreshed",
+    t_transfer_cancelled: "Transfer cancelled", t_cancelling: "Cancelling…", t_triggered: "Triggered",
+    t_primary_updated: "Primary endpoint updated", t_detached: "Detached", t_pass_changed: "Password changed",
+    t_key_revoked: "Token revoked", t_wh_updated: "Webhook updated", t_bp_created: "Blueprint created",
+    e_sch_not_found: "Schedule not found", e_name_cron: "Name and cron are required", e_one_task: "Add at least one task",
+    e_domain_req: "Domain is required", e_valid_port: "Enter a valid port (1–65535)", e_pick_cap: "Select at least one capability (or Full access)", e_required_name: "Name is required", e_required_url: "URL is required", e_pick_user: "Select a user to add",
+    e_node_short: "Agent name too short", confirm_revoke_key: "Revoke this token? It stops working immediately but stays listed for audit.",
+    recovery_codes: "Recovery codes", recovery_codes_hint: "Save these one-time codes somewhere safe. Each one works exactly once — if you lose your authenticator app, a recovery code is your only way back in.",
+    recovery_saved: "Codes saved", recovery_confirm: "I saved the codes",
+    regenerate: "Regenerate", disable_2fa: "Disable 2FA", reset_2fa: "Reset 2FA",
+    reset_2fa_confirm: "Reset 2FA for {name}? Their secret and recovery codes will be cleared and they must re-enroll.",
+    rec_reauth: "Re-authenticate", rec_reauth_sub: "Enter your current password and a code from your authenticator app to rotate the recovery codes.",
+    recovery_use: "Use a recovery code", recovery_ph: "XXXXX-XXXXX",
+    totp_code: "6-digit code", disable_2fa_body: "Enter a code from your authenticator app to turn off two-factor auth. Your recovery codes are deleted too.",
+    twofa_sub: "Enter the code from your authenticator app.", use_authenticator: "Use authenticator app",
+    twofa_scan: "Scan with any authenticator app (Google Authenticator, Authy, 1Password).", twofa_secret: "Secret",
+    token_created: "Access token created", token_once: "Shown once — copy it now, it can't be retrieved later.", copy_token: "Copy token", done: "Done",
+    wh_secret_title: "Webhook signing secret", wh_secret_once: "Shown once — copy it now, it can't be retrieved later.", copy_secret: "Copy secret",
+    qa_compose: "Create server", qa_compose_sub: "Launch from a blueprint", qa_attach: "Add node", qa_attach_sub: "Extend the execution fabric",
+    qa_api: "API access", qa_api_sub: "Manage scoped credentials", qa_security: "Account security", qa_security_sub: "Password and two-factor auth", recent_activity: "Recent activity",
+    quick_actions: "Quick actions", webhook_created: "Webhook created",
+    watchers: "Watchers", pause: "Pause", enable: "Enable",
+    watchers_badge: "reactive", watchers_hint: "log-pattern rules that fire an action on match",
+    watchers_empty: "No watchers yet — add a rule to react to console output",
+    watcher_fired: "fired {n}× · {ago}", watcher_never: "never fired",
+    watcher_new: "New watcher", watcher_edit: "Edit watcher",
+    watcher_name_ph: "e.g. Crash guard", watcher_pattern: "Match pattern",
+    watcher_pattern_ph: "e.g. Out of memory", watcher_regex: "Treat pattern as regular expression",
+    watcher_action: "On match", watcher_cooldown: "Cooldown", watcher_cooldown_hint: "seconds to wait before firing again",
+    watcher_level: "Notification level", watcher_command: "Command to send", watcher_command_ph: "e.g. say Server is restarting",
+    watcher_no_payload: "No extra input — this action runs as-is.",
+    watcher_confirm_del: "Delete watcher \"{name}\"?",
+    wt_notify: "Notify", wt_command: "Run command", wt_restart: "Restart", wt_stop: "Stop",
+    lvl_info: "Info", lvl_warn: "Warning", lvl_error: "Error",
+    e_watcher_fields: "Name and pattern are required", e_watcher_command: "Command action needs a command to send",
   },
   id: {
-    dashboard: "Fleet", servers: "Workspace", profile: "Profil", settings: "Pengaturan",
-    admin: "Pusat Kontrol", logout: "Keluar", loading: "Memuat…", none: "Tidak ada",
-    node: "Fabric", ram: "RAM", disk: "Disk", cpu: "CPU", load: "Beban", uptime: "Aktif", processes: "Proses",
+    dashboard: "Dashboard", servers: "Server", profile: "Profil", settings: "Pengaturan",
+    admin: "Admin", logout: "Keluar", loading: "Memuat…", none: "Tidak ada",
+    node: "Node", ram: "RAM", disk: "Disk", cpu: "CPU", load: "Beban", uptime: "Aktif", processes: "Proses",
     status: "Status", name: "Nama", owner: "Pemilik", actions: "Aksi", size: "Ukuran", type: "Tipe", modified: "Diubah",
     start: "Mulai", restart: "Ulang", stop: "Hentikan", kill: "Paksa", save: "Simpan", cancel: "Batal", create: "Buat",
-    delete: "Hapus", edit: "Ubah", download: "Unduh", upload: "Unggah", copy: "Salin", rename: "Ganti nama",
-    console: "Terminal", files: "Penyimpanan", databases: "Lab Data", backups: "Vault", schedules: "Flow",
+    delete: "Hapus", edit: "Ubah", download: "Unduh", upload: "Unggah", copy: "Salin", rename: "Ganti nama", archive: "Arsip", extract: "Ekstrak",
+    console: "Konsol", files: "File", databases: "Database", backups: "Backup", schedules: "Jadwal",
     sites: "Situs", domain: "Domain", enabled: "Aktif", ssl: "TLS",
-    users: "Tim", blueprints: "Studio Blueprint", system: "Observatorium", create_server: "Workspace Baru", create_user: "Anggota Baru",
+    users: "Pengguna", blueprints: "Eggs", system: "Sistem", create_server: "Server Baru", create_user: "Pengguna Baru",
     suspend: "Nonaktifkan", unsuspend: "Aktifkan", reinstall: "Bangun Ulang",
-    metrics: "Metrik", allocations: "Endpoint",
-    login: "Masuk", username: "Nama pengguna", password: "Kata sandi", remember: "Ingat saya",
-    welcome: "Control plane workload Linux-native", no_servers: "Belum ada workspace",
-    all_servers: "Fleet Workspace", notifications: "Sinyal", api_keys: "Token Akses",
-    confirm_delete: "Hapus?", confirm_restore: "Pulihkan snapshot? Workspace akan dihentikan.",
+    metrics: "Metrik", allocations: "Jaringan",
+    notif_open: "Notifikasi", notif_empty: "Belum ada notifikasi", notif_all_read: "Semua sudah dibaca",
+    notif_clear_all: "Bersihkan semua", notif_cleared: "Notifikasi dibersihkan", notif_unread: "{n} belum dibaca",
+    welcome: "Control plane workload Linux-native", no_servers: "Belum ada server",
+    auth_tagline: "Workload Linux ter-sandbox, satu control plane, tanpa runtime kontainer.",
+    auth_feat_1: "Isolasi bare-process — tanpa daemon Docker",
+    auth_feat_2: "Batas CPU, RAM & bandwidth per workload",
+    auth_feat_3: "Login argon2id, TOTP + kode pemulihan",
+    auth_signin: "Masuk", auth_signin_sub: "Masukkan kredensial operator Anda.",
+    auth_foot: "VoltPanel · sesi terenkripsi, tanpa auth pihak ketiga",
+    all_servers: "Server", notifications: "Notifikasi", api_keys: "Kunci API",
+    confirm_delete: "Hapus?", confirm_restore: "Pulihkan snapshot? Server akan dihentikan.",
     saved: "Tersimpan", created: "Dibuat", deleted: "Dihapus", uploaded: "Terunggah",
     twofa: "Autentikasi Dua Faktor", enable_2fa: "Aktifkan 2FA", verify: "Verifikasi",
     retry: "Muat ulang",
@@ -136,15 +278,22 @@ const I18N = {
     err_observatory: "Observatorium tidak tersedia",
     err_write_blocked: "Penulisan diblokir", err_query_failed: "Kueri gagal",
     runway_title: "Landasan peluncuran", runway_sub: "Tiga langkah menuju workload live pertama Anda",
-    runway_workspace: "Luncurkan workspace", runway_workspace_desc: "Pilih blueprint VoltSpec dan susun",
+    runway_workspace: "Luncurkan server", runway_workspace_desc: "Pilih blueprint dan susun",
     runway_node: "Pasang agen eksekusi", runway_node_desc: "Perluas fabric eksekusi melampaui mesin ini",
-    runway_backup: "Ambil snapshot pertama", runway_backup_desc: "Kunci backup Vault terverifikasi",
+    runway_backup: "Ambil snapshot pertama", runway_backup_desc: "Kunci backup terverifikasi",
     runway_compose: "Susun", runway_attach: "Pasang agen", runway_ask_admin: "Minta administrator",
-    runway_waiting: "Menunggu workspace", runway_progress: "Progres peluncuran", runway_dismiss: "Tutup",
+    runway_waiting: "Menunggu server", runway_progress: "Progres peluncuran", runway_dismiss: "Tutup",
     runway_port_hint: "dipesan di agen", runway_start_on_create: "Luncurkan segera setelah dibuat",
     runway_no_vars: "Blueprint ini tidak mendeklarasikan input peluncuran.", runway_no_launch: "Blueprint ini tidak memiliki perintah peluncuran.",
-    runway_need_blueprint: "Belum ada blueprint — buat dulu di Studio Blueprint.", runway_preview: "Pratinjau peluncuran langsung",
+    runway_need_blueprint: "Belum ada blueprint — buat dulu di Eggs.", runway_preview: "Pratinjau peluncuran langsung",
     runway_launch_cmd: "Perintah peluncuran", runway_resources: "Sumber daya", runway_endpoint: "Endpoint", runway_blueprint: "Blueprint", close: "Tutup",
+    place_label: "Penempatan", place_auto: "Otomatis — agen paling pas",
+    place_hint_auto: "VoltPanel menilai tiap agen yang memenuhi syarat berdasarkan sisa kapasitas lalu mengunci pemenangnya.",
+    place_node_online: "online", place_node_offline: "offline", place_need_node: "Pasang agen eksekusi terlebih dahulu",
+    place_free: "{mem} bebas · {disk} disk", place_tags: "Tag wajib", place_tags_ph: "gpu, eu-west (pisahkan koma)",
+    place_location: "Lokasi", place_location_ph: "bebas", place_target: "Agen tujuan",
+    place_no_room: "{node} kekurangan kapasitas untuk ukuran ini — peluncuran bisa ditolak.",
+    place_auto_pool: "Otomatis memilih dari {n} agen yang memenuhi syarat.", place_auto_none: "Belum ada agen yang cocok dengan tag/lokasi itu.",
     registry: "Registri", reg_library: "Pustaka", reg_search_ph: "Cari paket…",
     reg_install: "Pasang", reg_publish: "Terbitkan", reg_published: "Terbit", reg_installed: "Terpasang",
     reg_signed: "Ditandatangani", reg_unsigned: "Tanpa tanda tangan", reg_bad_sig: "Tanda tangan tidak valid",
@@ -167,7 +316,8 @@ const I18N = {
     member_remove_confirm: "Hapus {name} dari squad ini?", member_role_updated: "Peran diperbarui",
     squad_memberships: "Keanggotaan squad", squad_no_memberships: "Bukan anggota squad mana pun",
     squad_my_role: "Anda adalah {role}",
-    user_detail: "Detail pengguna", back: "Kembali",
+    user_detail: "Detail pengguna", back: "Kembali", control_center: "Admin", control_center_only: "Admin hanya untuk administrator",
+    obs_endpoints: "Endpoint", obs_host_resources: "Sumber daya host",
     role_viewer: "Penonton", role_operator: "Operator", role_developer: "Pengembang", role_manager: "Manajer",
     err_load_squads: "Tidak dapat memuat squad", err_load_squad: "Tidak dapat memuat squad", err_load_user_detail: "Tidak dapat memuat detail pengguna",
     mirror_status_ok: "mirror ok", mirror_status_ok_title: "Mirror jarak jauh sehat",
@@ -175,9 +325,133 @@ const I18N = {
     mirror_status_disabled: "mirror nonaktif", mirror_status_disabled_title: "Mirror jarak jauh nonaktif",
     mirror_sync: "Sinkronkan mirror", mirror_sync_confirm: "Sinkronkan ulang mirror jarak jauh sekarang? Arsip yang hilang disalin dari penyimpanan utama dan retensi mirror diberlakukan.",
     mirror_sync_running: "Menyinkronkan…", mirror_sync_done: "Mirror disinkronkan — {copied} disalin, {removed} dihapus · {status}",
+    gate: "Gerbang", gate_none: "tanpa", gate_exit: "exit", gate_signal: "sinyal",
+    gate_after_task: "setelah tugas {n} keluar {code}", gate_wait_signal: "tunggu {event} ≤{s}dtk",
+    gate_unknown: "gerbang tak dikenal: {raw}", gate_task_opt: "tugas {n}", gate_no_earlier: "tidak ada tugas sebelumnya",
+    gate_previous_task: "Tugas sebelumnya", gate_expected_code: "Kode keluar yang diharapkan",
+    gate_event: "Peristiwa", gate_timeout: "Batas waktu (dtk)", gate_custom: "kustom…",
+    gate_custom_ph: "nama peristiwa, mis. deploy.done", gate_lock: "server dikunci",
+    gate_lock_title: "Gerbang sinyal menunggu peristiwa webhook server ini",
+    gate_err_index: "gerbang exit harus merujuk tugas sebelumnya",
+    gate_err_code: "kode keluar harus bilangan bulat",
+    gate_err_event: "peristiwa sinyal wajib diisi",
+    gate_err_timeout: "batas waktu harus bilangan bulat 1–3600",
+    gate_warn_unknown: "Mempertahankan gerbang tak dikenal — {raw}",
+    login: "Masuk", signing_in: "Sedang masuk…", verifying: "Memverifikasi…", username: "Nama pengguna", password: "Kata sandi", remember: "Ingat saya",
+    palette_search: "Cari perintah dan halaman…", palette_scoped_hint: "Tips: s: server · u: pengguna · bp: blueprint · ev: peristiwa",
+    palette_servers: "Server", palette_users: "Pengguna", palette_blueprints: "Eggs", palette_events: "Peristiwa",
+    palette_commands: "Perintah", palette_create: "Buat", palette_theme: "Ganti tema",
+    palette_no_results: "Tidak ada hasil", palette_loading: "Memuat…",
+    palette_new_workspace: "Server baru", palette_new_user: "Pengguna baru", palette_new_squad: "Squad baru",
+    palette_new_blueprint: "Blueprint baru", palette_attach_node: "Lampirkan agen",
+    sel_all: "Pilih semua", sel_n: "{n} dipilih", sel_clear: "Bersihkan pilihan",
+    bulk_start: "Mulai", bulk_stop: "Hentikan", bulk_restart: "Ulang", bulk_suspend: "Nonaktifkan", bulk_unsuspend: "Aktifkan",
+    bulk_confirm_stop: "Hentikan {n} server terpilih? Proses yang berjalan akan diakhiri.",
+    bulk_done: "Aksi massal selesai — {ok} berhasil, {fail} gagal",
+    node_detail: "Detail agen", node_identity: "Identitas", node_heartbeat: "Detak jantung", node_never_hb: "tidak pernah",
+    node_agent_version: "Versi agen", node_host: "Nama host", node_os_arch: "OS / arsitektur",
+    node_last_error: "Kesalahan terakhir", node_tls_fp: "Sidik jari TLS",
+    node_edit: "Ubah agen", node_edit_hint: "Pembaruan diterapkan secara atomik oleh panel.",
+    node_new_title: "Pasang agen eksekusi", node_new_sub: "Daftarkan sebuah mesin, lalu jalankan satu perintah di mesin itu untuk mendaftar.",
+    node_name_ph: "agent-eu-1", node_url_hint: "Alamat panel menjangkau agen (host:port).",
+    node_location_ph: "id-jakarta", node_location_hint: "Label wilayah bebas untuk penempatan otomatis.",
+    node_fp: "Sidik jari TLS terpinned", node_fp_create_ph: "64-hex SHA-256 (opsional)",
+    node_fp_hint: "Jika diisi, pendaftaran ditolak kecuali agen menunjukkan sertifikat persis ini.",
+    node_enroll_title: "Satu perintah untuk menyelesaikan", node_enroll_sub: "Jalankan ini di mesin agen — token sekali pakai dan akan kedaluwarsa.",
+    node_copy_cmd: "Salin perintah", node_name_req: "Nama minimal 2 karakter.", node_url_req: "Masukkan URL endpoint agen.",
+    node_fp_bad: "Sidik jari harus 64 karakter heksadesimal.",
+    node_url: "Endpoint", node_location: "Lokasi", node_tags: "Tag", node_tags_ph: "dipisah, koma, tag",
+    node_limits: "Batas", node_mem_limit: "Batas memori (MB)", node_disk_limit: "Batas disk (MB)",
+    node_mem_over: "Overalokasi memori (%)", node_disk_over: "Overalokasi disk (%)",
+    node_sched: "Penjadwalan", node_enabled: "Terima pendaftaran", node_schedulable: "Dapat dijadwalkan", node_maintenance: "Mode perawatan",
+    node_expected_fp: "Sidik jari yang diharapkan", node_fp_ph: "SHA-256 64-heksadesimal (kosong untuk menghapus)", node_saved: "Agen diperbarui",
+    node_drain: "Kuras", node_drain_active: "menguras ({mode})", node_drain_hold: "Tahan", node_drain_stop: "Tahan + hentikan",
+    node_drain_hold_hint: "Kordon: tanpa penempatan baru, workload berjalan tetap aktif.",
+    node_drain_stop_hint: "Kordon dan hentikan workload yang berjalan.",
+    node_drain_reason: "Alasan", node_drain_reason_ph: "mis. perawatan rak",
+    node_drain_deadline: "Batas waktu (jam)", node_drain_deadline_ph: "kosong = tanpa angkat-otomatis",
+    node_drain_started: "Kuras ditetapkan", node_drain_cleared: "Kuras diangkat", node_drain_clear: "Angkat kuras",
+    node_drain_failed: "Gagal menghentikan", node_drain_clear_confirm: "Angkat kuras dan pulihkan penjadwalan?",
+    node_events: "Peristiwa", node_no_events: "Belum ada peristiwa agen", node_updated: "diperbarui",
+    skip_link: "Lewati ke konten", sort_asc: "Diurutkan menaik", sort_desc: "Diurutkan menurun", sort_none: "Klik untuk mengurutkan",
+    es_db_t: "Belum ada database", es_db_h: "Buat database SQLite yang bisa dibaca dan ditulis server ini lewat Database.",
+    es_bk_t: "Belum ada snapshot", es_bk_h: "Ambil arsip terverifikasi dari server ini untuk dipulihkan atau diunduh nanti.",
+    es_sch_t: "Belum ada jadwal", es_sch_h: "Otomatiskan daya, perintah, backup, atau peringatan dengan irama cron.",
+    es_site_t: "Belum ada situs", es_site_h: "Arahkan domain ke server ini sebagai host statis atau reverse proxy.",
+    es_alloc_t: "Belum ada endpoint", es_alloc_h: "Pesan sebuah port; yang pertama menjadi endpoint utama server ini.",
+    es_key_t: "Belum ada token akses", es_key_h: "Buat token ber-scope untuk mengakses API tanpa cookie sesi Anda.",
+    es_wh_t: "Belum ada webhook", es_wh_h: "Terima callback HTTP bertanda tangan saat peristiwa server dan fleet terjadi.",
+    es_notif_t: "Belum ada notifikasi", es_notif_h: "Peringatan fleet dan peristiwa penting audit akan muncul di sini.",
+    es_runs_t: "Belum ada eksekusi", es_runs_h: "Jadwal ini belum berjalan — picu sekarang atau tunggu jendela berikutnya.",
+    es_deliv_t: "Belum ada pengiriman", es_deliv_h: "Upaya pengiriman muncul setelah ada peristiwa yang cocok.",
+    es_files_none_t: "Folder ini kosong", es_search_none_t: "Tidak ada hasil",
+    cut: "Potong", clear: "Bersihkan", paste_here: "Tempel di sini", add_task: "Tambah tugas", save_changes: "Simpan perubahan",
+    new_webhook: "Webhook baru", webhooks: "Webhook", new_blueprint: "Blueprint baru",
+    flows_eyebrow: "KONTROL BERBASIS PERISTIWA", flows_title: "Landasan Jadwal", flows_sub: "Koordinasikan perintah lifecycle, snapshot, dan tugas di seluruh server.",
+    bp_eyebrow: "SPESIFIKASI VOLT", bp_title: "Eggs", bp_sub: "Susun rencana peluncuran portabel, lalu terbitkan dan pasang lewat registri.",
+    fabric_eyebrow: "FABRIC EKSEKUSI", fabric_title: "Node", fabric_sub: "Kapasitas, isolasi, penempatan, dan kesehatan di setiap host eksekusi.",
+    es_nodes_t: "Belum ada agen terpasang", es_nodes_h: "Eksekusi lokal ter-isolasi tetap berjalan. Pasang agen untuk menyebar workload ke banyak mesin.",
+    a_start: "Mulai server", a_restart: "Ulang server", a_stop: "Hentikan server", a_kill: "Paksa matikan server",
+    a_refresh: "Segarkan", a_new_file: "File baru", a_new_folder: "Folder baru", a_pull_url: "Tarik dari URL",
+    a_rename: "Ganti nama", a_more: "Aksi lain", a_run_now: "Jalankan sekarang", a_run_history: "Riwayat eksekusi",
+    a_test_node: "Uji agen", a_reenroll: "Daftar ulang", a_delete_node: "Hapus agen",
+    a_toggle_wh: "Alihkan webhook", a_test_ping: "Kirim ping uji", a_deliveries: "Pengiriman",
+    a_open_palette: "Buka palet perintah", a_open_nav: "Buka navigasi", a_make_primary: "Jadikan utama",
+    a_copy_endpoint: "Salin endpoint", a_edit_notes: "Ubah catatan", a_detach: "Lepas", a_verify: "Verifikasi checksum",
+    edit_schedule: "Ubah jadwal", new_schedule: "Jadwal baru", pulling_file: "Menarik file",
+    bp_new_sub: "Tentukan cara server ini dijalankan.", search: "Cari",
+    protected: "Terlindungi", isolation_on: "Isolasi server aktif", filter_files: "Saring file", filter_ph: "Saring…", isolation_ns: "Isolasi namespace + cgroup",
+    bp_category: "Kategori", bp_category_hint: "Untuk pengelompokan di katalog.", bp_runtime: "Runtime",
+    bp_launch: "Perintah peluncuran", bp_launch_hint: "Perintah yang dijalankan di dalam direktori server ter-isolasi.",
+    bp_name_hint: "Ditampilkan saat membuat server.", bp_create: "Buat blueprint", bp_copied: "VoltSpec disalin ke papan klip",
+    sch_name_ph: "restart harian", sch_cron_label: "Cron", sch_tasks: "Tugas", sch_backoff: "backoff dtk", retries: "coba ulang",
+    sch_cmd_ph: "perintah untuk dikirim", sch_backup_ph: "nama backup (opsional)", sch_payload_ph: "payload (opsional)", sch_payload_label: "Payload tugas",
+    bk_name_opt: "Nama", bk_optional: "opsional", bk_ignore: "Pola abaikan", bk_ignore_hint: "glob gaya .gitignore, satu per baris",
+    bk_ignore_note: "Dikecualikan dari arsip. Hanya server lokal — agen remote menolak pola abaikan.", bk_create_title: "Snapshot baru",
+    copied: "Tersalin", moved: "Dipindahkan", extracted: "Diekstrak", downloaded: "Terunduh",
+    t_perms_updated: "Izin diperbarui", t_crash_saved: "Kebijakan crash disimpan", t_crash_reset: "Burst crash disetel ulang",
+    t_upload_failed: "Unggah gagal", t_install_queued: "Instalasi diantrekan", t_restored: "Dipulihkan — server disegarkan",
+    t_transfer_cancelled: "Transfer dibatalkan", t_cancelling: "Membatalkan…", t_triggered: "Dipicu",
+    t_primary_updated: "Endpoint utama diperbarui", t_detached: "Dilepas", t_pass_changed: "Kata sandi diubah",
+    t_key_revoked: "Token dicabut", t_wh_updated: "Webhook diperbarui", t_bp_created: "Blueprint dibuat",
+    e_sch_not_found: "Jadwal tidak ditemukan", e_name_cron: "Nama dan cron wajib diisi", e_one_task: "Tambah minimal satu tugas",
+    e_domain_req: "Domain wajib diisi", e_valid_port: "Masukkan port yang valid (1–65535)", e_pick_cap: "Pilih minimal satu kapabilitas (atau Akses penuh)", e_required_name: "Nama wajib diisi", e_required_url: "URL wajib diisi", e_pick_user: "Pilih pengguna terlebih dahulu",
+    e_node_short: "Nama agen terlalu pendek", confirm_revoke_key: "Cabut token ini? Langsung berhenti bekerja tetapi tetap terdaftar untuk audit.",
+    recovery_codes: "Kode pemulihan", recovery_codes_hint: "Simpan kode sekali pakai ini di tempat aman. Setiap kode hanya berlaku satu kali — jika aplikasi autentikator hilang, kode pemulihan adalah satu-satunya jalan kembali.",
+    recovery_saved: "Kode disimpan", recovery_confirm: "Saya sudah menyimpan kode",
+    regenerate: "Buat ulang", disable_2fa: "Nonaktifkan 2FA", reset_2fa: "Setel ulang 2FA",
+    reset_2fa_confirm: "Setel ulang 2FA untuk {name}? Kunci rahasia dan kode pemulihan akan dihapus dan pengguna harus mendaftar ulang.",
+    rec_reauth: "Autentikasi ulang", rec_reauth_sub: "Masukkan kata sandi saat ini dan kode dari aplikasi autentikator untuk membuat ulang kode pemulihan.",
+    recovery_use: "Gunakan kode pemulihan", recovery_ph: "XXXXX-XXXXX",
+    totp_code: "Kode 6 digit", disable_2fa_body: "Masukkan kode dari aplikasi autentikator untuk mematikan autentikasi dua faktor. Kode pemulihan Anda ikut dihapus.",
+    twofa_sub: "Masukkan kode dari aplikasi autentikator Anda.", use_authenticator: "Gunakan aplikasi autentikator",
+    twofa_scan: "Pindai dengan aplikasi autentikator apa pun (Google Authenticator, Authy, 1Password).", twofa_secret: "Rahasia",
+    token_created: "Token akses dibuat", token_once: "Ditampilkan sekali — salin sekarang, tidak bisa diambil lagi nanti.", copy_token: "Salin token", done: "Selesai",
+    wh_secret_title: "Rahasia penanda tangan webhook", wh_secret_once: "Ditampilkan sekali — salin sekarang, tidak bisa diambil lagi nanti.", copy_secret: "Salin rahasia",
+    qa_compose: "Buat server", qa_compose_sub: "Luncurkan dari blueprint", qa_attach: "Pasang agen", qa_attach_sub: "Perluas fabric eksekusi",
+    qa_api: "Akses API", qa_api_sub: "Kelola kredensial ber-scope", qa_security: "Keamanan akun", qa_security_sub: "Kata sandi dan autentikasi dua faktor", recent_activity: "Aktivitas terbaru",
+    quick_actions: "Aksi cepat", webhook_created: "Webhook dibuat",
+    watchers: "Pemantau", pause: "Jeda", enable: "Aktifkan",
+    watchers_badge: "reaktif", watchers_hint: "aturan pola log yang memicu aksi saat cocok",
+    watchers_empty: "Belum ada pemantau — tambahkan aturan untuk merespons keluaran konsol",
+    watcher_fired: "terpicu {n}× · {ago}", watcher_never: "belum pernah terpicu",
+    watcher_new: "Pemantau baru", watcher_edit: "Ubah pemantau",
+    watcher_name_ph: "mis. Penjaga crash", watcher_pattern: "Pola pencocokan",
+    watcher_pattern_ph: "mis. Out of memory", watcher_regex: "Perlakukan pola sebagai ekspresi reguler",
+    watcher_action: "Saat cocok", watcher_cooldown: "Jeda ulang", watcher_cooldown_hint: "detik tunggu sebelum terpicu lagi",
+    watcher_level: "Tingkat notifikasi", watcher_command: "Perintah yang dikirim", watcher_command_ph: "mis. say Server akan dimulai ulang",
+    watcher_no_payload: "Tanpa masukan tambahan — aksi ini berjalan apa adanya.",
+    watcher_confirm_del: "Hapus pemantau \"{name}\"?",
+    wt_notify: "Notifikasi", wt_command: "Jalankan perintah", wt_restart: "Mulai ulang", wt_stop: "Hentikan",
+    lvl_info: "Info", lvl_warn: "Peringatan", lvl_error: "Kesalahan",
+    e_watcher_fields: "Nama dan pola wajib diisi", e_watcher_command: "Aksi perintah butuh perintah untuk dikirim",
   },
 };
-const t = (k) => (I18N[state.lang] || I18N.en)[k] || I18N.en[k] || k;
+const t = (k, params) => {
+  let s = (I18N[state.lang] || I18N.en)[k] || I18N.en[k] || k;
+  if (params) for (const p in params) s = s.replace(new RegExp("\\{" + p + "\\}", "g"), params[p]);
+  return s;
+};
 
 /* ---------- helpers ---------- */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -186,6 +460,16 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const fmtBytes = (b) => { b = +b || 0; if (b >= 1073741824) return (b / 1073741824).toFixed(2) + " GB"; if (b >= 1048576) return (b / 1048576).toFixed(2) + " MB"; if (b >= 1024) return (b / 1024).toFixed(2) + " KB"; return b + " B"; };
 const fmtTime = (s) => { s = +s || 0; const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60); if (d) return `${d}d ${h}h`; if (h) return `${h}h ${m}m`; return `${m}m`; };
 const fmtDate = (iso) => iso ? new Date(iso).toLocaleString() : "—";
+/* Terminal empty-state: icon + title + hint, and an optional create action.
+   Loading placeholders keep the plain `.empty` spinner-word form; this is for
+   "nothing here yet — here's what it is and how to start" states. `opts.act`
+   wires a data-act button; `opts.actLabel`/`opts.icon` customize it. */
+const emptyState = (icon, title, hint, opts = {}) => {
+  const btn = opts.act
+    ? `<button class="btn primary sm" data-act="${opts.act}"${opts.data || ""}>${ic(opts.actIcon || "plus", 14)}<span>${esc(opts.actLabel || t("create"))}</span></button>`
+    : "";
+  return `<div class="empty">${ic(icon, 40)}<b>${esc(title)}</b>${hint ? `<p class="empty-hint">${esc(hint)}</p>` : ""}${btn}</div>`;
+};
 /* FileEntry.modified arrives as UNIX seconds (not ISO) — convert explicitly. */
 const fmtFileDate = (secs) => { const n = +secs; return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toLocaleString() : "—"; };
 /* Status → pill class whitelist: a hostile agent status string must never
@@ -212,24 +496,116 @@ function toggleTheme() {
   if (b) b.innerHTML = themeIcon();
 }
 
+/* ---------- global activity indicator + button busy ---------- */
+let apiActive = 0; // in-flight api() requests
+const apiIdleCallbacks = new Set();
+
+function activityBar() {
+  let bar = document.getElementById("activity-bar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "activity-bar";
+    bar.className = "activity-bar";
+    bar.setAttribute("aria-hidden", "true");
+    document.body.appendChild(bar);
+  }
+  return bar;
+}
+
+function apiTick(delta) {
+  apiActive = Math.max(0, apiActive + delta);
+  activityBar().classList.toggle("on", apiActive > 0);
+  if (apiActive === 0 && apiIdleCallbacks.size) {
+    const cbs = [...apiIdleCallbacks]; apiIdleCallbacks.clear();
+    cbs.forEach((cb) => cb());
+  }
+}
+
+function apiWhenIdle(cb) { apiIdleCallbacks.add(cb); }
+
+/* Show a spinner + disable a button while an action is in flight. The original
+   innerHTML is stashed once and restored verbatim, so icon/chevron buttons come
+   back exactly as they were. */
+function busyButton(btn, busy) {
+  if (!btn || !(btn instanceof HTMLButtonElement)) return;
+  if (busy) {
+    if (btn.dataset.busy === "1") return;
+    btn.dataset.busy = "1";
+    btn.dataset.busyHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    const label = (btn.textContent || "").trim();
+    btn.innerHTML = `<span class="btn-spinner" aria-hidden="true"></span>` + (label ? `<span>${esc(label)}</span>` : "");
+  } else {
+    if (btn.dataset.busy !== "1") return;
+    delete btn.dataset.busy;
+    if (btn.dataset.busyHtml !== undefined) btn.innerHTML = btn.dataset.busyHtml;
+    delete btn.dataset.busyHtml;
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+  }
+}
+
+/* Dispatch a delegated action with busy feedback on the triggering button.
+   Actions that return a promise (or that start a request synchronously) keep
+   the button busy until they settle; instant actions clear immediately. */
+function runAction(el, e, fn) {
+  const btn = el && el.closest ? el.closest("button") : null;
+  if (!btn) { fn(el, e); return; }
+  busyButton(btn, true);
+  const before = apiActive;
+  let settled = false;
+  const finish = () => { if (!settled) { settled = true; busyButton(btn, false); } };
+  try {
+    const r = fn(el, e);
+    if (r && typeof r.then === "function") r.then(finish, finish);
+    else if (apiActive > before) apiWhenIdle(finish);
+    else finish();
+  } catch (err) { finish(); throw err; }
+}
+
 async function api(path, opts = {}) {
   opts.headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  apiTick(1);
   // Hard timeout (default 30s, overridable per call) so a wedged request can
   // never leave a spinner or a stuck "loading" list forever.
   const ctrl = new AbortController();
+  // An external signal (command-palette scoped search) cancels the request
+  // early; the hard timeout still covers the no-signal path.
+  const ext = opts.signal || null;
   const timer = setTimeout(() => ctrl.abort(), opts.timeout ?? 30000);
   try {
-    const res = await fetch(API + path, { ...opts, signal: ctrl.signal });
+    const res = await fetch(API + path, { ...opts, signal: ext || ctrl.signal });
     const ct = res.headers.get("content-type") || "";
     if (res.status === 401 && !path.includes("login")) { renderLogin(); throw new Error("unauthorized"); }
     const body = ct.includes("application/json") ? await res.json() : await res.text();
-    if (!res.ok) throw new Error(body.error || body || res.statusText);
+    if (!res.ok) throw new Error(apiErrorMessage(body, res.statusText));
     return body;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); apiTick(-1); }
+}
+
+/* Normalize an API error body (JSON object, JSON scalar, or plain text) into a
+   single human-readable message. Backend errors use `{error, status}`; other
+   shapes (axum text rejections, `message`/`detail`) degrade gracefully instead
+   of rendering "[object Object]" or nothing. */
+function apiErrorMessage(body, statusText) {
+  if (typeof body === "string" && body.trim()) return body.trim();
+  if (body && typeof body === "object") {
+    const msg = body.error ?? body.message ?? body.detail ?? body.msg;
+    if (typeof msg === "string" && msg.trim()) return msg.trim();
+  }
+  return statusText || "request failed";
 }
 
 function toast(msg, kind = "info") {
-  const wrap = $("#toast-wrap") || document.body;
+  let wrap = $("#toast-wrap");
+  if (!wrap) {
+    wrap = document.createElement("div");
+    wrap.id = "toast-wrap";
+    wrap.setAttribute("role", "status");
+    wrap.setAttribute("aria-live", "polite");
+    document.body.appendChild(wrap);
+  }
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
   el.innerHTML = `${ic(kind === "success" ? "check" : kind === "error" ? "xcircle" : kind === "warn" ? "alert" : "info", 16)}<span>${esc(msg)}</span>`;
@@ -243,7 +619,7 @@ function vpDialog({ title, message = "", input = null, confirmText = "Confirm", 
     modal.innerHTML = `<div class="modal-card dialog-card"><div class="modal-head"><b>${ic(danger ? "alert" : "info",16)}${esc(title)}</b><button class="icon-btn dialog-cancel">${ic("x",16)}</button></div><div class="dialog-body">${message ? `<p>${esc(message)}</p>` : ""}${input !== null ? `<div class="field"><label>Value</label><input class="dialog-input" value="${esc(input)}"></div>` : ""}${copyValue !== null ? `<div class="code-block">${esc(copyValue)}</div>` : ""}</div><div class="modal-foot"><button class="btn ghost dialog-cancel">Cancel</button>${copyValue !== null ? `<button class="btn dialog-copy">${ic("copy",14)}<span>Copy</span></button>` : ""}<button class="btn ${danger ? "danger" : "primary"} dialog-ok">${ic(danger ? "trash" : "check",14)}<span>${esc(confirmText)}</span></button></div></div>`;
     const close = value => { modal.remove(); resolve(value); };
     modal.querySelectorAll(".dialog-cancel").forEach(el => el.addEventListener("click", () => close(false)));
-    modal.querySelector(".dialog-copy")?.addEventListener("click", async () => { await navigator.clipboard?.writeText(copyValue); toast("Copied", "success"); });
+    modal.querySelector(".dialog-copy")?.addEventListener("click", () => { const p = navigator.clipboard?.writeText(copyValue); if (p) p.catch(() => {}); toast(t("copied"), "success"); });
     modal.querySelector(".dialog-ok").addEventListener("click", () => close(input !== null ? modal.querySelector(".dialog-input").value : true));
     modal.addEventListener("click", e => { if (e.target === modal) close(false); }); document.body.appendChild(modal); modal.querySelector(".dialog-input")?.focus();
   });
@@ -283,43 +659,158 @@ function vpDestroy({ kind, target, phrase = target, consequences = [], confirmTe
 /* ---------- router + command palette ---------- */
 window.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openCommandPalette(); } });
 
-function openCommandPalette(){
-  const nav=[{name:"Pulse",href:"#/",icon:"activity"},{name:"Workspaces",href:"#/admin/servers",icon:"server"},{name:"Flows",href:"#/automations",icon:"clock"},{name:"Fabric",href:"#/admin/nodes",icon:"globe"},{name:"Blueprint Studio",href:"#/admin/blueprints",icon:"box"},{name:"Observatory",href:"#/admin/system",icon:"gauge"},{name:"Settings",href:"#/settings",icon:"settings"},{name:"Profile",href:"#/profile",icon:"profile"}].filter(a=>state.user?.root_admin||!["Workspaces","Fabric","Blueprint Studio","Observatory"].includes(a.name));
-  /* Server-scoped verbs, one row per (server, verb). The match key carries the
-     verb AND the server name (twice), so "restart web", "web", or "vault" all
-     fuzzy-match; rows reuse the existing power()/bkCreate() handlers. */
-  const VERBS=[{verb:"restart",icon:"refresh",label:"Restart"},{verb:"stop",icon:"stop",label:"Stop"},{verb:"backup",icon:"archive",label:"Vault backup"}];
-  const items=[
-    ...nav.map(a=>({name:a.name,icon:a.icon,key:a.name,href:a.href})),
-    ...(state.servers||[]).flatMap(s=>VERBS.map(v=>({name:`${v.label} ${s.name}`,icon:v.icon,key:`${v.verb==="backup"?"vault backup":v.verb} ${s.name} ${s.name}`,sid:s.id,verb:v.verb}))),
+function openCommandPalette() {
+  const isRoot = !!state.user?.root_admin;
+  /* Static command set: navigation, root-only create actions, account
+     actions. Every row carries a `run` thunk or an `href`; keys drive the
+     fuzzy match. Nothing here requires a fetch — the heavy lists below are
+     loaded lazily through the scoped prefixes. */
+  const cmds = [
+    { sec: "nav", name: "Dashboard", icon: "activity", href: "#/", key: "pulse" },
+    { sec: "nav", name: "Servers", icon: "server", href: isRoot ? "#/admin/servers" : "#/workspaces", key: "workspaces" },
+    { sec: "nav", name: "Schedules", icon: "clock", href: "#/automations", key: "flows" },
+    { sec: "nav", name: "Nodes", icon: "globe", href: "#/admin/nodes", key: "fabric" },
+    { sec: "nav", name: "Eggs", icon: "box", href: "#/admin/blueprints", key: "blueprint studio" },
+    { sec: "nav", name: "System", icon: "gauge", href: "#/admin/system", key: "observatory" },
+    { sec: "nav", name: t("settings"), icon: "settings", href: "#/settings", key: "settings" },
+    { sec: "nav", name: t("profile"), icon: "profile", href: "#/profile", key: "profile" },
+    ...(isRoot ? [
+      { sec: "nav", name: t("users"), icon: "users", href: "#/admin/users", key: "users team" },
+      { sec: "nav", name: t("squads"), icon: "users", href: "#/admin/squads", key: "squads" },
+      { sec: "nav", name: t("registry"), icon: "box", href: "#/admin/blueprints/registry", key: "registry packages" },
+    ] : []),
+    ...(isRoot ? [
+      { sec: "create", name: t("palette_new_workspace"), icon: "server", run: () => adminNewServer(), key: "new workspace create server" },
+      { sec: "create", name: t("palette_new_user"), icon: "user", run: () => adminNewUser(), key: "new member create user" },
+      { sec: "create", name: t("palette_new_squad"), icon: "users", run: () => adminNewSquad(), key: "new squad create" },
+      { sec: "create", name: t("palette_new_blueprint"), icon: "box", run: () => adminNewBlueprint(), key: "new blueprint create" },
+      { sec: "create", name: t("palette_attach_node"), icon: "globe", run: () => adminNewNode(), key: "attach agent new node" },
+    ] : []),
+    { sec: "account", name: t("palette_theme"), icon: "sun", run: () => toggleTheme(), key: "theme dark light" },
+    { sec: "account", name: t("logout"), icon: "logout", run: () => logout(), key: "logout sign out" },
   ];
-  const modal=document.createElement("div");modal.className="modal palette-layer";
-  modal.innerHTML=`<div class="command-palette"><div class="palette-search">${ic("search",17)}<input placeholder="Search commands and pages..." autocomplete="off"><kbd>ESC</kbd></div><div class="palette-results">${items.map((a,i)=>`<a href="${a.href||"#"}" data-key="${a.key.toLowerCase()}" data-sid="${a.sid||""}" data-verb="${a.verb||""}">${ic(a.icon,16)}<span>${esc(a.name)}</span><kbd>${i+1}</kbd></a>`).join("")}</div></div>`;
-  const input=modal.querySelector("input"),results=[...modal.querySelectorAll(".palette-results a")];
-  const visible=()=>results.filter(a=>!a.hidden);
-  let active=0;
-  const highlight=()=>{const v=visible();v.forEach((a,i)=>a.classList.toggle("active",i===active));};
-  const filter=()=>{const q=input.value.toLowerCase().split(/\s+/).filter(Boolean);results.forEach(a=>a.hidden=!q.every(tok=>a.dataset.key.includes(tok)));active=0;highlight();};
-  const run=(a)=>{
-    const sid=a.dataset.sid;
-    if(!sid){location.hash=a.getAttribute("href");return;}
-    const verb=a.dataset.verb;
-    const server=(state.servers||[]).find(x=>String(x.id)===sid);
-    const name=server?server.name:`server-${sid}`;
-    if(verb==="backup"){bkCreate(+sid);return;}
-    vpConfirm(`Run "${verb}" on "${name}"?`).then(ok=>{if(ok)power(+sid,verb);});
+  /* Scoped lazy sections: typing `s:` / `u:` / `bp:` / `ev:` fetches the
+     matching existing endpoint (debounced 250ms) and renders the results
+     under its own section header. Fetches are cancelable via AbortController
+     and guarded by routeToken so a stale palette never writes. */
+  const scopes = {
+    s: { label: () => t("palette_servers"), icon: "server", href: (x) => `#/server/${x.id}`, name: (x) => x.name, sub: (x) => String(x.status || ""), fetch: () => api("/servers", { signal: activeSignal() }).then((r) => r.data || []).catch(() => []) },
+    u: { label: () => t("palette_users"), icon: "user", href: (x) => `#/admin/users/${x.id}`, name: (x) => x.username, sub: () => "", fetch: () => api("/admin/users", { signal: activeSignal() }).then((r) => r.data || r || []).catch(() => []) },
+    bp: { label: () => t("palette_blueprints"), icon: "blueprint", href: () => "#/admin/blueprints", name: (x) => x.name, sub: (x) => String(x.category || ""), fetch: () => api("/blueprints", { signal: activeSignal() }).then((r) => r.data || r || []).catch(() => []) },
+    ev: { label: () => t("palette_events"), icon: "activity", href: null, name: (x) => x.action, sub: (x) => [x.target, x.username].filter(Boolean).join(" · "), fetch: () => api("/audit", { signal: activeSignal() }).then((r) => r.data || r || []).catch(() => []) },
   };
-  input.addEventListener("input",filter);
-  input.addEventListener("keydown",e=>{
-    if(e.key==="Escape"){e.stopPropagation();modal.remove();return;}
-    const v=visible();if(!v.length)return;
-    if(e.key==="ArrowDown"){e.preventDefault();active=(active+1)%v.length;highlight();}
-    else if(e.key==="ArrowUp"){e.preventDefault();active=(active-1+v.length)%v.length;highlight();}
-    else if(e.key==="Enter"){e.preventDefault();e.stopPropagation();const el=v[active];if(el){run(el);modal.remove();}}
+  const modal = document.createElement("div"); modal.className = "modal palette-layer";
+  modal.innerHTML = `<div class="command-palette" role="dialog" aria-modal="true" aria-label="${esc(t("palette_search"))}">
+    <div class="palette-search">${ic("search", 17)}<input placeholder="${esc(t("palette_search"))}" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list" aria-activedescendant=""><kbd>ESC</kbd></div>
+    <div class="palette-results" id="palette-list" role="listbox" aria-label="${esc(t("palette_commands"))}"></div>
+    <div class="palette-hint">${esc(t("palette_scoped_hint"))}</div>
+  </div>`;
+  document.body.appendChild(modal);
+  const input = modal.querySelector("input");
+  const list = modal.querySelector("#palette-list");
+  const routeGuard = routeToken;
+  let active = 0;
+  let visible = [];
+  let timer = null;
+  let abort = null;
+  let scopedRows = {}; // scope -> rows fetched during this open (cache)
+  const activeSignal = () => abort?.signal;
+  const close = () => { clearTimeout(timer); if (abort) abort.abort(); modal.remove(); };
+
+  const highlight = () => {
+    const opt = visible[active];
+    $$(".palette-option", list).forEach((a) => a.classList.toggle("active", !!opt && a.dataset.oid === opt.oid));
+    input.setAttribute("aria-activedescendant", opt ? opt.oid : "");
+    if (opt) list.querySelector(`[data-oid="${opt.oid}"]`)?.scrollIntoView({ block: "nearest" });
+  };
+
+  const render = (q) => {
+    if (!modal.isConnected || routeToken !== routeGuard) return;
+    const toks = q.toLowerCase().split(/\s+/).filter(Boolean);
+    const m = /^(s|u|bp|ev):(.*)$/i.exec(q.trim());
+    const scope = m ? m[1].toLowerCase() : null;
+    const subToks = m ? m[2].toLowerCase().split(/\s+/).filter(Boolean) : [];
+    const hit = (text) => !toks.length || toks.every((tok) => text.includes(tok));
+    const hitSub = (text) => !subToks.length || subToks.every((tok) => text.includes(tok));
+    const sections = [];
+    const navHit = cmds.filter((c) => hit(c.key));
+    if (navHit.length) sections.push({ label: t("palette_commands"), items: navHit.map((c) => ({ icon: c.icon, name: c.name, sub: "", href: c.href, run: c.run })) });
+    if (scope) {
+      const sc = scopes[scope];
+      const loading = scopedRows[scope] === undefined;
+      const rows = loading ? [] : scopedRows[scope].filter((x) => hitSub(sc.name(x) + " " + sc.sub(x)));
+      sections.push({
+        label: sc.label(),
+        loading,
+        items: rows.map((x) => ({ icon: sc.icon, name: sc.name(x), sub: sc.sub(x), href: sc.href ? sc.href(x) : null, run: null })),
+      });
+    }
+    const flat = [];
+    let id = 0;
+    list.innerHTML = sections.length
+      ? sections.map((s) => `<div class="palette-section" role="presentation">${esc(s.label)}</div>` +
+          (s.loading
+            ? `<div class="palette-option loading" role="presentation">${ic("activity", 16)}<span>${esc(t("palette_loading"))}</span></div>`
+            : s.items.map((it) => {
+                const oid = `pal-opt-${id++}`;
+                flat.push({ oid, ...it });
+                return `<a id="${oid}" role="option" class="palette-option" data-oid="${oid}" href="${it.href ? esc(it.href) : "#"}">${ic(it.icon, 16)}<span class="palette-row-main"><b>${esc(it.name)}</b>${it.sub ? `<small>${esc(it.sub)}</small>` : ""}</span>${it.href ? "" : "<kbd>↵</kbd>"}</a>`;
+              }).join(""))).join("")
+      : `<div class="palette-empty" role="presentation">${ic("search", 18)}<span>${esc(t("palette_no_results"))}</span></div>`;
+    visible = flat;
+    active = Math.min(active, Math.max(0, visible.length - 1));
+    highlight();
+  };
+
+  const loadScope = (scope) => {
+    clearTimeout(timer);
+    if (abort) abort.abort();
+    abort = new AbortController();
+    const myAbort = abort;
+    timer = setTimeout(() => {
+      scopes[scope].fetch()
+        .then((rows) => { if (!myAbort.signal.aborted) { scopedRows[scope] = rows || []; render(input.value); } })
+        .catch(() => { if (!myAbort.signal.aborted) { scopedRows[scope] = []; render(input.value); } });
+    }, 250);
+  };
+
+  const runItem = (it) => {
+    if (it.href) location.hash = it.href;
+    else if (it.run) it.run();
+  };
+
+  const filter = () => {
+    clearTimeout(timer);
+    if (abort) abort.abort();
+    const q = input.value;
+    const m = /^(s|u|bp|ev):(.*)$/i.exec(q.trim());
+    render(q);
+    if (m) {
+      const scope = m[1].toLowerCase();
+      if (scopedRows[scope] === undefined) loadScope(scope);
+    }
+  };
+
+  input.addEventListener("input", filter);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); close(); return; }
+    if (!visible.length) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); active = (active + 1) % visible.length; highlight(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); active = (active - 1 + visible.length) % visible.length; highlight(); }
+    else if (e.key === "Home") { e.preventDefault(); active = 0; highlight(); }
+    else if (e.key === "End") { e.preventDefault(); active = visible.length - 1; highlight(); }
+    else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); const it = visible[active]; if (it) { close(); runItem(it); } }
   });
-  results.forEach(a=>a.addEventListener("click",()=>{run(a);modal.remove();}));
-  modal.addEventListener("click",e=>{if(e.target===modal)modal.remove();});
-  document.body.appendChild(modal);input.focus();
+  list.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-oid]");
+    if (!a) return;
+    e.preventDefault();
+    const it = visible.find((v) => v.oid === a.dataset.oid);
+    if (it) { close(); runItem(it); }
+  });
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+  render("");
+  input.focus();
 }
 
 let routeTransitionId = 0;
@@ -337,6 +828,7 @@ function route() {
     if (parts[0] === "profile") return renderProfile();
     if (parts[0] === "automations") return renderAutomations();
     if (parts[0] === "settings") return renderSettings();
+    if (parts[0] === "workspaces") return renderWorkspaces();
     return renderDashboard();
   };
   if (!app.querySelector(".layout") || matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -400,13 +892,13 @@ document.addEventListener("click", (e) => {
   const el = e.target.closest("[data-act]");
   if (!el || el.hasAttribute("data-act-submit") || el.hasAttribute("data-act-change")) return;
   const fn = ACTIONS[el.dataset.act];
-  if (fn) { e.preventDefault(); fn(el, e); }
+  if (fn) { e.preventDefault(); runAction(el, e, fn); }
 });
 document.addEventListener("change", (e) => {
   const el = e.target.closest("[data-act-change]");
   if (!el) return;
   const fn = ACTIONS[el.dataset.act];
-  if (fn) fn(el, e);
+  if (fn) runAction(el, e, fn);
 });
 document.addEventListener("submit", (e) => {
   const el = e.target.closest("[data-act-submit]");
@@ -415,14 +907,14 @@ document.addEventListener("submit", (e) => {
   if (fn) { e.preventDefault(); fn(el, e); }
 });
 const ACTIONS = {
-  doLogin() { doLogin(); },
-  do2fa() { do2fa(); },
+  doLogin(el) { doLogin(el); },
+  do2fa(el) { do2fa(el); },
   toggleSidebar() { toggleSidebar(); },
   logout() { logout(); },
   openPalette() { openCommandPalette(); },
   refreshServers() { refreshServers(); },
   closeModal(el) { el.closest(".modal")?.remove(); },
-  copyText(el) { navigator.clipboard?.writeText(el.dataset.text || ""); toast("Copied", "success"); },
+  copyText(el) { const p = navigator.clipboard?.writeText(el.dataset.text || ""); if (p) p.catch(() => {}); toast(t("copied"), "success"); },
   power(el) { power(el.dataset.sid, el.dataset.action); },
   confirmKill(el) { confirmKill(el.dataset.sid); },
   sendCmd(el) { sendCmd(el.dataset.sid); },
@@ -441,6 +933,8 @@ const ACTIONS = {
   fileMenu(el) { fileMenu(el.dataset.sid, el.dataset.path, el.dataset.dir === "1", el.dataset.ext, el); },
   fileCutSel(el) { fileCutSel(el.dataset.sid); },
   fileDelSel(el) { fileDelSel(el.dataset.sid); },
+  fileZipSel(el) { fileZipSel(el.dataset.sid); },
+  fileDlSel(el) { fileDlSel(el.dataset.sid); },
   fileSelNone() { fileSelNone(); },
   filePaste(el) { filePaste(el.dataset.sid); },
   fileMoveAsk(el) { fileMoveAsk(el.dataset.sid, el.dataset.path); },
@@ -474,9 +968,17 @@ const ACTIONS = {
   schRetry() { schLoad(state.server?.id || state.fileId); },
   schTaskDel(el) { schTaskDel(+el.dataset.idx); },
   schTaskAction(el) { schTaskAction(el); },
+  schTaskGate(el) { schTaskGate(el); },
+  schTaskGateField(el) { schTaskGateField(el); },
   schToggle(el) { schToggle(+el.dataset.sid, el.dataset.on === "1"); },
   schRun(el) { schRun(+el.dataset.sid); },
   schDel(el) { schDel(+el.dataset.sid); },
+  watcherCreate(el) { openWatcherModal(+el.dataset.sid, null); },
+  watcherEdit(el) { openWatcherModal(+el.dataset.sid, JSON.parse(decodeURIComponent(el.dataset.w))); },
+  watcherSave(el) { watcherSave(+el.dataset.sid, +el.dataset.wid, el); },
+  watcherToggle(el) { watcherToggle(+el.dataset.sid, JSON.parse(decodeURIComponent(el.dataset.w))); },
+  watcherDel(el) { watcherDel(+el.dataset.sid, +el.dataset.wid, el.dataset.name); },
+  watcherActionChange(el) { watcherActionChange(el); },
   siteOpen(el) { siteOpen(el.dataset.sid, el.dataset.hasOwnProperty('site') && el.dataset.site !== '' ? +el.dataset.site : null); },
   siteToggle(el) { siteToggle(el.dataset.sid, +el.dataset.site); },
   siteDel(el) { siteDel(el.dataset.sid, +el.dataset.site, el.dataset.domain); },
@@ -535,6 +1037,9 @@ const ACTIONS = {
   adminNewNode() { adminNewNode(); },
   nodeCreate(el) { nodeCreate(el); },
   notifRetry() { notifLoad(); },
+  notifToggle() { notifToggle(); },
+  notifItem(el) { notifItem(el); },
+  notifClear() { notifClear(); },
   adminServersRetry() { adminServers(); },
   adminUsersRetry() { adminUsers(); },
   adminBlueprintsRetry() { adminBlueprints(); },
@@ -565,6 +1070,22 @@ const ACTIONS = {
   sqMemberRole(el) { sqMemberRole(el); },
   sqMemberDel(el) { sqMemberDel(el); },
   sqServersSave(el) { sqServersSave(el); },
+  fleetToggleSel(el) { fleetToggleSel(el); },
+  fleetSelAll(el) { fleetSelAll(el); },
+  fleetSelClear() { fleetSelClear(); },
+  fleetSort(el) { fleetSortToggle(el.dataset.key); },
+  fleetBulk(el) { fleetBulk(el.dataset.key); },
+  adminNodeRetry() { adminNodeDetail(+((location.hash.slice(1).split("/").filter(Boolean))[2] || 0)); },
+  adminNodeSave(el) { adminNodeSave(+el.dataset.id, el); },
+  nodeDrain(el) { nodeDrain(+el.dataset.id, el.dataset.mode, el); },
+  nodeDrainClear(el) { nodeDrainClear(+el.dataset.id); },
+  regenerateRecovery() { regenerateRecovery(); },
+  regenerateRecoveryDo(el) { regenerateRecoveryDo(el); },
+  disable2faPrompt() { disable2faPrompt(); },
+  disable2faDo(el) { disable2faDo(el); },
+  recoveryCopy(el) { recoveryCopy(el); },
+  recoveryDownload(el) { recoveryDownload(el); },
+  adminReset2fa(el) { adminReset2fa(+el.dataset.id, el.dataset.name); },
 };
 async function init() {
   applyTheme();
@@ -575,6 +1096,7 @@ async function init() {
     state.lang = me.language || "en";
     document.documentElement.lang = state.lang;
     route();
+    notifInit();
   } catch (e) {
     renderLogin();
   }
@@ -595,11 +1117,11 @@ function shell(active, title, inner) {
       </div>
       <div class="nav-group-label">CONTROL</div>
       <nav>
-        <a href="#/" class="nav-item ${active === "pulse" ? "active" : ""}"><span class="nav-ico">${ic("activity")}</span><span>Pulse</span></a>
-        <a href="${u.root_admin?'#/admin/servers':'#/'}" class="nav-item ${active === "workspaces" ? "active" : ""}"><span class="nav-ico">${ic("server")}</span><span>Workspaces</span></a>
-        <a href="#/automations" class="nav-item ${active === "flows" ? "active" : ""}"><span class="nav-ico">${ic("clock")}</span><span>Flows</span></a>
+        <a href="#/" class="nav-item ${active === "pulse" ? "active" : ""}"><span class="nav-ico">${ic("activity")}</span><span>Dashboard</span></a>
+        <a href="${u.root_admin?'#/admin/servers':'#/workspaces'}" class="nav-item ${active === "workspaces" ? "active" : ""}"><span class="nav-ico">${ic("server")}</span><span>Servers</span></a>
+        <a href="#/automations" class="nav-item ${active === "flows" ? "active" : ""}"><span class="nav-ico">${ic("clock")}</span><span>Schedules</span></a>
       </nav>
-      ${u.root_admin ? `<div class="nav-group-label">PLATFORM</div><nav><a href="#/admin/nodes" class="nav-item ${active === "fabric" ? "active" : ""}"><span class="nav-ico">${ic("globe")}</span><span>Fabric</span></a><a href="#/admin/blueprints" class="nav-item ${active === "blueprints" ? "active" : ""}"><span class="nav-ico">${ic("box")}</span><span>Blueprint Studio</span></a><a href="#/admin/system" class="nav-item ${active === "observatory" ? "active" : ""}"><span class="nav-ico">${ic("gauge")}</span><span>Observatory</span></a></nav>` : ""}
+      ${u.root_admin ? `<div class="nav-group-label">PLATFORM</div><nav><a href="#/admin/nodes" class="nav-item ${active === "fabric" ? "active" : ""}"><span class="nav-ico">${ic("globe")}</span><span>Nodes</span></a><a href="#/admin/blueprints" class="nav-item ${active === "blueprints" ? "active" : ""}"><span class="nav-ico">${ic("box")}</span><span>Eggs</span></a><a href="#/admin/system" class="nav-item ${active === "observatory" ? "active" : ""}"><span class="nav-ico">${ic("gauge")}</span><span>System</span></a></nav>` : ""}
       <div class="nav-group-label">ACCOUNT</div><nav><a href="#/settings" class="nav-item ${active === "settings" ? "active" : ""}"><span class="nav-ico">${ic("settings")}</span><span>${t("settings")}</span></a><a href="#/profile" class="nav-item ${active === "profile" ? "active" : ""}"><span class="nav-ico">${ic("profile")}</span><span>${t("profile")}</span></a></nav>
       <div class="side-foot">
         <div class="avatar">${esc(initial)}</div>
@@ -609,27 +1131,34 @@ function shell(active, title, inner) {
     </aside>
     <main class="main">
       <header class="topbar">
-        <div class="row"><button class="burger icon-btn" aria-label="Open navigation" data-act="toggleSidebar">${ic("menu", 20)}</button><h1>${esc(title)}</h1></div>
+        <div class="row"><button class="burger icon-btn" aria-label="${t("a_open_nav")}" data-act="toggleSidebar">${ic("menu", 20)}</button><h1>${esc(title)}</h1></div>
         <div class="topbar-right">
-          <button class="palette-trigger" aria-label="Open command palette" data-act="openPalette">${ic("search",15)}<span>Search</span><kbd>Ctrl K</kbd></button>
-          <button class="icon-btn theme-toggle" aria-label="Toggle theme" title="Toggle theme" data-act="toggleTheme">${themeIcon()}</button>
+          <button class="palette-trigger" aria-label="${t("a_open_palette")}" data-act="openPalette">${ic("search",15)}<span>${t("search")}</span><kbd>Ctrl K</kbd></button>
+          ${u.root_admin ? `<div class="notif-wrap">
+            <button class="icon-btn notif-bell" aria-label="${t("notif_open")}" aria-haspopup="true" aria-expanded="false" data-act="notifToggle">${ic("bell", 17)}<span class="notif-badge" ${state.unread ? "" : "hidden"}>${state.unread > 99 ? "99+" : state.unread}</span></button>
+            <div class="notif-panel" id="notif-panel" role="region" aria-label="${t("notif_open")}" hidden>
+              <div class="notif-head"><b>${t("notifications")}</b><span class="notif-unread"></span></div>
+              <div class="notif-list" id="notif-panel-list"><div class="empty notif-empty">${ic("bell", 32)}<p>${t("notif_empty")}</p></div></div>
+            </div>
+          </div>` : ""}
+          <button class="icon-btn theme-toggle" aria-label="${t("palette_theme")}" title="${t("palette_theme")}" data-act="toggleTheme">${themeIcon()}</button>
         </div>
-        <div id="toast-wrap" role="status" aria-live="polite"></div>
       </header>
-      <div class="content">${inner}</div>
+      <div class="content" id="main-content" tabindex="-1">${inner}</div>
     </main>
   </div>`;
 }
 
 function toggleSidebar() { $("#sidebar")?.classList.toggle("open"); $(".sidebar-backdrop")?.classList.toggle("show"); }
 
-async function logout() { try { await api("/logout", { method: "POST" }); } catch (e) {} state.user = null; state.server = null; state.servers = []; location.hash = ""; renderLogin(); }
+async function logout() { notifTeardown(); try { await api("/logout", { method: "POST" }); } catch (e) {} state.user = null; state.server = null; state.servers = []; location.hash = ""; renderLogin(); }
 
 /* ============================================================
    AUTH
    ============================================================ */
 function renderLogin(err) {
   routeToken++;
+  notifTeardown();
   killPollers();
   state.pendingLogin = null;
   state.page = "login";
@@ -639,11 +1168,11 @@ function renderLogin(err) {
       <div class="auth-side-inner">
         <div class="auth-wordmark"><span aria-hidden="true"></span><strong>VoltPanel</strong></div>
         <h1 class="auth-title">${t("welcome")}</h1>
-        <p class="auth-sub">One operational signal across isolated workspaces and every execution agent.</p>
+        <p class="auth-sub">${t("auth_tagline")}</p>
         <div class="auth-feats" aria-label="Features">
-          <div class="auth-feat">${ic("zap", 16)}<span>Rust-native · no Docker</span></div>
-          <div class="auth-feat">${ic("gauge", 16)}<span>Real-time resource limits</span></div>
-          <div class="auth-feat">${ic("shield", 16)}<span>argon2id + 2FA</span></div>
+          <div class="auth-feat">${ic("zap", 16)}<span>${t("auth_feat_1")}</span></div>
+          <div class="auth-feat">${ic("gauge", 16)}<span>${t("auth_feat_2")}</span></div>
+          <div class="auth-feat">${ic("shield", 16)}<span>${t("auth_feat_3")}</span></div>
         </div>
       </div>
     </aside>
@@ -651,8 +1180,8 @@ function renderLogin(err) {
       <div class="auth-mobile-brand"><span aria-hidden="true"></span><strong>VoltPanel</strong></div>
       <form class="auth-card" data-act="doLogin" data-act-submit>
         <header class="auth-card-copy">
-          <h1>Sign in</h1>
-          <p>Use your VoltPanel account to continue.</p>
+          <h1>${t("auth_signin")}</h1>
+          <p>${t("auth_signin_sub")}</p>
         </header>
         ${err ? `<div class="toast error auth-error">${ic("xcircle", 16)}<span>${esc(err)}</span></div>` : ""}
         <div class="auth-field">
@@ -666,14 +1195,40 @@ function renderLogin(err) {
         <div class="auth-options"><label class="check-row"><input type="checkbox" id="l-rem" checked><span class="check-box">${ic("check", 13, 2.4)}</span><span>${t("remember")}</span></label></div>
         <button class="btn primary block auth-submit" type="submit"><span>${t("login")}</span>${ic("chevron_right", 16)}</button>
       </form>
-      <div class="auth-foot">Secure access to VoltPanel</div>
+      <div class="auth-foot">${t("auth_foot")}</div>
     </main>
   </div>`;
   $("#l-user").focus();
 }
 
-async function doLogin(e) {
-  e?.preventDefault?.();
+function setAuthBusy(form, busy, label) {
+  if (!form) return false;
+  if (busy && form.dataset.busy === "1") return false;
+  form.dataset.busy = busy ? "1" : "0";
+  form.setAttribute("aria-busy", String(busy));
+  form.querySelectorAll("input, button").forEach((control) => { control.disabled = busy; });
+  const submit = form.querySelector(".auth-submit");
+  if (submit) {
+    if (!submit.dataset.idleHtml) submit.dataset.idleHtml = submit.innerHTML;
+    submit.innerHTML = busy
+      ? `<span class="auth-spinner" aria-hidden="true"></span><span>${esc(label)}</span>`
+      : submit.dataset.idleHtml;
+  }
+  return true;
+}
+
+function completeLogin(user) {
+  state.pendingLogin = null;
+  state.user = user;
+  state.lang = user.language || "en";
+  document.documentElement.lang = state.lang;
+  notifInit();
+  if (location.hash === "#/") route();
+  else location.hash = "#/";
+}
+
+async function doLogin(form) {
+  if (!setAuthBusy(form, true, t("signing_in"))) return;
   try {
     const username = $("#l-user").value;
     const password = $("#l-pass").value;
@@ -687,13 +1242,10 @@ async function doLogin(e) {
       render2fa();
       return;
     }
-    state.pendingLogin = null;
-    state.user = res.user;
-    state.lang = res.user.language || "en";
-    applyTheme();
-    location.hash = "#/";
+    completeLogin(res.user);
   } catch (err) {
-    renderLogin(err.message);
+    toast(err.message, "error");
+    if (form.isConnected) setAuthBusy(form, false, "");
   }
 }
 
@@ -701,35 +1253,49 @@ function render2fa() {
   document.getElementById("app").innerHTML = `<div class="auth-wrap auth-single"><main class="auth-main">
     <div class="auth-mobile-brand"><span aria-hidden="true"></span><strong>VoltPanel</strong></div>
     <form class="auth-card" data-act="do2fa" data-act-submit>
-      <header class="auth-card-copy"><h1>${t("twofa")}</h1><p>Enter the code from your authenticator app.</p></header>
-      <div class="auth-field">
-        <label for="l-totp">6-digit code</label>
+      <header class="auth-card-copy"><h1>${t("twofa")}</h1><p>${t("twofa_sub")}</p></header>
+      <div class="auth-field" id="2fa-totp-field">
+        <label for="l-totp">${t("totp_code")}</label>
         <input class="auth-input auth-code" id="l-totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" required autofocus>
       </div>
+      <div class="auth-field" id="2fa-recovery-field" hidden>
+        <label for="l-recovery">${t("recovery_codes")}</label>
+        <input class="auth-input" id="l-recovery" autocomplete="one-time-code" placeholder="${t("recovery_ph")}" spellcheck="false">
+      </div>
+      <p class="muted m-10-0"><button type="button" class="link-btn" id="2fa-toggle" aria-expanded="false">${t("recovery_use")}</button></p>
       <button class="btn primary block auth-submit" type="submit"><span>${t("verify")}</span>${ic("chevron_right", 16)}</button>
     </form>
-    <div class="auth-foot">Secure access to VoltPanel</div>
+    <div class="auth-foot">${t("auth_foot")}</div>
   </main></div>`;
+  const toggle = $("#2fa-toggle");
+  if (toggle) toggle.addEventListener("click", () => {
+    const recoveryOn = !$("#2fa-recovery-field").hidden;
+    $("#2fa-recovery-field").hidden = recoveryOn;
+    $("#2fa-totp-field").hidden = !recoveryOn;
+    toggle.setAttribute("aria-expanded", String(!recoveryOn));
+    toggle.textContent = recoveryOn ? t("recovery_use") : t("use_authenticator");
+    (recoveryOn ? $("#l-totp") : $("#l-recovery"))?.focus();
+  });
 }
 
-async function do2fa(e) {
-  e?.preventDefault?.();
+async function do2fa(form) {
   const pending = state.pendingLogin;
   if (!pending) { renderLogin("Login challenge expired"); return; }
+  if (!setAuthBusy(form, true, t("verifying"))) return;
   try {
-    const res = await api("/login", {
-      method: "POST",
-      body: JSON.stringify({ ...pending, totp_code: $("#l-totp").value }),
-    });
-    state.pendingLogin = null;
-    state.user = res.user;
-    state.lang = res.user.language || "en";
-    location.hash = "#/";
-  } catch (err) { toast(err.message, "error"); }
+    const body = { ...pending, totp_code: $("#l-totp").value };
+    const recovery = $("#l-recovery")?.value?.trim();
+    if (recovery) body.recovery_code = recovery;
+    const res = await api("/login", { method: "POST", body: JSON.stringify(body) });
+    completeLogin(res.user);
+  } catch (err) {
+    toast(err.message, "error");
+    if (form.isConnected) setAuthBusy(form, false, "");
+  }
 }
 async function renderDashboard() {
-  state.sparkKey = ""; // fresh fleet on every dashboard entry — first poll tick rebuilds the table
-  document.getElementById("app").innerHTML = shell("pulse", "Pulse", `
+  state.sparkKey = null; // sentinel: even an empty fleet must render on the first poll tick
+  document.getElementById("app").innerHTML = shell("pulse", "Dashboard", `
     <div class="grid ${state.user.root_admin ? "cols-4" : "cols-1"}" id="d-stats">
       <div class="card stat-card"><span class="stat-ico accent">${ic("server", 20)}</span><div class="stat-label">${t("servers")}</div><div class="stat-value" id="d-count">…</div><div class="stat-sub">active instances</div></div>
       ${state.user.root_admin ? `
@@ -742,11 +1308,11 @@ async function renderDashboard() {
       <div id="d-servers"><div class="empty">${ic("box", 40)}<p>${t("loading")}</p></div></div>
     </div>
     <div class="dashboard-lower">
-      <section class="card quick-panel"><div class="card-head"><h3>Quick actions</h3></div><div class="quick-grid">
-        ${state.user.root_admin ? `<a href="#/admin/servers" class="quick-action">${ic("plus",18)}<span><b>Compose workspace</b><small>Launch from a VoltSpec blueprint</small></span></a><a href="#/admin/nodes" class="quick-action">${ic("globe",18)}<span><b>Attach agent</b><small>Extend the execution fabric</small></span></a>` : ""}
-        <a href="#/settings" class="quick-action">${ic("key",18)}<span><b>API access</b><small>Manage scoped credentials</small></span></a><a href="#/profile" class="quick-action">${ic("shield",18)}<span><b>Account security</b><small>Password and two-factor auth</small></span></a>
+      <section class="card quick-panel"><div class="card-head"><h3>${t("quick_actions")}</h3></div><div class="quick-grid">
+        ${state.user.root_admin ? `<a href="#/admin/servers" class="quick-action">${ic("plus",18)}<span><b>${t("qa_compose")}</b><small>${t("qa_compose_sub")}</small></span></a><a href="#/admin/nodes" class="quick-action">${ic("globe",18)}<span><b>${t("qa_attach")}</b><small>${t("qa_attach_sub")}</small></span></a>` : ""}
+        <a href="#/settings" class="quick-action">${ic("key",18)}<span><b>${t("qa_api")}</b><small>${t("qa_api_sub")}</small></span></a><a href="#/profile" class="quick-action">${ic("shield",18)}<span><b>${t("qa_security")}</b><small>${t("qa_security_sub")}</small></span></a>
       </div></section>
-      <section class="card activity-panel"><div class="card-head"><h3>${ic("activity",15)} Recent activity</h3></div><div id="d-activity" class="activity-list"><div class="skeleton sk-act"></div><div class="skeleton sk-act"></div></div></section>
+      <section class="card activity-panel"><div class="card-head"><h3>${ic("activity",15)} ${t("recent_activity")}</h3></div><div id="d-activity" class="activity-list"><div class="skeleton sk-act"></div><div class="skeleton sk-act"></div></div></section>
     </div>`);
   let busy = false;
   const load = async () => {
@@ -759,22 +1325,39 @@ async function renderDashboard() {
       const servers = list.data || [];
       state.servers = servers; // command palette reads the live fleet
       $("#d-count").textContent = servers.length;
-      if (document.hidden) return; // off-screen: pause stat + spark updates (resume shifts the rings)
-      if (state.user.root_admin) {
-        const stats = await api("/system/stats");
-        if (token !== routeToken) return;
-        $("#d-cpu").textContent = Math.round(stats.cpu.usage_percent) + "%";
-        $("#d-load").textContent = `load ${stats.load["1"].toFixed(2)}`;
-        $("#d-mem").textContent = Math.round(stats.memory.percent) + "%";
-        $("#d-mem-bar").style.width = Math.min(100, stats.memory.percent) + "%";
-        $("#d-disk").textContent = Math.round(stats.disk.percent) + "%";
-        $("#d-disk-bar").style.width = Math.min(100, stats.disk.percent) + "%";
-      }
+
+      // Fleet data is the dashboard's primary content. Render it immediately;
+      // host metrics are slower and must never leave this section on Loading.
       const key = servers.map((s) => `${s.id}:${s.status}`).join("|");
-      if (key !== state.sparkKey) { state.sparkKey = key; renderServerTable(servers); }
-      else { pushServerSamples(servers); updateSparks(); updateServerCells(servers); }
-      if (state.user.root_admin) api("/audit").then(r => renderActivity((r.data||[]).slice(0,6))).catch(() => renderActivity([])); else renderActivity([]);
-    } catch (e) { if (token === routeToken) toast(e.message, "error"); }
+      if (key !== state.sparkKey) {
+        state.sparkKey = key;
+        await renderServerTable(servers);
+      } else {
+        pushServerSamples(servers);
+        updateSparks();
+        updateServerCells(servers);
+      }
+
+      if (document.hidden || token !== routeToken) return;
+      if (state.user.root_admin) {
+        api("/system/stats").then((stats) => {
+          if (token !== routeToken || document.hidden) return;
+          $("#d-cpu").textContent = Math.round(stats.cpu.usage_percent) + "%";
+          $("#d-load").textContent = `load ${stats.load["1"].toFixed(2)}`;
+          $("#d-mem").textContent = Math.round(stats.memory.percent) + "%";
+          $("#d-mem-bar").style.width = Math.min(100, stats.memory.percent) + "%";
+          $("#d-disk").textContent = Math.round(stats.disk.percent) + "%";
+          $("#d-disk-bar").style.width = Math.min(100, stats.disk.percent) + "%";
+        }).catch(() => {});
+        api("/audit").then((r) => {
+          if (token === routeToken) renderActivity((r.data || []).slice(0, 6));
+        }).catch(() => { if (token === routeToken) renderActivity([]); });
+      } else renderActivity([]);
+    } catch (e) {
+      if (token !== routeToken) return;
+      const box = $("#d-servers");
+      if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_servers")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="refreshServers">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
+    }
     finally { busy = false; }
   };
   poll(load, 5000);
@@ -911,9 +1494,22 @@ async function refreshServers() {
   }
 }
 
+/* Dedicated workspace list for non-admin members: the dashboard's Pulse view is
+   the fleet overview, while this page is the focused server list (admin users
+   instead land on the Control Center fleet table). */
+async function renderWorkspaces() {
+  state.sparkKey = null;
+  document.getElementById("app").innerHTML = shell("workspaces", t("servers"), `
+    <div class="card">
+      <div class="card-head"><h3>${t("all_servers")}</h3><button class="icon-btn" title="refresh" data-act="refreshServers">${ic("refresh_ccw", 16)}</button></div>
+      <div id="d-servers"><div class="empty">${ic("box", 40)}<p>${t("loading")}</p></div></div>
+    </div>`);
+  await refreshServers();
+}
+
 /* ---------- automations ---------- */
 async function renderAutomations(){
-  document.getElementById("app").innerHTML=shell("flows","Flows",`<section class="nodes-header"><div><span class="eyebrow">EVENT-DRIVEN CONTROL</span><h2>Flow runway</h2><p>Coordinate lifecycle commands, snapshots, and tasks across every workspace.</p></div></section><div id="automation-grid" class="node-grid"><div class="skeleton sk-flow"></div><div class="skeleton sk-flow"></div></div>`);
+  document.getElementById("app").innerHTML=shell("flows","Schedules",`<section class="nodes-header"><div><span class="eyebrow">${t("flows_eyebrow")}</span><h2>${t("flows_title")}</h2><p>${t("flows_sub")}</p></div></section><div id="automation-grid" class="node-grid"><div class="skeleton sk-flow"></div><div class="skeleton sk-flow"></div></div>`);
   try{const servers=(await api("/servers")).data||[];const groups=await Promise.all(servers.map(async server=>({server,schedules:(await api(`/servers/${server.id}/schedules`)).data||[]})));const all=groups.flatMap(g=>g.schedules.map(schedule=>({schedule,server:g.server})));const box=$("#automation-grid");box.innerHTML=all.length?all.map(({schedule,server})=>`<article class="node-card"><div class="node-card-head"><div class="node-mark">${ic("clock",18)}</div><div><h3>${esc(schedule.name)}</h3><span>${esc(server.name)}</span></div><span class="pill ${schedule.enabled?'running':'offline'}"><i></i>${schedule.enabled?'active':'paused'}</span></div><div class="node-endpoint">${ic("terminal",13)}<code>${esc(schedule.cron_expr)}</code></div><div class="metric-line"><span>Next run</span><b>${fmtDate(schedule.next_run_at)}</b></div><div class="node-card-foot"><span>${schedule.tasks?.length||0} tasks</span><a class="btn sm ghost" href="#/server/${server.id}/schedules">Open</a></div></article>`).join(""):`<div class="context-empty">${ic("clock",28)}<div><b>No schedules</b><span>Create a schedule from a server.</span></div></div>`;}catch(e){const g=$("#automation-grid");if(g)g.innerHTML=`<div class="node-grid"><div class="card"><div class="file-error">${ic("alert",26)}<div><b>${t("err_load_flows")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="automationRetry">${ic("refresh_ccw",13)}<span>${t("retry")}</span></button></div></div></div>`;}
 }
 
@@ -922,17 +1518,18 @@ async function renderAutomations(){
    ============================================================ */
 async function renderServerPage(id, tab) {
   const token = routeToken; // stale if a newer route()/renderLogin() superseded us while awaiting
-  document.getElementById("app").innerHTML = shell("workspaces", "Workspace", `<div class="empty">${ic("server", 40)}<p>${t("loading")}</p></div>`);
+  document.getElementById("app").innerHTML = shell("workspaces", "Server", `<div class="empty">${ic("server", 40)}<p>${t("loading")}</p></div>`);
   let data;
   try { data = await api(`/servers/${id}`); } catch (e) { if (token !== routeToken) return; document.querySelector(".content").innerHTML = `<div class="toast error">${ic("xcircle", 16)}<span>${esc(e.message)}</span></div>`; return; }
   if (token !== routeToken) return;
   const s = data.server;
   const tabs = [
     ["console", ic("terminal", 15) + t("console")], ["files", ic("folder", 15) + t("files")],
-    ["settings", ic("settings", 15) + t("settings")], ["databases", ic("database", 15) + t("databases")],
-    ["backups", ic("archive", 15) + t("backups")], ["schedules", ic("clock", 15) + t("schedules")],
+    ["databases", ic("database", 15) + t("databases")], ["backups", ic("archive", 15) + t("backups")],
+    ["schedules", ic("clock", 15) + t("schedules")], ["allocations", ic("link", 15) + t("allocations")],
+    ["settings", ic("settings", 15) + t("settings")],
     ["sites", ic("globe", 15) + t("sites")],
-    ["allocations", ic("link", 15) + t("allocations")],
+    ["watchers", ic("bell", 15) + t("watchers")],
     ["metrics", ic("activity", 15) + t("metrics")],
   ];
   state.page = "server";
@@ -941,16 +1538,17 @@ async function renderServerPage(id, tab) {
     <div class="server-head">
       <div>
         <div class="row"><h2 class="server-name">${esc(s.name)}</h2><span class="pill ${statusCls(s.status)}"><i></i>${esc(s.status)}</span></div>
-        <div class="server-meta"><span>${esc(s.blueprint)}</span><span>agent ${esc(s.node)}</span><span>#${esc(s.id)}</span>${s.port ? `<button class="allocation-chip" data-act="copyText" data-text="${esc(location.hostname + ":" + s.port)}">${ic("link",12)}${esc(location.hostname)}:${esc(s.port)}${ic("copy",11)}</button>` : `<span class="allocation-chip muted">No endpoint</span>`}</div>
+        <div class="server-meta"><span>${esc(s.blueprint)}</span><span>${esc(s.node)}</span>${s.port ? `<button class="allocation-chip" data-act="copyText" data-text="${esc(location.hostname + ":" + s.port)}">${ic("link",12)}${esc(location.hostname)}:${esc(s.port)}${ic("copy",11)}</button>` : `<span class="allocation-chip muted">No endpoint</span>`}</div>
       </div>
       <div class="server-actions">
-        <button class="btn success" aria-label="Start server" data-act="power" data-sid="${id}" data-action="start">${ic("play", 14)}<span>${t("start")}</span></button>
-        <button class="btn" aria-label="Restart server" data-act="power" data-sid="${id}" data-action="restart">${ic("refresh", 14)}<span>${t("restart")}</span></button>
-        <button class="btn" aria-label="Stop server" data-act="power" data-sid="${id}" data-action="stop">${ic("stop", 14)}<span>${t("stop")}</span></button>
-        <button class="btn danger" aria-label="Force kill server" data-act="confirmKill" data-sid="${id}">${ic("x", 14)}<span>${t("kill")}</span></button>
+        ${s.status === "running" ? `
+        <button class="btn" aria-label="${t("a_restart")}" data-act="power" data-sid="${id}" data-action="restart">${ic("refresh", 14)}<span>${t("restart")}</span></button>
+        <button class="btn danger" aria-label="${t("a_stop")}" data-act="power" data-sid="${id}" data-action="stop">${ic("stop", 14)}<span>${t("stop")}</span></button>
+        <button class="icon-btn danger" title="${t("a_kill")}" aria-label="${t("a_kill")}" data-act="confirmKill" data-sid="${id}">${ic("x", 14)}</button>` : `
+        <button class="btn success" aria-label="${t("a_start")}" data-act="power" data-sid="${id}" data-action="start">${ic("play", 14)}<span>${t("start")}</span></button>`}
       </div>
     </div>
-    <div class="isolation-strip"><div class="isolation-icon">${ic("shield",18)}</div><div><b>Protected</b><span>Server isolation enabled</span></div><span class="isolation-node">${esc(s.node)}</span></div>
+    <div class="isolation-strip" title="${t("isolation_on")}"><div class="isolation-icon">${ic("shield",18)}</div><span>${t("protected")}</span></div>
     <div class="server-stats">
       <div class="stat"><span class="st-label">${t("status")}</span><span class="st-val" id="st-status">${esc(s.status)}</span></div>
       <div class="stat"><span class="st-label">${t("cpu")}</span><span class="st-val" id="st-cpu">0%</span></div>
@@ -959,7 +1557,6 @@ async function renderServerPage(id, tab) {
       <div class="stat"><span class="st-label">${t("uptime")}</span><span class="st-val" id="st-up">—</span></div>
       <div class="stat"><span class="st-label">PID</span><span class="st-val" id="st-pid">—</span></div>
     </div>
-    <div id="metric-chart" class="metric-chart-grid"></div>
     <div class="tabs">${nav}</div>
     <div id="tab-body"><div class="empty">${ic("server", 40)}<p>${t("loading")}</p></div></div>`;
   state.server = s;
@@ -971,6 +1568,7 @@ async function renderServerPage(id, tab) {
     backups: () => renderBackups(id),
     schedules: () => renderSchedules(id),
     sites: () => renderSites(id),
+    watchers: () => renderWatchers(id),
     allocations: () => renderAllocations(id),
     metrics: () => renderMetrics(id),
   };
@@ -1231,14 +1829,14 @@ async function renderCrashBanner(id) {
     };
     try {
       await api(`/servers/${id}/console/crash-policy`, { method: "PATCH", body: JSON.stringify(body) });
-      toast("Crash policy saved", "success");
+      toast(t("t_crash_saved"), "success");
       renderCrashBanner(id);
     } catch (e) { toast(e.message, "error"); }
   });
   $("#crash-reset").addEventListener("click", async () => {
     try {
       await api(`/servers/${id}/console/crash-policy`, { method: "PATCH", body: JSON.stringify({ reset_burst: true }) });
-      toast("Crash burst reset", "success");
+      toast(t("t_crash_reset"), "success");
       renderCrashBanner(id);
     } catch (e) { toast(e.message, "error"); }
   });
@@ -1287,21 +1885,23 @@ async function renderFiles(id) {
   fileClip = null;
   $("#tab-body").innerHTML = `<div class="files-toolbar">
     <div class="crumbs" id="f-crumbs"></div>
-    <div class="f-search">${ic("search", 14)}<input id="f-filter" placeholder="Filter…" aria-label="Filter files"></div>
+    <div class="f-search">${ic("search", 14)}<input id="f-filter" placeholder="${t("filter_ph")}" aria-label="${t("filter_files")}"></div>
     <button class="icon-btn" title="${t("upload")}" aria-label="${t("upload")}" data-act="fileUpload" data-sid="${id}">${ic("upload", 16)}</button>
-    <button class="icon-btn" title="Pull from URL" aria-label="Pull from URL" data-act="filePull" data-sid="${id}">${ic("link", 16)}</button>
-    <button class="icon-btn" title="new file" aria-label="New file" data-act="fileNewFile" data-sid="${id}">${ic("file", 16)}</button>
-    <button class="icon-btn" title="new folder" aria-label="New folder" data-act="fileNewDir" data-sid="${id}">${ic("folder", 16)}</button>
-    <button class="icon-btn" title="refresh" aria-label="Refresh" data-act="fileOpenDir" data-sid="${id}" data-path="${esc(state.filePath)}">${ic("refresh_ccw", 16)}</button>
+    <button class="icon-btn" title="${t("a_pull_url")}" aria-label="${t("a_pull_url")}" data-act="filePull" data-sid="${id}">${ic("link", 16)}</button>
+    <button class="icon-btn" title="${t("a_new_file")}" aria-label="${t("a_new_file")}" data-act="fileNewFile" data-sid="${id}">${ic("file", 16)}</button>
+    <button class="icon-btn" title="${t("a_new_folder")}" aria-label="${t("a_new_folder")}" data-act="fileNewDir" data-sid="${id}">${ic("folder", 16)}</button>
+    <button class="icon-btn" title="${t("a_refresh")}" aria-label="${t("a_refresh")}" data-act="fileOpenDir" data-sid="${id}" data-path="${esc(state.filePath)}">${ic("refresh_ccw", 16)}</button>
   </div>
   <div class="file-dropzone" id="file-drop">
     <div class="f-bulkbar" id="f-bulkbar" hidden>
       <span class="muted" id="f-selcount"></span>
-      <button class="btn xs ghost" data-act="fileCutSel" data-sid="${id}">${ic("copy", 12)}<span>Cut</span></button>
-      <button class="btn xs ghost danger" data-act="fileDelSel" data-sid="${id}">${ic("trash", 12)}<span>Delete</span></button>
-      <button class="btn xs ghost" data-act="fileSelNone">${ic("x", 12)}<span>Clear</span></button>
+      <button class="btn xs ghost" data-act="fileCutSel" data-sid="${id}">${ic("copy", 12)}<span>${t("cut")}</span></button>
+      <button class="btn xs ghost" data-act="fileZipSel" data-sid="${id}">${ic("archive", 12)}<span>${t("archive")}</span></button>
+      <button class="btn xs ghost" data-act="fileDlSel" data-sid="${id}">${ic("download", 12)}<span>${t("download")}</span></button>
+      <button class="btn xs ghost danger" data-act="fileDelSel" data-sid="${id}">${ic("trash", 12)}<span>${t("delete")}</span></button>
+      <button class="btn xs ghost" data-act="fileSelNone">${ic("x", 12)}<span>${t("clear")}</span></button>
       <span class="spacer"></span>
-      <button class="btn xs primary" data-act="filePaste" data-sid="${id}" hidden>${ic("check", 12)}<span>Paste here</span></button>
+      <button class="btn xs primary" data-act="filePaste" data-sid="${id}" hidden>${ic("check", 12)}<span>${t("paste_here")}</span></button>
     </div>
     <div class="f-uploadbar" id="f-uploadbar" hidden>
       <span class="muted" id="f-upname"></span>
@@ -1378,7 +1978,7 @@ function renderFileRows(id) {
       <span>${t("type")}</span><span>${t("actions")}</span>
     </div>
     ${entries.map(row).join("")}
-  </div>` : `<div class="file-list"><div class="empty">${ic(q ? "search" : "folder", 40)}<p>${q ? "No matches" : t("none")}</p></div></div>`;
+  </div>` : `<div class="file-list">${q ? emptyState("search", t("es_search_none_t"), "") : emptyState("folder", t("es_files_none_t"), "")}</div>`;
   const bar = $("#f-bulkbar");
   if (bar) {
     const n = fileSel.size;
@@ -1408,8 +2008,8 @@ function fileMenu(id, path, isDir, ext, btn) {
   const item = (label, act, danger) => `<button class="file-menu-item${danger ? " danger" : ""}" data-act="${act}" data-sid="${id}" data-path="${esc(path)}"><span>${label}</span></button>`;
   let items = item("Rename", "fileRename") + item("Copy", "fileCopy") + item("Move…", "fileMoveAsk") + item("Permissions…", "fileChmod");
   const zippy = /^(zip|gz|tar|tgz|7z|rar)$/i.test(ext || "");
-  if (!zippy) items += item("Zip", "fileZip");
-  if (!isDir && zippy) items += item("Extract here", "fileExtract");
+  if (!zippy) items += item(t("archive"), "fileZip");
+  if (!isDir && zippy) items += item(t("extract"), "fileExtract");
   items += item("Delete", "fileDel", true);
   const menu = document.createElement("div");
   menu.className = "file-menu";
@@ -1420,7 +2020,7 @@ function fileMenu(id, path, isDir, ext, btn) {
 async function fileMoveAsk(id, path) {
   const dest = await vpPrompt("Move to directory:", state.filePath);
   if (!dest) return;
-  try { await api(`/servers/${id}/files/move`, { method: "POST", body: JSON.stringify({ files: [path], dest }) }); toast("Moved", "success"); await loadFiles(id, state.filePath); }
+  try { await api(`/servers/${id}/files/move`, { method: "POST", body: JSON.stringify({ files: [path], dest }) }); toast(t("moved"), "success"); await loadFiles(id, state.filePath); }
   catch (e) { toast(e.message, "error"); }
 }
 function fileCutSel(id) {
@@ -1433,7 +2033,7 @@ async function filePaste(id) {
   if (!fileClip) return;
   try {
     await api(`/servers/${id}/files/move`, { method: "POST", body: JSON.stringify({ files: fileClip.paths, dest: state.filePath }) });
-    toast("Moved", "success");
+    toast(t("moved"), "success");
     fileClip = null; fileSel = new Set();
     await loadFiles(id, state.filePath);
   } catch (e) { toast(e.message, "error"); }
@@ -1448,12 +2048,28 @@ async function fileDelSel(id) {
     await loadFiles(id, state.filePath);
   } catch (e) { toast(e.message, "error"); }
 }
+
+async function fileZipSel(id) {
+  if (!fileSel.size) return;
+  try {
+    const res = await api(`/servers/${id}/files/archive`, { method: "POST", body: JSON.stringify({ path: "", paths: [...fileSel], format: "zip" }) });
+    fileSel = new Set();
+    toast(`Created ${res.path || "archive"}`, "success");
+    await loadFiles(id, state.filePath);
+  } catch (e) { toast(e.message, "error"); }
+}
+
+function fileDlSel(id) {
+  if (!fileSel.size) return;
+  const qs = [...fileSel].map((p) => `paths=${encodeURIComponent(p)}`).join("&");
+  window.location.href = `/api/servers/${id}/files/download_multi?${qs}`;
+}
 async function fileChmod(id, path) {
   const cur = (state.fileEntries || []).find((f) => f.path === path);
   const prefill = cur && typeof cur.mode === "number" ? (cur.mode & 0o777).toString(8) : "755";
   const mode = await vpPrompt("Permissions (octal, e.g. 755):", prefill);
   if (!mode) return;
-  try { await api(`/servers/${id}/files/chmod`, { method: "POST", body: JSON.stringify({ path, mode }) }); toast("Permissions updated", "success"); await loadFiles(id, state.filePath); }
+  try { await api(`/servers/${id}/files/chmod`, { method: "POST", body: JSON.stringify({ path, mode }) }); toast(t("t_perms_updated"), "success"); await loadFiles(id, state.filePath); }
   catch (e) { toast(e.message, "error"); }
 }
 async function fileZip(id, path) {
@@ -1466,7 +2082,7 @@ async function fileZip(id, path) {
 async function fileExtract(id, path) {
   try {
     await api(`/servers/${id}/files/extract`, { method: "POST", body: JSON.stringify({ archive: path, dest: state.filePath }) });
-    toast("Extracted", "success");
+    toast(t("extracted"), "success");
     await loadFiles(id, state.filePath);
   } catch (e) { toast(e.message, "error"); }
 }
@@ -1493,7 +2109,7 @@ async function fileOpen(id, path) {
     modal.dataset.previewUrl = previewUrl;
   }
   modal.innerHTML = `<div class="modal-card big file-editor">
-    <div class="modal-head"><b>${fileIcon(res.mime.includes("json") ? "json" : "txt", false)} <span class="modal-title">${esc(name)}</span></b><div class="row"><span class="badge">${esc(res.mime)}</span><span class="badge warn" id="editor-dirty" hidden>unsaved</span><button class="icon-btn" data-act="closeModal" aria-label="Close">${ic("x", 16)}</button></div></div>
+    <div class="modal-head"><b>${fileIcon((res.mime || "").includes("json") ? "json" : "txt", false)} <span class="modal-title">${esc(name)}</span></b><div class="row"><span class="badge">${esc(res.mime)}</span><span class="badge warn" id="editor-dirty" hidden>unsaved</span><button class="icon-btn" data-act="closeModal" aria-label="Close">${ic("x", 16)}</button></div></div>
     ${isImage ? `<div class="file-preview"><img src="${previewUrl || ""}" alt="${esc(name)}"></div>` : `<textarea id="editor" spellcheck="false">${esc(content)}</textarea>`}
     <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button>${isImage ? "" : `<button class="btn primary" data-act="fileSave" data-sid="${id}" data-path="${esc(path)}">${ic("save", 14)}<span>${t("save")}</span></button>`}</div>
   </div>`;
@@ -1569,7 +2185,7 @@ function uploadFiles(id, files) {
       }
       next();
     };
-    xhr.onerror = () => { toast("Upload failed", "error"); next(); };
+    xhr.onerror = () => { toast(t("t_upload_failed"), "error"); next(); };
     xhr.send(fd);
   };
   next();
@@ -1674,13 +2290,13 @@ async function reloadSettings(id) {
 }
 async function subAdd(id) { const user_id = +$("#sub-user-id").value; if (!user_id) return; const role = $("#sub-role").value; try { await api(`/servers/${id}/subusers`, { method: "POST", body: JSON.stringify({ user_id, role }) }); toast(t("created"), "success"); await reloadSettings(id); } catch (e) { toast(e.message, "error"); } }
 async function subDel(id, sub_id) { if (!await vpConfirm(t("confirm_delete"))) return; try { await api(`/servers/${id}/subusers/${sub_id}`, { method: "DELETE" }); await reloadSettings(id); } catch (e) { toast(e.message, "error"); } }
-async function install(id) { try { await api(`/servers/${id}/install`, { method: "POST", body: JSON.stringify({}) }); toast("Install queued", "success"); } catch (e) { toast(e.message, "error"); } }
+async function install(id) { try { await api(`/servers/${id}/install`, { method: "POST", body: JSON.stringify({}) }); toast(t("t_install_queued"), "success"); } catch (e) { toast(e.message, "error"); } }
 async function suspend(id) { try { await api(`/servers/${id}/suspend`, { method: "POST" }); toast(t("saved"), "success"); } catch (e) { toast(e.message, "error"); } }
 async function delServer(id) {
   const name = state.server?.name || `server-${id}`;
   if (!await vpDestroy({
     kind: "server", target: name,
-    consequences: ["All Storage, Data Lab and Vault data are erased", "Allocated ports are released", "This cannot be undone"],
+    consequences: ["All Files, Databases and Backups data are erased", "Allocated ports are released", "This cannot be undone"],
   })) return;
   try { await api(`/servers/${id}`, { method: "DELETE" }); location.hash = "#/"; } catch (e) { toast(e.message, "error"); }
 }
@@ -1688,7 +2304,7 @@ async function delServer(id) {
 /* ---------- databases ---------- */
 async function renderDatabases(id) {
   if (state.server?.node !== "local") {
-    $("#tab-body").innerHTML = `<div class="empty">${ic("database", 40)}<p>Data Lab is available on local servers only.</p></div>`;
+    $("#tab-body").innerHTML = `<div class="empty">${ic("database", 40)}<p>Databases are available on local servers only.</p></div>`;
     return;
   }
   $("#tab-body").innerHTML = `<div class="card"><h3>${ic("database", 15)} ${t("databases")} <span class="badge">SQLite</span></h3>
@@ -1702,12 +2318,12 @@ async function dbLoad(id) {
   try {
     const res = await api(`/servers/${id}/databases`);
     const dbs = res.data || [];
-    box.innerHTML = dbs.length ? `<div class="file-list">${dbs.map((d) => `<div class="file-row"><span class="f-icon">${ic("database", 16)}</span><div class="db-main"><b>${esc(d.name)}</b><div class="f-meta">${fmtBytes(d.size)}</div></div><span class="f-actions"><button class="icon-btn sm" title="Open Data Lab" aria-label="Open Data Lab" data-act="dbOpen" data-sid="${id}" data-name="${esc(d.name)}">${ic("terminal", 15)}</button><button class="icon-btn sm danger" title="${t("delete")}" aria-label="${t("delete")}" data-act="dbDrop" data-sid="${id}" data-name="${esc(d.name)}">${ic("trash", 15)}</button></span></div>`).join("")}</div>` : `<div class="empty">${ic("database", 40)}<p>${t("none")}</p></div>`;
+    box.innerHTML = dbs.length ? `<div class="file-list">${dbs.map((d) => `<div class="file-row"><span class="f-icon">${ic("database", 16)}</span><div class="db-main"><b>${esc(d.name)}</b><div class="f-meta">${fmtBytes(d.size)}</div></div><span class="f-actions"><button class="icon-btn sm" title="Open Database" aria-label="Open Database" data-act="dbOpen" data-sid="${id}" data-name="${esc(d.name)}">${ic("terminal", 15)}</button><button class="icon-btn sm danger" title="${t("delete")}" aria-label="${t("delete")}" data-act="dbDrop" data-sid="${id}" data-name="${esc(d.name)}">${ic("trash", 15)}</button></span></div>`).join("")}</div>` : emptyState("database", t("es_db_t"), t("es_db_h"));
   } catch (e) {
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_databases")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="dbRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
   }
 }
-async function dbCreate(id) { const name = $("#db-name").value.trim(); if (!name) return; try { await api(`/servers/${id}/databases`, { method: "POST", body: JSON.stringify({ name }) }); toast(t("created"), "success"); await dbLoad(id); } catch (e) { toast(e.message, "error"); } }
+async function dbCreate(id) { const name = $("#db-name").value.trim(); if (!name) { toast(t("e_required_name"), "warn"); return; } try { await api(`/servers/${id}/databases`, { method: "POST", body: JSON.stringify({ name }) }); toast(t("created"), "success"); await dbLoad(id); } catch (e) { toast(e.message, "error"); } }
 async function dbDrop(id, name) { if (!await vpConfirm(`${t("confirm_delete")} ${name}?`)) return; try { await api(`/servers/${id}/databases/${encodeURIComponent(name)}`, { method: "DELETE" }); await dbLoad(id); } catch (e) { toast(e.message, "error"); } }
 
 /* Data Lab: schema tree (tables + columns) beside a read/write SQL runner. */
@@ -1822,7 +2438,7 @@ async function bkLoad(id) {
       <button class="icon-btn sm" title="Verify checksum" aria-label="Verify checksum" data-act="bkVerify" data-bid="${b.id}">${ic("check", 14)}</button>
       <button class="icon-btn sm" title="${b.is_locked ? "Unlock" : "Lock"}" aria-label="${b.is_locked ? "Unlock" : "Lock"}" data-act="bkLock" data-bid="${b.id}" data-on="${b.is_locked ? "0" : "1"}">${ic("lock", 14)}</button>
       <button class="icon-btn sm danger" title="${t("delete")}" aria-label="${t("delete")}" data-act="bkDel" data-bid="${b.id}">${ic("trash", 15)}</button>
-    </span></div>`).join("")}</div>` : `<div class="empty">${ic("archive", 40)}<p>${t("none")}</p></div>`;
+    </span></div>`).join("")}</div>` : emptyState("archive", t("es_bk_t"), t("es_bk_h"), { act: "bkCreate", data: ` data-sid="${id}"`, actLabel: t("create") });
   } catch (e) {
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_backups")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="bkRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
   }
@@ -1831,11 +2447,11 @@ async function bkCreate(id) {
   const modal = document.createElement("div");
   modal.className = "modal";
   modal.innerHTML = `<div class="modal-card">
-    <div class="modal-head"><b>${ic("archive", 16)} ${t("create")} backup</b><button class="icon-btn" data-act="closeModal" aria-label="Close">${ic("x", 16)}</button></div>
+    <div class="modal-head"><b>${ic("archive", 16)} ${t("bk_create_title")}</b><button class="icon-btn" data-act="closeModal" aria-label="${t("close")}">${ic("x", 16)}</button></div>
     <div class="modal-pad">
-      <div class="field"><label>Name <small>optional</small></label><input id="bk-name" placeholder="backup-20260808-120000" spellcheck="false"></div>
-      <div class="field"><label>Ignore patterns <small>.gitignore-style globs, one per line</small></label><textarea id="bk-ignore" rows="4" placeholder="*.log&#10;cache/&#10;tmp/**" spellcheck="false"></textarea></div>
-      <p class="muted text-sm m-0">Excluded from the archive. Local workspaces only - remote nodes reject ignore patterns.</p>
+      <div class="field"><label>${t("bk_name_opt")} <small>${t("bk_optional")}</small></label><input id="bk-name" placeholder="backup-20260808-120000" spellcheck="false"></div>
+      <div class="field"><label>${t("bk_ignore")} <small>${t("bk_ignore_hint")}</small></label><textarea id="bk-ignore" rows="4" placeholder="*.log&#10;cache/&#10;tmp/**" spellcheck="false"></textarea></div>
+      <p class="muted text-sm m-0">${t("bk_ignore_note")}</p>
     </div>
     <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button><button class="btn primary" data-act="bkDoCreate" data-sid="${id}">${ic("plus", 14)}<span>${t("create")}</span></button></div>
   </div>`;
@@ -1885,7 +2501,7 @@ async function bkRestore(id, bid, btn) {
   if (btn) { btn.disabled = true; btn.innerHTML = `${ic("refresh_ccw", 14)}<span>Restoring…</span>`; }
   try {
     await api(`/backups/${bid}/restore`, { method: "POST", timeout: 120000 });
-    toast("Restored — workspace refreshed", "success");
+    toast(t("t_restored"), "success");
     if (id) await bkLoad(id);
   } catch (e) { toast(e.message, "error"); }
   if (btn) { btn.disabled = false; btn.innerHTML = `${ic("refresh_ccw", 14)}<span>Restore</span>`; }
@@ -1944,7 +2560,7 @@ async function pullStart(id) {
   const modal = $(".modal"); // the pull dialog we just submitted from
   state.pullModal = modal || null;
   const card = $(".modal-card");
-  card.innerHTML = `<div class="modal-head"><b>${ic("download", 16)} Pulling file</b><button class="icon-btn" data-act="pullCancel" data-sid="${id}" data-tid="${tid}" aria-label="Cancel transfer">${ic("x", 16)}</button></div>
+  card.innerHTML = `<div class="modal-head"><b>${ic("download", 16)} ${t("pulling_file")}</b><button class="icon-btn" data-act="pullCancel" data-sid="${id}" data-tid="${tid}" aria-label="${t("cancel")}">${ic("x", 16)}</button></div>
     <div class="modal-pad">
       <div class="metric-line"><span class="muted ellipsis">${esc(url)}</span></div>
       <div class="metric-line"><span id="pull-status">starting...</span><b id="pull-bytes"></b></div>
@@ -1972,14 +2588,14 @@ async function pullPoll(id, tid) {
   }
   if (s.status === "done") {
     st.textContent = "done";
-    toast("Downloaded", "success");
+    toast(t("downloaded"), "success");
     setTimeout(() => state.pullModal?.remove(), 400);
     await loadFiles(id, state.filePath);
     return;
   }
   if (s.status === "cancelled") {
     st.textContent = "cancelled";
-    toast("Transfer cancelled", "success");
+    toast(t("t_transfer_cancelled"), "success");
     setTimeout(() => state.pullModal?.remove(), 400);
     return;
   }
@@ -1987,14 +2603,89 @@ async function pullPoll(id, tid) {
   toast(s.error || "Pull failed", "error");
 }
 async function pullCancel(id, tid) {
-  try { await api(`/servers/${id}/files/pull/${tid}`, { method: "DELETE" }); toast("Cancelling..."); pullPoll(id, tid); }
+  try { await api(`/servers/${id}/files/pull/${tid}`, { method: "DELETE" }); toast(t("t_cancelling")); pullPoll(id, tid); }
   catch (e) { toast(e.message, "error"); }
 }
 
 /* ---------- schedules ---------- */
 const SCH_ACTIONS = ["start", "stop", "restart", "kill", "command", "backup", "notify"];
 let schDraft = [{ action: "restart", payload: "", sequence: 1 }]; // task-builder draft
-let schOrig = null; // schedule being edited (for task id diffing)
+
+/* ---------- Flow Gate conditions ---------- */
+/* Canonical condition JSON, exactly as the backend scheduler validates and
+   stores it (src/services/scheduler.rs):
+     exit    {"kind":"exit","task_index":N,"code":C}              (N < own index)
+     signal  {"kind":"signal","event":E,"server_id":S,"timeout_s":T}  (1<=T<=3600)
+     none    absent / null / {"kind":"none"}
+   The API returns conditions as parsed JSON values with alphabetically sorted
+   keys (serde_json BTreeMap), so re-emitting an untouched parsed object stays
+   byte-identical; fresh edits are built in the same sorted order. Unrecognized
+   kinds (e.g. from a newer backend) are preserved verbatim and surfaced as a
+   warning instead of being silently dropped. */
+function schCondFromValue(v) {
+  let obj = v;
+  if (typeof obj === "string") { try { obj = JSON.parse(obj); } catch { return { kind: "unknown", raw: v }; } }
+  if (obj === null || obj === undefined) return { kind: "none", raw: null };
+  if (typeof obj !== "object" || Array.isArray(obj)) return { kind: "unknown", raw: JSON.stringify(obj) };
+  if (obj.kind === "none") return { kind: "none", raw: null };
+  if (obj.kind === "exit") return { kind: "exit", taskIndex: obj.task_index ?? 0, code: obj.code ?? 0, raw: null };
+  if (obj.kind === "signal") return { kind: "signal", event: obj.event ?? "", serverId: obj.server_id, timeout: obj.timeout_s ?? 60, raw: null };
+  return { kind: "unknown", raw: JSON.stringify(obj) };
+}
+/* Serialize a draft task's gate into the API `condition` value. undefined for
+   "no gate" so the key is omitted from the JSON body and the backend stores
+   NULL. condRaw (a preserved legacy/unknown gate) is re-emitted verbatim. */
+function schCondBody(tk) {
+  if (tk.condRaw != null) return JSON.parse(tk.condRaw);
+  if (tk.gate === "exit") return { code: tk.gateCode, kind: "exit", task_index: tk.gateTask };
+  if (tk.gate === "signal") return { event: tk.gateEvent, kind: "signal", server_id: tk.gateServer, timeout_s: tk.gateTimeout };
+  return undefined;
+}
+/* Build the API `tasks` array shared by create (POST) and edit (PATCH): one
+   entry per draft task in order, with the canonical `condition` attached when
+   the task has a gate. Edit sends the FULL ordered array in a single atomic
+   PATCH (the backend swaps the chain in one BEGIN IMMEDIATE transaction and
+   rejects invalid batches before any write), so nothing is ever deleted
+   client-side first. */
+function schBuildTasks(draft) {
+  return draft.map((tk, i) => {
+    const body = { action: tk.action, payload: tk.payload, sequence: i + 1 };
+    const cond = schCondBody(tk);
+    if (cond !== undefined) body.condition = cond;
+    return body;
+  });
+}
+/* Client-side mirror of the backend bounds (validate_condition): exit gates
+   must reference an earlier task with an integer code; signal gates need a
+   non-empty event and an integer timeout in 1..=3600. Returns an i18n message
+   (via tr) or null when the gate is valid. */
+function schCondError(tk, ownIndex, tr) {
+  if (tk.condRaw != null) return null;
+  if (tk.gate === "exit") {
+    if (!Number.isInteger(tk.gateTask) || tk.gateTask < 0 || tk.gateTask >= ownIndex) return tr("gate_err_index");
+    if (!Number.isInteger(tk.gateCode)) return tr("gate_err_code");
+    return null;
+  }
+  if (tk.gate === "signal") {
+    if (typeof tk.gateEvent !== "string" || !tk.gateEvent.trim()) return tr("gate_err_event");
+    if (!Number.isInteger(tk.gateTimeout) || tk.gateTimeout < 1 || tk.gateTimeout > 3600) return tr("gate_err_timeout");
+    return null;
+  }
+  return null;
+}
+/* Human-readable gate chip text (1-based task numbers), translated via tr. */
+function gateChipText(cond, tr) {
+  const c = schCondFromValue(cond);
+  if (c.kind === "exit") return tr("gate_after_task").replace("{n}", String(c.taskIndex + 1)).replace("{code}", String(c.code));
+  if (c.kind === "signal") return tr("gate_wait_signal").replace("{event}", c.event).replace("{s}", String(c.timeout));
+  if (c.kind === "unknown") return tr("gate_unknown").replace("{raw}", c.raw);
+  return null;
+}
+function gateChipHtml(cond, tr) {
+  const text = gateChipText(cond, tr);
+  return text ? `<span class="gate-chip">${esc(text)}</span>` : "";
+}
+const mkSchTask = (sid) => ({ action: "restart", payload: "", sequence: 1, gate: "none", gateTask: 0, gateCode: 0, gateEvent: "site.updated", gateTimeout: 60, gateServer: +sid, condRaw: null });
 
 async function renderSchedules(id) {
   $("#tab-body").innerHTML = `<div class="card"><h3>${ic("clock", 15)} ${t("schedules")} <span class="badge">cron</span></h3>
@@ -2011,17 +2702,17 @@ async function schLoad(id) {
     const schs = res.data || [];
     box.innerHTML = schs.length ? `<div class="file-list">${schs.map((s) => `<div class="file-row">
       <span class="f-icon">${ic("clock", 16)}</span>
-      <div class="sch-main"><b>${esc(s.name)}</b><div class="f-meta">${(s.tasks || []).map((tk) => `${esc(tk.action)}${tk.payload ? `: ${esc(tk.payload)}` : ""}`).join(" → ") || "no tasks"}</div></div>
+      <div class="sch-main"><b>${esc(s.name)}</b><div class="f-meta">${(s.tasks || []).map((tk) => `${esc(tk.action)}${tk.payload ? `: ${esc(tk.payload)}` : ""}`).join(" → ") || "no tasks"}</div>${(s.tasks || []).some((tk) => gateChipText(tk.condition, t)) ? `<div class="gate-line">${(s.tasks || []).map((tk) => gateChipHtml(tk.condition, t)).join("")}</div>` : ""}</div>
       <code>${esc(s.cron_expr)}</code>
       <span class="pill ${s.enabled ? "running" : "offline"}"><i></i>${s.enabled ? "on" : "off"}</span>
       <span class="f-meta">next: ${s.next_run_at ? fmtDate(s.next_run_at) : "—"}</span>
       <span class="f-actions">
       <button class="icon-btn sm" title="${s.enabled ? "Pause" : "Enable"}" aria-label="${s.enabled ? "Pause" : "Enable"}" data-act="schToggle" data-sid="${s.id}" data-on="${s.enabled ? "0" : "1"}">${s.enabled ? ic("pause", 14) : ic("play", 14)}</button>
-      <button class="icon-btn sm" title="Run now" aria-label="Run now" data-act="schRun" data-sid="${s.id}">${ic("zap", 14)}</button>
-      <button class="icon-btn sm" title="Edit" aria-label="Edit" data-act="schEdit" data-sid="${s.id}" data-schid="${s.id}" data-server="${id}">${ic("pencil", 14)}</button>
-      <button class="icon-btn sm" title="Run history" aria-label="Run history" data-act="schRuns" data-sid="${s.id}" data-server="${id}">${ic("activity", 14)}</button>
+      <button class="icon-btn sm" title="${t("a_run_now")}" aria-label="${t("a_run_now")}" data-act="schRun" data-sid="${s.id}">${ic("zap", 14)}</button>
+      <button class="icon-btn sm" title="${t("edit")}" aria-label="${t("edit")}" data-act="schEdit" data-sid="${s.id}" data-schid="${s.id}" data-server="${id}">${ic("pencil", 14)}</button>
+      <button class="icon-btn sm" title="${t("a_run_history")}" aria-label="${t("a_run_history")}" data-act="schRuns" data-sid="${s.id}" data-server="${id}">${ic("activity", 14)}</button>
       <button class="icon-btn sm danger" title="${t("delete")}" aria-label="${t("delete")}" data-act="schDel" data-sid="${s.id}">${ic("trash", 14)}</button>
-    </span></div>`).join("")}</div>` : `<div class="empty">${ic("clock", 40)}<p>${t("none")}</p></div>`;
+    </span></div>`).join("")}</div>` : emptyState("clock", t("es_sch_t"), t("es_sch_h"), { act: "schCreate", data: ` data-sid="${id}"`, actLabel: t("create") });
   } catch (e) {
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_schedules")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="schRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
   }
@@ -2029,13 +2720,40 @@ async function schLoad(id) {
 function renderSchTasks() {
   const box = $("#sch-tasks");
   if (!box) return;
-  box.innerHTML = schDraft.length ? schDraft.map((tk, i) => `<div class="sch-task">
-    <select data-sch-task="action" data-idx="${i}" data-act-change="schTaskAction" aria-label="Task action">${SCH_ACTIONS.map((a) => `<option value="${a}"${a === tk.action ? " selected" : ""}>${a}</option>`).join("")}</select>
-    <input data-sch-task="payload" data-idx="${i}" value="${esc(tk.payload)}" placeholder="${tk.action === "command" ? "command to send" : tk.action === "backup" ? "backup name (optional)" : "payload (optional)"}" aria-label="Task payload">
-    <button class="icon-btn sm danger" title="Remove task" aria-label="Remove task" data-act="schTaskDel" data-idx="${i}">${ic("trash", 13)}</button>
-  </div>`).join("") : `<div class="muted">No tasks — add at least one.</div>`;
+  box.innerHTML = schDraft.length ? schDraft.map((tk, i) => {
+    const gateOpt = (v, label) => `<option value="${v}"${tk.gate === v ? " selected" : ""}>${label}</option>`;
+    const prev = i === 0
+      ? `<option value="0" disabled>${esc(t("gate_no_earlier"))}</option>`
+      : Array.from({ length: i }, (_, k) => `<option value="${k}"${+tk.gateTask === k ? " selected" : ""}>${esc(t("gate_task_opt").replace("{n}", String(k + 1)))}</option>`).join("");
+    const exitFields = tk.gate === "exit" ? `
+      <select data-sch-task="gateTask" data-idx="${i}" data-act-change="schTaskGateField" aria-label="${esc(t("gate_previous_task"))}" title="${esc(t("gate_previous_task"))}">${prev}</select>
+      <input data-sch-task="gateCode" data-idx="${i}" type="number" step="1" value="${Number.isNaN(tk.gateCode) ? "" : esc(tk.gateCode)}" placeholder="0" aria-label="${esc(t("gate_expected_code"))}" title="${esc(t("gate_expected_code"))}">` : "";
+    const customEvt = !WH_EVENTS.includes(tk.gateEvent);
+    const signalFields = tk.gate === "signal" ? `
+      <select data-sch-task="gateEvent" data-idx="${i}" data-act-change="schTaskGateField" aria-label="${esc(t("gate_event"))}" title="${esc(t("gate_event"))}">${WH_EVENTS.map((ev) => `<option value="${esc(ev)}"${!customEvt && tk.gateEvent === ev ? " selected" : ""}>${esc(ev)}</option>`).join("")}<option value="__custom"${customEvt ? " selected" : ""}>${esc(t("gate_custom"))}</option></select>
+      ${customEvt ? `<input data-sch-task="gateEventCustom" data-idx="${i}" value="${esc(tk.gateEvent)}" placeholder="${esc(t("gate_custom_ph"))}" aria-label="${esc(t("gate_event"))}">` : ""}
+      <input data-sch-task="gateTimeout" data-idx="${i}" type="number" min="1" max="3600" step="1" value="${Number.isNaN(tk.gateTimeout) ? "" : esc(tk.gateTimeout)}" aria-label="${esc(t("gate_timeout"))}" title="${esc(t("gate_timeout"))}">
+      <span class="sch-gate-lock" title="${esc(t("gate_lock_title"))}">${ic("server", 12)}${esc(t("gate_lock"))}</span>` : "";
+    return `<div class="sch-task">
+      <div class="sch-task-line">
+        <select data-sch-task="action" data-idx="${i}" data-act-change="schTaskAction" aria-label="${esc(t("gate_task_opt").replace("{n}", String(i + 1)))} ${esc(t("gate"))}">${SCH_ACTIONS.map((a) => `<option value="${a}"${a === tk.action ? " selected" : ""}>${a}</option>`).join("")}</select>
+        <input data-sch-task="payload" data-idx="${i}" value="${esc(tk.payload)}" placeholder="${tk.action === "command" ? t("sch_cmd_ph") : tk.action === "backup" ? t("sch_backup_ph") : t("sch_payload_ph")}" aria-label="${t("sch_payload_label")}">
+        <button class="icon-btn sm danger" title="${t("delete")}" aria-label="${t("delete")}" data-act="schTaskDel" data-idx="${i}">${ic("trash", 13)}</button>
+      </div>
+      <div class="sch-gate">
+        <span class="sch-gate-label">${esc(t("gate"))}</span>
+        <select data-sch-task="gate" data-idx="${i}" data-act-change="schTaskGate" aria-label="${esc(t("gate"))}">${gateOpt("none", t("gate_none"))}${gateOpt("exit", t("gate_exit"))}${gateOpt("signal", t("gate_signal"))}</select>
+        ${exitFields}${signalFields}
+      </div>
+    </div>`;
+  }).join("") : `<div class="muted">No tasks — add at least one.</div>`;
 }
-function schTaskAdd() { schDraft.push({ action: "restart", payload: "", sequence: schDraft.length + 1 }); renderSchTasks(); }
+function schTaskAdd() {
+  const sidEl = $('[data-act="schSave"]');
+  schDraft.push(mkSchTask(+((sidEl && sidEl.dataset.sid) || state.server?.id || 0)));
+  schDraft[schDraft.length - 1].sequence = schDraft.length;
+  renderSchTasks();
+}
 function schTaskDel(idx) { schDraft.splice(idx, 1); schDraft.forEach((tk, i) => tk.sequence = i + 1); renderSchTasks(); }
 function schTaskAction(el) {
   const i = +el.dataset.idx;
@@ -2044,19 +2762,43 @@ function schTaskAction(el) {
   const p = document.querySelector(`[data-sch-task="payload"][data-idx="${i}"]`);
   if (p) p.placeholder = schDraft[i].action === "command" ? "command to send" : schDraft[i].action === "backup" ? "backup name (optional)" : "payload (optional)";
 }
+function schTaskGate(el) {
+  const i = +el.dataset.idx;
+  if (!schDraft[i]) return;
+  schDraft[i].gate = el.value;
+  schDraft[i].condRaw = null; // explicit choice replaces a preserved legacy gate
+  renderSchTasks();
+}
+function schTaskGateField(el) {
+  const i = +el.dataset.idx;
+  if (!schDraft[i]) return;
+  if (el.dataset.schTask === "gateTask") schDraft[i].gateTask = +el.value;
+  else if (el.dataset.schTask === "gateEvent" && el.value === "__custom") { schDraft[i].gateEvent = ""; renderSchTasks(); }
+  else if (el.dataset.schTask === "gateEvent") schDraft[i].gateEvent = el.value;
+}
 function schCreate(id) {
-  schDraft = [{ action: "restart", payload: "", sequence: 1 }];
-  schOrig = null;
+  schDraft = [mkSchTask(id)];
   openSchModal(id, null);
 }
 function schEdit(id, schId, serverId) {
   // fetch fresh schedule JSON (list rows carry tasks, but re-fetch is authoritative)
   api(`/servers/${serverId}/schedules`).then((res) => {
     const found = (res.data || []).find((x) => x.id === +schId);
-    if (!found) { toast("Schedule not found", "error"); return; }
-    schDraft = (found.tasks || []).map((tk, i) => ({ action: tk.action, payload: tk.payload || "", sequence: i + 1 }));
-    if (!schDraft.length) schDraft = [{ action: "restart", payload: "", sequence: 1 }];
-    schOrig = found;
+    if (!found) { toast(t("e_sch_not_found"), "error"); return; }
+    const unknown = [];
+    schDraft = (found.tasks || []).map((tk, i) => {
+      const d = mkSchTask(serverId);
+      d.sequence = i + 1;
+      d.action = tk.action;
+      d.payload = tk.payload || "";
+      const c = schCondFromValue(tk.condition);
+      if (c.kind === "exit") { d.gate = "exit"; d.gateTask = c.taskIndex; d.gateCode = c.code; }
+      else if (c.kind === "signal") { d.gate = "signal"; d.gateEvent = c.event; d.gateTimeout = c.timeout; d.gateServer = c.serverId; }
+      else if (c.kind === "unknown") { d.condRaw = c.raw; unknown.push(c.raw); }
+      return d;
+    });
+    if (!schDraft.length) schDraft = [mkSchTask(serverId)];
+    if (unknown.length) toast(t("gate_warn_unknown").replace("{raw}", unknown.join(", ")), "warn");
     openSchModal(serverId, found);
   }).catch((e) => toast(e.message, "error"));
 }
@@ -2064,51 +2806,63 @@ function openSchModal(serverId, sch) {
   const modal = document.createElement("div");
   modal.className = "modal";
   modal.innerHTML = `<div class="modal-card">
-    <div class="modal-head"><b>${ic("clock", 16)} ${sch ? "Edit schedule" : "New schedule"}</b><button class="icon-btn" data-act="closeModal" aria-label="Close">${ic("x", 16)}</button></div>
+    <div class="modal-head"><b>${ic("clock", 16)} ${sch ? t("edit_schedule") : t("new_schedule")}</b><button class="icon-btn" data-act="closeModal" aria-label="${t("close")}">${ic("x", 16)}</button></div>
     <div class="modal-pad">
-      <div class="field"><label>Name</label><input id="sch-name" value="${sch ? esc(sch.name) : ""}" placeholder="daily restart"></div>
-      <div class="field"><label>Cron <code>sec min hour day month weekday</code></label><input id="sch-cron" value="${sch ? esc(sch.cron_expr) : "0 0 4 * * *"}" placeholder="0 0 4 * * *" spellcheck="false"></div>
+      <div class="field"><label>${t("name")}</label><input id="sch-name" value="${sch ? esc(sch.name) : ""}" placeholder="${t("sch_name_ph")}"></div>
+      <div class="field"><label>${t("sch_cron_label")} <code>sec min hour day month weekday</code></label><input id="sch-cron" value="${sch ? esc(sch.cron_expr) : "0 0 4 * * *"}" placeholder="0 0 4 * * *" spellcheck="false"></div>
       <div class="field-row mb-16">
-        <label class="check-row"><input type="checkbox" id="sch-enabled" ${!sch || sch.enabled ? "checked" : ""}><span class="check-box">${ic("check", 12)}</span>Enabled</label>
-        <label class="muted text-sm">retries <input id="sch-retries" type="number" min="0" value="${sch ? (sch.max_retries ?? 0) : 0}"></label>
-        <label class="muted text-sm">backoff s <input id="sch-backoff" type="number" min="0" value="${sch ? (sch.retry_backoff_s ?? 30) : 30}"></label>
+        <label class="check-row"><input type="checkbox" id="sch-enabled" ${!sch || sch.enabled ? "checked" : ""}><span class="check-box">${ic("check", 12)}</span>${t("enabled")}</label>
+        <label class="muted text-sm">${t("retries")} <input id="sch-retries" type="number" min="0" value="${sch ? (sch.max_retries ?? 0) : 0}"></label>
+        <label class="muted text-sm">${t("sch_backoff")} <input id="sch-backoff" type="number" min="0" value="${sch ? (sch.retry_backoff_s ?? 30) : 30}"></label>
       </div>
-      <div class="field"><label>Tasks</label><div id="sch-tasks"></div>
-        <button class="btn sm ghost" data-act="schTaskAdd">${ic("plus", 12)}<span>Add task</span></button>
+      <div class="field"><label>${t("sch_tasks")}</label><div id="sch-tasks"></div>
+        <button class="btn sm ghost" data-act="schTaskAdd">${ic("plus", 12)}<span>${t("add_task")}</span></button>
       </div>
     </div>
-    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button><button class="btn primary" data-act="schSave" data-sid="${serverId}" data-schid="${sch ? sch.id : 0}">${ic("check", 14)}<span>${sch ? "Save changes" : t("create")}</span></button></div>
+    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button><button class="btn primary" data-act="schSave" data-sid="${serverId}" data-schid="${sch ? sch.id : 0}">${ic("check", 14)}<span>${sch ? t("save_changes") : t("create")}</span></button></div>
   </div>`;
   document.body.appendChild(modal);
   renderSchTasks();
   $("#sch-tasks").addEventListener("input", (e) => {
     const el = e.target;
-    if (el.dataset.schTask === "payload") { const i = +el.dataset.idx; if (schDraft[i]) schDraft[i].payload = el.value; }
+    const i = +el.dataset.idx;
+    if (!schDraft[i]) return;
+    const f = el.dataset.schTask;
+    if (f === "payload") schDraft[i].payload = el.value;
+    else if (f === "gateCode") schDraft[i].gateCode = el.value === "" ? NaN : +el.value;
+    else if (f === "gateTimeout") schDraft[i].gateTimeout = el.value === "" ? NaN : +el.value;
+    else if (f === "gateEventCustom") schDraft[i].gateEvent = el.value;
   });
   $("#sch-name").focus();
 }
 async function schSave(serverId, schId, btn) {
   const name = $("#sch-name").value.trim();
   const cron = $("#sch-cron").value.trim();
-  if (!name || !cron) { toast("Name and cron are required", "error"); return; }
-  if (!schDraft.length) { toast("Add at least one task", "error"); return; }
+  if (!name || !cron) { toast(t("e_name_cron"), "error"); return; }
+  if (!schDraft.length) { toast(t("e_one_task"), "error"); return; }
+  // client-side mirror of the backend gate bounds — fail before any write
+  for (let i = 0; i < schDraft.length; i++) {
+    const err = schCondError(schDraft[i], i, t);
+    if (err) { toast(`${t("gate")} ${i + 1}: ${err}`, "error"); return; }
+  }
   const max_retries = Math.max(0, parseInt($("#sch-retries").value || "0", 10));
   const retry_backoff_s = Math.max(0, parseInt($("#sch-backoff").value || "30", 10));
   const enabled = $("#sch-enabled").checked;
-  const sid = state.server?.id || serverId;
   try {
     if (schId) {
-      await api(`/schedules/${schId}`, { method: "PATCH", body: JSON.stringify({ name, cron_expr: cron, enabled, max_retries, retry_backoff_s }) });
-      // tasks have no update endpoint — drop existing, re-add the draft
-      for (const tk of (schOrig?.tasks || [])) await api(`/schedules/${schId}/tasks/${tk.id}`, { method: "DELETE" });
-      for (let i = 0; i < schDraft.length; i++) await api(`/schedules/${schId}/tasks`, { method: "POST", body: JSON.stringify({ action: schDraft[i].action, payload: schDraft[i].payload, sequence: i + 1 }) });
+      // One atomic PATCH: the backend validates the whole task batch up front
+      // and swaps the chain in a single BEGIN IMMEDIATE transaction. A rejected
+      // gate (e.g. unknown kind) fails before any write and leaves the existing
+      // tasks untouched — nothing is deleted client-side first, so the draft
+      // survives and the backend error is shown as-is.
+      await api(`/schedules/${schId}`, { method: "PATCH", body: JSON.stringify({ name, cron_expr: cron, enabled, max_retries, retry_backoff_s, tasks: schBuildTasks(schDraft) }) });
     } else {
-      await api(`/servers/${serverId}/schedules`, { method: "POST", body: JSON.stringify({ name, cron_expr: cron, enabled, max_retries, retry_backoff_s, tasks: schDraft.map((tk, i) => ({ action: tk.action, payload: tk.payload, sequence: i + 1 })) }) });
+      await api(`/servers/${serverId}/schedules`, { method: "POST", body: JSON.stringify({ name, cron_expr: cron, enabled, max_retries, retry_backoff_s, tasks: schBuildTasks(schDraft) }) });
     }
     const m = btn ? btn.closest(".modal") : null;
     (m || $(".modal"))?.remove();
     toast(schId ? t("saved") : t("created"), "success");
-    await schLoad(sid);
+    await schLoad(serverId);
   } catch (e) { toast(e.message, "error"); }
 }
 async function schRuns(serverId, schId) {
@@ -2117,21 +2871,161 @@ async function schRuns(serverId, schId) {
   modal.innerHTML = `<div class="modal-card big"><div class="modal-head"><b>${ic("clock", 15)} Run history</b><button class="icon-btn" data-act="closeModal" aria-label="Close">${ic("x", 16)}</button></div><div id="sch-runs"><div class="empty">${ic("clock", 40)}<p>${t("loading")}</p></div></div></div>`;
   document.body.appendChild(modal);
   try {
-    const res = await api(`/servers/${serverId}/schedules/${schId}/runs`);
-    const rows = res.data || [];
+    const [rres, sres] = await Promise.all([api(`/servers/${serverId}/schedules/${schId}/runs`), api(`/servers/${serverId}/schedules`)]);
+    const sch = (sres.data || []).find((x) => x.id === +schId);
+    const gates = (sch?.tasks || []).map((tk) => gateChipHtml(tk.condition, t)).filter(Boolean);
+    const rows = rres.data || [];
     const box = $("#sch-runs");
     const pill = (st) => st === "success" ? "running" : st === "failed" ? "error" : "warn";
-    box.innerHTML = rows.length ? `<div class="file-list">${rows.map((r) => `<div class="file-row">
+    box.innerHTML = (gates.length ? `<div class="gate-line mb-8">${gates.join("")}</div>` : "") + (rows.length ? `<div class="file-list">${rows.map((r) => `<div class="file-row">
       <span class="f-icon">${ic("zap", 14)}</span>
       <div class="sch-main"><b>${fmtDate(r.triggered_at)}</b><div class="f-meta">attempt ${r.attempt}${r.finished_at ? ` · finished ${fmtDate(r.finished_at)}` : ""}</div></div>
       <span class="pill ${pill(r.status)}"><i></i>${esc(r.status)}</span>
       ${r.log ? `<div class="sch-run-log" title="${esc(r.log)}">${esc(r.log.slice(0, 160))}</div>` : ""}
-    </div>`).join("")}</div>` : `<div class="empty">${ic("clock", 40)}<p>No runs yet</p></div>`;
+    </div>`).join("")}</div>` : emptyState("clock", t("es_runs_t"), t("es_runs_h")));
   } catch (e) { $("#sch-runs").innerHTML = `<div class="empty">${ic("alert", 40)}<p>${esc(e.message)}</p></div>`; }
 }
 async function schToggle(id, on) { try { await api(`/schedules/${id}/toggle/${on}`, { method: "POST" }); await schLoad(state.server?.id); } catch (e) { toast(e.message, "error"); } }
-async function schRun(id) { try { await api(`/schedules/${id}/run`, { method: "POST" }); toast("Triggered", "success"); } catch (e) { toast(e.message, "error"); } }
+async function schRun(id) { try { await api(`/schedules/${id}/run`, { method: "POST" }); toast(t("t_triggered"), "success"); } catch (e) { toast(e.message, "error"); } }
 async function schDel(id) { if (!await vpConfirm(t("confirm_delete"))) return; try { await api(`/schedules/${id}`, { method: "DELETE" }); await schLoad(state.server?.id); } catch (e) { toast(e.message, "error"); } }
+/* ---------- watchers ---------- */
+// Per-server console watchers: log-pattern rules that fire an action on match.
+// Original angle vs a plain rule list: each row surfaces live-fire telemetry
+// (trigger count + relative last-fired) so operators see which rules are hot.
+let watcherDraft = null;
+async function renderWatchers(id) {
+  $("#tab-body").innerHTML = `<div class="card"><h3>${ic("bell", 15)} ${t("watchers")} <span class="badge">${t("watchers_badge")}</span></h3>
+    <div class="row mb-12"><button class="btn primary" data-act="watcherCreate" data-sid="${id}">${ic("plus", 14)}<span>${t("create")}</span></button><span class="muted text-sm">${t("watchers_hint")}</span></div>
+    <div id="watcher-list"><div class="empty">${ic("bell", 40)}<p>${t("loading")}</p></div></div>
+  </div>`;
+  await watcherLoad(id);
+}
+async function watcherLoad(id) {
+  const box = $("#watcher-list");
+  if (!box) return;
+  try {
+    const res = await api(`/servers/${id}/console/watchers`);
+    const ws = res.data || [];
+    if (!ws.length) { box.innerHTML = `<div class="empty">${ic("bell", 40)}<p>${t("watchers_empty")}</p></div>`; return; }
+    box.innerHTML = `<div class="file-list">${ws.map((w) => watcherRow(id, w)).join("")}</div>`;
+  } catch (e) { box.innerHTML = `<div class="empty">${ic("bell", 40)}<p>${esc(e.message)}</p></div>`; }
+}
+function watcherRow(id, w) {
+  const enc = encodeURIComponent(JSON.stringify(w));
+  const act = watcherActionLabel(w);
+  const fired = w.last_fired_at
+    ? `<span class="wt-fired">${ic("activity", 12)} ${esc(t("watcher_fired").replace("{n}", w.trigger_count).replace("{ago}", fmtDate(w.last_fired_at)))}</span>`
+    : `<span class="muted text-sm">${t("watcher_never")}</span>`;
+  return `<div class="file-row watcher-row${w.enabled ? "" : " off"}">
+    <span class="f-icon">${ic(w.is_regex ? "code" : "search", 16)}</span>
+    <div class="wt-main"><b>${esc(w.name)}</b>
+      <div class="f-meta"><code>${esc(w.pattern)}</code> <span class="sep">→</span> <span class="pill plain">${esc(act)}</span></div>
+      <div class="f-meta">${fired}${w.cooldown_secs > 0 ? ` <span class="muted text-sm">${ic("clock", 12)} ${w.cooldown_secs}s</span>` : ""}</div>
+    </div>
+    <span class="f-actions">
+      <button class="icon-btn sm" title="${w.enabled ? t("pause") : t("enable")}" aria-label="${w.enabled ? t("pause") : t("enable")}" data-act="watcherToggle" data-sid="${id}" data-w="${enc}">${w.enabled ? ic("pause", 14) : ic("play", 14)}</button>
+      <button class="icon-btn sm" title="${t("edit")}" aria-label="${t("edit")}" data-act="watcherEdit" data-sid="${id}" data-w="${enc}">${ic("edit", 14)}</button>
+      <button class="icon-btn sm danger" title="${t("delete")}" aria-label="${t("delete")}" data-act="watcherDel" data-sid="${id}" data-wid="${w.id}" data-name="${esc(w.name)}">${ic("x", 14)}</button>
+    </span>
+  </div>`;
+}
+function watcherActionLabel(w) {
+  if (w.action === "notify") return `${t("wt_notify")}: ${w.action_payload || "info"}`;
+  if (w.action === "command") return `${t("wt_command")}: ${w.action_payload}`;
+  return t(w.action === "restart" ? "wt_restart" : "wt_stop");
+}
+function openWatcherModal(serverId, w) {
+  watcherDraft = w ? { ...w } : { action: "notify", is_regex: false, action_payload: "info", cooldown_secs: 0, enabled: true };
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `<div class="modal-card">
+    <div class="modal-head"><b>${ic("bell", 15)} ${w ? t("watcher_edit") : t("watcher_new")}</b><button class="icon-btn" data-act="closeModal">${ic("x", 16)}</button></div>
+    <div class="modal-pad">
+      <div class="field"><label>${t("name")}</label><input id="wt-name" autocomplete="off" value="${w ? esc(w.name) : ""}" placeholder="${t("watcher_name_ph")}"></div>
+      <div class="field"><label>${t("watcher_pattern")}</label><input id="wt-pattern" autocomplete="off" value="${w ? esc(w.pattern) : ""}" placeholder="${t("watcher_pattern_ph")}"></div>
+      <div class="field"><label class="check"><input id="wt-regex" type="checkbox"${w && w.is_regex ? " checked" : ""}> ${t("watcher_regex")}</label></div>
+      <div class="field"><label>${t("watcher_action")}</label>
+        <select id="wt-action" data-act="watcherActionChange" data-act-change>
+          <option value="notify"${watcherDraft.action === "notify" ? " selected" : ""}>${t("wt_notify")}</option>
+          <option value="command"${watcherDraft.action === "command" ? " selected" : ""}>${t("wt_command")}</option>
+          <option value="restart"${watcherDraft.action === "restart" ? " selected" : ""}>${t("wt_restart")}</option>
+          <option value="stop"${watcherDraft.action === "stop" ? " selected" : ""}>${t("wt_stop")}</option>
+        </select>
+      </div>
+      <div class="field" id="wt-payload-field">${watcherPayloadField(watcherDraft)}</div>
+      <div class="field"><label>${t("watcher_cooldown")}</label><input id="wt-cooldown" type="number" min="0" value="${w ? (w.cooldown_secs || 0) : 0}"><span class="muted text-sm">${t("watcher_cooldown_hint")}</span></div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button><button class="btn primary" data-act="watcherSave" data-sid="${serverId}" data-wid="${w ? w.id : 0}">${ic("check", 14)}<span>${w ? t("save_changes") : t("create")}</span></button></div>
+  </div>`;
+  document.body.appendChild(modal);
+  const inp = modal.querySelector("#wt-name");
+  if (inp) inp.focus();
+}
+function watcherPayloadField(w) {
+  if (w.action === "notify") {
+    const lv = w.action_payload || "info";
+    return `<label>${t("watcher_level")}</label><select id="wt-payload">
+      ${["info", "warn", "error"].map((l) => `<option value="${l}"${lv === l ? " selected" : ""}>${t("lvl_" + l)}</option>`).join("")}
+    </select>`;
+  }
+  if (w.action === "command") {
+    return `<label>${t("watcher_command")}</label><input id="wt-payload" autocomplete="off" value="${esc(w.action_payload || "")}" placeholder="${t("watcher_command_ph")}">`;
+  }
+  return `<p class="muted text-sm">${t("watcher_no_payload")}</p>`;
+}
+function watcherActionChange(el) {
+  if (!watcherDraft) return;
+  // Preserve the typed payload per-action so switching back restores it.
+  const cur = document.querySelector("#wt-payload");
+  if (cur) watcherDraft.action_payload = cur.value;
+  watcherDraft.action = el.value;
+  if (el.value === "notify" && !["info", "warn", "error"].includes(watcherDraft.action_payload)) watcherDraft.action_payload = "info";
+  const field = document.querySelector("#wt-payload-field");
+  if (field) field.innerHTML = watcherPayloadField(watcherDraft);
+}
+async function watcherSave(serverId, watcherId, btn) {
+  const name = $("#wt-name").value.trim();
+  const pattern = $("#wt-pattern").value;
+  if (!name || !pattern.trim()) { toast(t("e_watcher_fields"), "error"); return; }
+  const is_regex = $("#wt-regex").checked;
+  const action = $("#wt-action").value;
+  const payEl = $("#wt-payload");
+  const action_payload = payEl ? payEl.value : "";
+  if (action === "command" && !action_payload.trim()) { toast(t("e_watcher_command"), "error"); return; }
+  const cooldown_secs = Math.max(0, parseInt($("#wt-cooldown").value || "0", 10));
+  const body = { name, pattern, is_regex, action, action_payload, cooldown_secs };
+  if (btn) btn.disabled = true;
+  try {
+    if (watcherId) {
+      body.enabled = watcherDraft ? watcherDraft.enabled !== false : true;
+      await api(`/servers/${serverId}/console/watchers/${watcherId}`, { method: "PUT", body: JSON.stringify(body) });
+    } else {
+      await api(`/servers/${serverId}/console/watchers`, { method: "POST", body: JSON.stringify(body) });
+    }
+    const m = btn ? btn.closest(".modal") : null;
+    (m || $(".modal"))?.remove();
+    await watcherLoad(serverId);
+  } catch (e) { toast(e.message, "error"); if (btn) btn.disabled = false; }
+}
+async function watcherToggle(serverId, w) {
+  // No dedicated toggle route: re-send the full record with enabled flipped.
+  const body = {
+    name: w.name, pattern: w.pattern, is_regex: w.is_regex,
+    action: w.action, action_payload: w.action_payload,
+    cooldown_secs: w.cooldown_secs, enabled: !w.enabled,
+  };
+  try {
+    await api(`/servers/${serverId}/console/watchers/${w.id}`, { method: "PUT", body: JSON.stringify(body) });
+    await watcherLoad(serverId);
+  } catch (e) { toast(e.message, "error"); }
+}
+async function watcherDel(serverId, watcherId, name) {
+  if (!await vpConfirm(t("watcher_confirm_del").replace("{name}", name || ""))) return;
+  try {
+    await api(`/servers/${serverId}/console/watchers/${watcherId}`, { method: "DELETE" });
+    await watcherLoad(serverId);
+  } catch (e) { toast(e.message, "error"); }
+}
 /* ---------- sites ---------- */
 async function renderSites(id) {
   $("#tab-body").innerHTML = `<div class="card"><h3>${ic("globe", 15)} ${t("sites")} <span class="badge">vhost</span></h3>
@@ -2148,7 +3042,7 @@ async function siteLoad(id) {
       <button class="icon-btn sm" title="${s.enabled ? "Disable" : "Enable"}" aria-label="${s.enabled ? "Disable" : "Enable"}" data-act="siteToggle" data-sid="${id}" data-site="${s.id}">${s.enabled ? ic("pause", 14) : ic("play", 14)}</button>
       <button class="icon-btn sm" title="Edit" aria-label="Edit" data-act="siteOpen" data-sid="${id}" data-site="${s.id}">${ic("pencil", 14)}</button>
       <button class="icon-btn sm danger" title="Delete" aria-label="Delete" data-act="siteDel" data-sid="${id}" data-site="${s.id}" data-domain="${esc(s.domain)}">${ic("trash", 14)}</button>
-    </span></div>`).join("")}</div>` : `<div class="empty">${ic("globe", 40)}<p>${t("none")}</p></div>`;
+    </span></div>`).join("")}</div>` : emptyState("globe", t("es_site_t"), t("es_site_h"), { act: "siteOpen", data: ` data-sid="${id}"`, actLabel: t("create") });
   } catch (e) {
     const box = $("#site-list");
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_sites")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="siteRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
@@ -2184,7 +3078,7 @@ function siteType() {
 }
 async function siteSave(id, siteId, btn) {
   const domain = $("#site-domain").value.trim();
-  if (!domain) { toast("Domain is required", "error"); return; }
+  if (!domain) { toast(t("e_domain_req"), "error"); return; }
   const proxy = $("#site-type").value === "proxy";
   const target = $("#site-target").value.trim();
   const port = $("#site-port").value.trim();
@@ -2211,7 +3105,7 @@ async function siteDel(id, siteId, domain) { if (!await vpConfirm(`${t("confirm_
 
 /* ---------- allocations ---------- */
 async function renderAllocations(id) {
-  $("#tab-body").innerHTML = `<div class="card"><h3>${ic("link", 15)} Endpoints <span class="badge">ports</span></h3>
+  $("#tab-body").innerHTML = `<div class="card"><h3>${ic("link", 15)} Network <span class="badge">ports</span></h3>
     <div class="row alloc-row">
       <input id="alloc-port" inputmode="numeric" placeholder="port, e.g. 20001">
       <input id="alloc-notes" placeholder="notes (optional)">
@@ -2243,7 +3137,7 @@ async function allocLoad(id) {
           ${a.is_primary ? "" : `<button class="icon-btn sm danger" title="Detach" aria-label="Detach" data-act="allocDel" data-sid="${id}" data-aid="${esc(a.id)}" data-port="${esc(a.port)}">${ic("trash", 14)}</button>`}
         </span>
       </div>`).join("")}</div>`
-      : `<div class="empty">${ic("link", 40)}<p>No endpoints yet — add the first port above; it becomes the primary endpoint.</p></div>`;
+      : emptyState("link", t("es_alloc_t"), t("es_alloc_h"));
   } catch (e) {
     const box = $("#alloc-list");
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_allocations")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="allocRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
@@ -2252,7 +3146,7 @@ async function allocLoad(id) {
 
 async function allocAdd(id) {
   const port = $("#alloc-port").value.trim();
-  if (!port || !/^\d{1,5}$/.test(port)) { toast("Enter a valid port (1-65535)", "error"); return; }
+  if (!port || !/^\d{1,5}$/.test(port)) { toast(t("e_valid_port"), "error"); return; }
   const notes = $("#alloc-notes").value.trim();
   try {
     await api(`/servers/${id}/allocations`, { method: "POST", body: JSON.stringify({ port: +port, notes }) });
@@ -2266,7 +3160,7 @@ async function allocAdd(id) {
 async function allocPromote(id, aid) {
   try {
     await api(`/servers/${id}/allocations/${aid}`, { method: "PATCH", body: JSON.stringify({ primary: true }) });
-    toast("Primary updated", "success");
+    toast(t("t_primary_updated"), "success");
     await allocLoad(id);
   } catch (e) { toast(e.message, "error"); }
 }
@@ -2276,7 +3170,7 @@ async function allocNotes(id, aid, port) {
   if (notes === null || notes === false) return; // cancelled
   try {
     await api(`/servers/${id}/allocations/${aid}`, { method: "PATCH", body: JSON.stringify({ notes }) });
-    toast("Saved", "success");
+    toast(t("saved"), "success");
     await allocLoad(id);
   } catch (e) { toast(e.message, "error"); }
 }
@@ -2285,7 +3179,7 @@ async function allocDel(id, aid, port) {
   if (!await vpConfirm(`Detach port ${port}?`, "Detach endpoint")) return;
   try {
     await api(`/servers/${id}/allocations/${aid}`, { method: "DELETE" });
-    toast("Detached", "success");
+    toast(t("t_detached"), "success");
     await allocLoad(id);
   } catch (e) { toast(e.message, "error"); }
 }
@@ -2429,7 +3323,11 @@ function renderProfile() {
         </div>
         <div class="card"><h3>${ic("shield", 15)} ${t("twofa")}</h3>
           <p class="muted mb-10">${u.twofa_enabled ? "Enabled" : "Disabled"}</p>
-          <button class="btn" data-act="setup2fa">${ic("shield", 14)}<span>${t("enable_2fa")}</span></button>
+          ${u.twofa_enabled ? `
+          <div class="row gap-8">
+            <button class="btn" data-act="regenerateRecovery" title="${esc(t("recovery_codes"))}">${ic("refresh_ccw", 14)}<span>${t("regenerate")}</span></button>
+            <button class="btn danger-ghost" data-act="disable2faPrompt">${ic("shield", 14)}<span>${t("disable_2fa")}</span></button>
+          </div>` : `<button class="btn" data-act="setup2fa">${ic("shield", 14)}<span>${t("enable_2fa")}</span></button>`}
         </div>
       </div>
     </div>`);
@@ -2455,7 +3353,7 @@ async function saveProfile() {
   }
 }
 async function savePass() {
-  try { await api("/password", { method: "POST", body: JSON.stringify({ current: $("#p-cur").value, new: $("#p-new").value }) }); toast("Password changed", "success"); $("#p-cur").value = ""; $("#p-new").value = ""; }
+  try { await api("/password", { method: "POST", body: JSON.stringify({ current: $("#p-cur").value, new: $("#p-new").value }) }); toast(t("t_pass_changed"), "success"); $("#p-cur").value = ""; $("#p-new").value = ""; }
   catch (e) { toast(e.message, "error"); }
 }
 async function setup2fa() {
@@ -2467,18 +3365,128 @@ async function setup2fa() {
       <div class="modal-head"><b>${ic("shield", 15)} ${t("enable_2fa")}</b><button class="icon-btn" data-act="closeModal">${ic("x", 16)}</button></div>
       <div class="modal-center">
         <img class="totp-qr" src="data:image/png;base64,${res.qr_b64}" alt="Authenticator QR code">
-        <p class="muted m-10-0">Scan with Google Authenticator / Authy</p>
-        <p class="muted">Secret: <code>${esc(res.secret)}</code></p>
+        <p class="muted m-10-0">${t("twofa_scan")}</p>
+        <p class="muted">${t("twofa_secret")}: <code>${esc(res.secret)}</code></p>
       </div>
-      <div class="field"><label>6-digit code</label><input id="2fa-code" inputmode="numeric" maxlength="6"></div>
+      <div class="field"><label>${t("totp_code")}</label><input id="2fa-code" inputmode="numeric" maxlength="6"></div>
       <div class="modal-foot"><button class="btn primary" data-act="confirm2fa" data-secret="${esc(res.secret)}">${t("verify")} →</button></div>
     </div>`;
     document.body.appendChild(modal);
   } catch (e) { toast(e.message, "error"); }
 }
 async function confirm2fa(secret, btn) {
-  try { await api("/2fa/confirm", { method: "POST", body: JSON.stringify({ secret, code: $("#2fa-code").value }) }); toast("2FA enabled", "success"); const m = btn ? btn.closest(".modal") : null; (m || $(".modal"))?.remove(); renderProfile(); }
-  catch (e) { toast(e.message, "error"); }
+  try {
+    const res = await api("/2fa/confirm", { method: "POST", body: JSON.stringify({ secret, code: $("#2fa-code").value }) });
+    toast("2FA enabled", "success");
+    const m = btn ? btn.closest(".modal") : null;
+    (m || $(".modal"))?.remove();
+    renderProfile();
+    if (Array.isArray(res.recovery_codes) && res.recovery_codes.length) showRecoveryCodes(res.recovery_codes);
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/* Recovery-code set shown exactly once: copy/download to keep, then
+   acknowledge. The plaintext exists only in this modal. */
+function showRecoveryCodes(codes) {
+  const list = codes.map((c) => `<li class="recovery-code">${esc(c.slice(0, 5))}-${esc(c.slice(5))}</li>`).join("");
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "rec-title");
+  modal.innerHTML = `<div class="modal-card">
+    <div class="modal-head"><b id="rec-title">${ic("shield", 15)} ${t("recovery_codes")}</b><button class="icon-btn" data-act="closeModal" aria-label="${esc(t("close"))}">${ic("x", 16)}</button></div>
+    <div class="modal-pad">
+      <p class="muted">${esc(t("recovery_codes_hint"))}</p>
+      <ul class="recovery-list" data-codes="${esc(codes.join(","))}">${list}</ul>
+      <div class="row gap-8 mt-10">
+        <button class="btn" data-act="recoveryCopy">${ic("copy", 14)}<span>${t("copy")}</span></button>
+        <button class="btn" data-act="recoveryDownload">${ic("download", 14)}<span>${t("download")}</span></button>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn primary" data-act="closeModal">${t("recovery_confirm")}</button></div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
+async function recoveryCopy(el) {
+  const codes = el.closest(".modal-card").querySelector(".recovery-list").dataset.codes;
+  const p = navigator.clipboard?.writeText(codes.split(",").join("\n")); if (p) p.catch(() => {});
+  toast(t("copy") + " ✓", "success");
+}
+
+async function recoveryDownload(el) {
+  const codes = el.closest(".modal-card").querySelector(".recovery-list").dataset.codes;
+  const blob = new Blob([`VoltPanel recovery codes — ${new Date().toISOString()}\n\n` + codes.split(",").join("\n") + "\n"], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "voltpanel-recovery-codes.txt";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+/* Rotate the recovery-code set: re-auth with password + live TOTP, then the
+   old codes are revoked and the new set is shown once. */
+async function regenerateRecovery() {
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.innerHTML = `<div class="modal-card">
+    <div class="modal-head"><b>${ic("refresh_ccw", 15)} ${t("regenerate")} — ${t("recovery_codes")}</b><button class="icon-btn" data-act="closeModal" aria-label="${esc(t("close"))}">${ic("x", 16)}</button></div>
+    <div class="modal-pad">
+      <p class="muted">${esc(t("rec_reauth_sub"))}</p>
+      <div class="field"><label>${t("password")}</label><div class="field-input">${ic("lock", 14)}<input type="password" id="rr-pass" autocomplete="current-password"></div></div>
+      <div class="field"><label>${t("totp_code")}</label><input id="rr-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button><button class="btn primary" data-act="regenerateRecoveryDo">${t("regenerate")}</button></div>
+  </div>`;
+  document.body.appendChild(modal);
+  $("#rr-pass").focus();
+}
+
+async function regenerateRecoveryDo(btn) {
+  try {
+    const res = await api("/2fa/recovery/regenerate", {
+      method: "POST",
+      body: JSON.stringify({ password: $("#rr-pass").value, code: $("#rr-code").value }),
+    });
+    const m = btn ? btn.closest(".modal") : null;
+    (m || $(".modal"))?.remove();
+    showRecoveryCodes(res.recovery_codes);
+    toast(t("recovery_saved"), "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/* Disabling 2FA requires the live TOTP code; recovery codes are deleted. */
+async function disable2faPrompt() {
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.innerHTML = `<div class="modal-card">
+    <div class="modal-head"><b>${ic("shield", 15)} ${t("disable_2fa")}</b><button class="icon-btn" data-act="closeModal" aria-label="${esc(t("close"))}">${ic("x", 16)}</button></div>
+    <div class="modal-pad">
+      <p class="muted">${t("disable_2fa_body")}</p>
+      <div class="field"><label>${t("totp_code")}</label><input id="d2fa-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button><button class="btn primary" data-act="disable2faDo">${t("disable_2fa")}</button></div>
+  </div>`;
+  document.body.appendChild(modal);
+  $("#d2fa-code").focus();
+}
+
+async function disable2faDo(btn) {
+  try {
+    await api("/2fa/disable", { method: "POST", body: JSON.stringify({ code: $("#d2fa-code").value }) });
+    const m = btn ? btn.closest(".modal") : null;
+    (m || $(".modal"))?.remove();
+    const u = await api("/me");
+    state.user = u;
+    toast("2FA disabled", "success");
+    renderProfile();
+  } catch (e) { toast(e.message, "error"); }
 }
 
 /* ============================================================
@@ -2502,8 +3510,8 @@ const WH_EVENTS = ["server.start", "server.stop", "server.crash", "server.instal
 const WH_PILL = { delivered: "success", failed: "error", pending: "info" };
 
 async function renderSettings() {
-  const webhooks = state.user.root_admin ? `<div class="card"><div class="card-head"><h3>${ic("send", 15)} Webhooks <span class="badge">admin</span></h3><button class="btn primary sm" data-act="whNew">${ic("plus", 14)}<span>New webhook</span></button></div><div id="wh-list"><div class="empty">${ic("send", 40)}<p>${t("loading")}</p></div></div></div>` : "";
-  const notifCard = state.user.root_admin ? `<div class="card"><h3>${ic("bell", 15)} ${t("notifications")}</h3><div id="notif-list"><div class="empty">${ic("bell", 40)}<p>${t("loading")}</p></div></div></div>` : "";
+  const webhooks = state.user.root_admin ? `<div class="card"><div class="card-head"><h3>${ic("send", 15)} ${t("webhooks")} <span class="badge">admin</span></h3><button class="btn primary sm" data-act="whNew">${ic("plus", 14)}<span>${t("new_webhook")}</span></button></div><div id="wh-list"><div class="empty">${ic("send", 40)}<p>${t("loading")}</p></div></div></div>` : "";
+  const notifCard = state.user.root_admin ? `<div class="card"><div class="card-head"><h3>${ic("bell", 15)} ${t("notifications")}</h3><button class="btn sm ghost" data-act="notifClear">${ic("trash", 12)}<span>${t("notif_clear_all")}</span></button></div><div id="notif-list"><div class="empty">${ic("bell", 40)}<p>${t("loading")}</p></div></div></div>` : "";
   document.getElementById("app").innerHTML = shell("settings", t("settings"), `
     <div class="grid cols-2">
       <div class="card"><div class="card-head"><h3>${ic("key", 15)} ${t("api_keys")}</h3><button class="btn primary sm" data-act="keyNew">${ic("plus", 14)}<span>${t("create")}</span></button></div><div id="keys-list"><div class="empty">${ic("key", 40)}<p>${t("loading")}</p></div></div></div>
@@ -2531,8 +3539,8 @@ function keyNew() {
   $("#k-name").focus();
 }
 async function keyCreate(btn) {
-  const name = $("#k-name").value.trim(); if (!name) return;
-  if (!$("#k-all").checked && !$$(".cap-grid input:checked").length) { toast("Select at least one capability (or Full access)", "warn"); return; }
+  const name = $("#k-name").value.trim(); if (!name) { toast(t("e_required_name"), "warn"); return; }
+  if (!$("#k-all").checked && !$$(".cap-grid input:checked").length) { toast(t("e_pick_cap"), "warn"); return; }
   const capabilities = $("#k-all").checked ? ["*"] : $$(".cap-grid input:checked").map((cb) => cb.value);
   const server_ids = $("#k-server").value ? [+$("#k-server").value] : [];
   const ttl_days = $("#k-ttl").value ? +$("#k-ttl").value : null;
@@ -2541,9 +3549,9 @@ async function keyCreate(btn) {
     const m = btn ? btn.closest(".modal") : null;
     (m || $(".modal"))?.remove(); keyLoad();
     const modal = document.createElement("div"); modal.className = "modal";
-    modal.innerHTML = `<div class="modal-card"><div class="modal-head"><b>${ic("key", 15)} Token created</b><button class="icon-btn" data-act="closeModal">${ic("x", 16)}</button></div>
-      <div class="modal-pad-v"><p class="muted">Shown once only — copy it now, it cannot be recovered:</p><div class="code-block" id="k-token">${esc(res.token)}</div><button class="btn primary block" data-act="copyText" data-text="${esc(res.token)}">${ic("copy", 14)}<span>Copy token</span></button></div>
-      <div class="modal-foot"><button class="btn ghost" data-act="closeModal">Done</button></div></div>`;
+    modal.innerHTML = `<div class="modal-card"><div class="modal-head"><b>${ic("key", 15)} ${t("token_created")}</b><button class="icon-btn" data-act="closeModal">${ic("x", 16)}</button></div>
+      <div class="modal-pad-v"><p class="muted">${t("token_once")}</p><div class="code-block" id="k-token">${esc(res.token)}</div><button class="btn primary block" data-act="copyText" data-text="${esc(res.token)}">${ic("copy", 14)}<span>${t("copy_token")}</span></button></div>
+      <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("done")}</button></div></div>`;
     document.body.appendChild(modal);
   } catch (e) { toast(e.message, "error"); }
 }
@@ -2563,15 +3571,15 @@ async function keyLoad() {
         </div>
         <span class="f-actions">${k.revoked ? "" : `<button class="icon-btn sm" title="Revoke key" data-act="keyRevoke" data-id="${k.id}">${ic("pause", 14)}</button>`}<button class="icon-btn sm danger" title="${t("delete")}" data-act="keyDel" data-id="${k.id}">${ic("trash", 14)}</button></span>
         <div class="cred-side"><span class="muted">last used ${k.last_used ? esc(fmtDate(k.last_used)) : "never"}</span></div>
-      </div>`; }).join("")}</div>` : `<div class="empty">${ic("key", 40)}<p>${t("none")}</p></div>`;
+      </div>`; }).join("")}</div>` : emptyState("key", t("es_key_t"), t("es_key_h"), { act: "keyNew", actLabel: t("create") });
   } catch (e) {
     const el = $("#keys-list");
     if (el) el.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_keys")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="keyRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
   }
 }
 async function keyRevoke(id) {
-  if (!await vpConfirm("Revoke this key? It stops working immediately, but stays listed for audit.")) return;
-  try { await api(`/keys/${id}/revoke`, { method: "POST" }); toast("Key revoked", "success"); keyLoad(); } catch (e) { toast(e.message, "error"); }
+  if (!await vpConfirm(t("confirm_revoke_key"))) return;
+  try { await api(`/keys/${id}/revoke`, { method: "POST" }); toast(t("t_key_revoked"), "success"); keyLoad(); } catch (e) { toast(e.message, "error"); }
 }
 async function keyDel(id) { if (!await vpConfirm(t("confirm_delete"))) return; try { await api(`/keys/${id}`, { method: "DELETE" }); keyLoad(); } catch (e) { toast(e.message, "error"); } }
 
@@ -2599,8 +3607,8 @@ function whForm(w) {
 function whNew() { whForm(null); }
 function whEdit(id) { api(`/webhooks/${id}`).then((r) => whForm(r.data)).catch((e) => toast(e.message, "error")); }
 async function whSave(id, btn) {
-  const name = $("#wh-name").value.trim(); if (!name) return;
-  const url = $("#wh-url").value.trim(); if (!url) return;
+  const name = $("#wh-name").value.trim(); if (!name) { toast(t("e_required_name"), "warn"); return; }
+  const url = $("#wh-url").value.trim(); if (!url) { toast(t("e_required_url"), "warn"); return; }
   const events = $("#wh-all").checked ? ["*"] : $$(".cap-grid input:checked").map((cb) => cb.value);
   const server_id = $("#wh-server").value ? +$("#wh-server").value : null;
   const body = { name, url, events, server_id };
@@ -2610,15 +3618,15 @@ async function whSave(id, btn) {
     if (id) {
       await api(`/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(body) });
       const m = btn ? btn.closest(".modal") : null;
-      (m || $(".modal"))?.remove(); whLoad(); toast("Webhook updated", "success");
+      (m || $(".modal"))?.remove(); whLoad(); toast(t("t_wh_updated"), "success");
     } else {
       const res = await api("/webhooks", { method: "POST", body: JSON.stringify(body) });
       const m = btn ? btn.closest(".modal") : null;
       (m || $(".modal"))?.remove(); whLoad();
       const modal = document.createElement("div"); modal.className = "modal";
-      modal.innerHTML = `<div class="modal-card"><div class="modal-head"><b>${ic("send", 15)} Webhook created</b><button class="icon-btn" data-act="closeModal">${ic("x", 16)}</button></div>
-        <div class="modal-pad-v"><p class="muted">Signing secret — shown once only, copy it now:</p><div class="code-block" id="wh-secret-out">${esc(res.data?.secret || "")}</div><button class="btn primary block" data-act="copyText" data-text="${esc(res.data?.secret || "")}">${ic("copy", 14)}<span>Copy secret</span></button></div>
-        <div class="modal-foot"><button class="btn ghost" data-act="closeModal">Done</button></div></div>`;
+      modal.innerHTML = `<div class="modal-card"><div class="modal-head"><b>${ic("send", 15)} ${t("webhook_created")}</b><button class="icon-btn" data-act="closeModal">${ic("x", 16)}</button></div>
+        <div class="modal-pad-v"><p class="muted">${t("wh_secret_once")}</p><div class="code-block" id="wh-secret-out">${esc(res.data?.secret || "")}</div><button class="btn primary block" data-act="copyText" data-text="${esc(res.data?.secret || "")}">${ic("copy", 14)}<span>${t("copy_secret")}</span></button></div>
+        <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("done")}</button></div></div>`;
       document.body.appendChild(modal);
     }
   } catch (e) { toast(e.message, "error"); }
@@ -2643,7 +3651,7 @@ async function whDeliveries(id) {
         <div class="cred-title"><code>${esc(d.event)}</code><span class="pill ${WH_PILL[d.status] || ""}"><i></i>${esc(d.status)}</span>${d.response_code ? `<span class="badge">HTTP ${d.response_code}</span>` : ""}<span class="badge">attempt ${d.attempt}</span></div>
         <div class="cred-meta"><span class="muted">created ${fmtDate(d.created_at)}${d.delivered_at ? ` · delivered ${esc(fmtDate(d.delivered_at))}` : ""}${d.next_attempt_at ? ` · retry ${esc(new Date(d.next_attempt_at * 1000).toLocaleString())}` : ""}</span></div>
         ${d.error ? `<div class="cred-error">${esc(d.error)}</div>` : ""}
-      </div></div>`).join("")}</div>` : `<div class="empty">${ic("activity", 40)}<p>No deliveries yet</p></div>`;
+      </div></div>`).join("")}</div>` : emptyState("activity", t("es_deliv_t"), t("es_deliv_h"));
   } catch (e) { $("#wh-deliveries").innerHTML = `<div class="empty">${ic("alert", 40)}<p>${esc(e.message)}</p></div>`; }
 }
 async function whLoad() {
@@ -2666,24 +3674,150 @@ async function whLoad() {
           <button class="icon-btn sm" title="${t("edit")}" data-act="whEdit" data-id="${w.id}">${ic("pencil", 14)}</button>
           <button class="icon-btn sm danger" title="${t("delete")}" data-act="whDel" data-id="${w.id}">${ic("trash", 14)}</button>
         </span>
-      </div>`; }).join("")}</div>` : `<div class="empty">${ic("send", 40)}<p>No webhooks yet</p></div>`;
+      </div>`; }).join("")}</div>` : emptyState("send", t("es_wh_t"), t("es_wh_h"), { act: "whNew", actLabel: t("create") });
   } catch (e) {
     const el = $("#wh-list");
     if (el) el.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_webhooks")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="whRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
   }
 }
+/* ---------- Notification center ---------- */
+const NOTIF_CLS = { info: "info", warn: "warn", error: "error", success: "success" };
+const notifCls = (l) => NOTIF_CLS[String(l ?? "")] || "info";
+
 async function notifLoad() {
   const box = $("#notif-list");
   if (!box) return;
   try {
     const res = await api("/notifications");
-    const notifs = (res.data || []).slice(-30).reverse();
-    box.innerHTML = notifs.length ? `<div class="file-list">${notifs.map((n) => `<div class="file-row"><span class="pill ${statusCls(n.level)}"><i></i>${esc(n.level)}</span><b>${esc(n.title)}</b><span class="f-meta">${fmtDate(n.created_at)}</span></div>`).join("")}</div>` : `<div class="empty">${ic("bell", 40)}<p>${t("none")}</p></div>`;
+    const data = res.data || {};
+    const notifs = (data.entries || []).slice(-30).reverse();
+    box.innerHTML = notifs.length ? `<div class="file-list">${notifs.map((n) => `<div class="file-row"><span class="pill ${notifCls(n.level)}"><i></i>${esc(n.level)}</span><b>${esc(n.title)}</b><span class="f-meta">${fmtDate(n.created_at)}</span></div>`).join("")}</div>` : emptyState("bell", t("es_notif_t"), t("es_notif_h"));
   } catch (e) {
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_notifications")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="notifRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
     toast(e.message, "error");
   }
 }
+
+/* Open one SSE feed for root admins. EventSource reconnects on its own, so
+   a panel restart or dropped connection resumes the live feed without any
+   polling; each reconnect re-syncs the snapshot. */
+function notifInit() {
+  if (!state.user?.root_admin || state.notifEs) return;
+  const es = new EventSource(API + "/notifications/stream");
+  state.notifEs = es;
+  es.onopen = () => notifRefresh();
+  es.addEventListener("notification", (ev) => {
+    let n;
+    try { n = JSON.parse(ev.data); } catch (e) { return; }
+    state.notifs = [n, ...state.notifs].slice(0, 200);
+    if (!n.read_at) state.unread++;
+    updateNotifBadge();
+    notifRender();
+  });
+  // EventSource reconnects automatically on error; nothing to do here.
+}
+
+function notifTeardown() {
+  if (state.notifEs) { state.notifEs.close(); state.notifEs = null; }
+  state.notifs = [];
+  state.unread = 0;
+}
+
+async function notifRefresh() {
+  try {
+    const res = await api("/notifications");
+    const data = res.data || {};
+    state.notifs = (data.entries || []).slice(-200).reverse();
+    state.unread = data.unread_count || 0;
+  } catch (e) { /* keep the last known state; SSE will resync on reconnect */ }
+  updateNotifBadge();
+  notifRender();
+}
+
+function updateNotifBadge() {
+  const badge = $(".notif-badge");
+  if (!badge) return;
+  const n = state.unread;
+  badge.hidden = !n;
+  badge.textContent = n > 99 ? "99+" : n;
+}
+
+function notifRender() {
+  const list = $("#notif-panel-list");
+  if (!list || list.closest("#notif-panel").hidden) return;
+  const items = state.notifs.slice(0, 30);
+  const head = $(".notif-unread");
+  if (head) head.textContent = state.unread ? t("notif_unread").replace("{n}", state.unread) : t("notif_all_read");
+  if (!items.length) {
+    list.innerHTML = `<div class="empty notif-empty">${ic("bell", 32)}<p>${t("notif_empty")}</p></div>`;
+    return;
+  }
+  list.innerHTML = items.map((n) => `<button class="notif-item${n.read_at ? "" : " unread"}" data-act="notifItem" data-id="${n.id}" data-link="${esc(n.link || "")}">
+    <span class="pill ${notifCls(n.level)} plain"><i></i>${esc(n.level)}</span>
+    <span class="notif-text"><b>${esc(n.title)}</b><span class="muted">${esc(n.message)}</span></span>
+    <span class="notif-time">${fmtDate(n.created_at)}</span>
+    ${n.link ? ic("chevron_right", 13) : ""}
+  </button>`).join("");
+}
+
+function notifToggle() {
+  const panel = $("#notif-panel");
+  if (!panel) return;
+  const opening = panel.hidden;
+  panel.hidden = !opening;
+  $(".notif-bell")?.setAttribute("aria-expanded", String(opening));
+  if (opening) {
+    notifRender();
+    panel.querySelector("button, a, [tabindex]")?.focus?.();
+  }
+}
+
+async function notifItem(el) {
+  const id = +el.dataset.id;
+  const link = el.dataset.link;
+  const n = state.notifs.find((x) => x.id === id);
+  if (n && !n.read_at) {
+    n.read_at = new Date().toISOString();
+    state.unread = Math.max(0, state.unread - 1);
+    updateNotifBadge();
+    notifRender();
+    api(`/notifications/${id}/read`, { method: "POST" }).catch(() => {});
+  }
+  if (link) {
+    const panel = $("#notif-panel");
+    if (panel) { panel.hidden = true; $(".notif-bell")?.setAttribute("aria-expanded", "false"); }
+    location.hash = link;
+  }
+}
+
+async function notifClear() {
+  try {
+    await api("/notifications/clear", { method: "POST" });
+    state.notifs = [];
+    state.unread = 0;
+    updateNotifBadge();
+    notifRender();
+    notifLoad();
+    toast(t("notif_cleared"), "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/* Esc closes the drawer; a click outside the bell/drawer closes it too. */
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const panel = $("#notif-panel");
+  if (panel && !panel.hidden) {
+    panel.hidden = true;
+    $(".notif-bell")?.setAttribute("aria-expanded", "false");
+  }
+});
+document.addEventListener("click", (e) => {
+  const panel = $("#notif-panel");
+  if (panel && !panel.hidden && !e.target.closest(".notif-wrap")) {
+    panel.hidden = true;
+    $(".notif-bell")?.setAttribute("aria-expanded", "false");
+  }
+}, true);
 
 /* ============================================================
    ADMIN
@@ -2700,39 +3834,179 @@ function renderAdmin(tab) {
       document.getElementById("app").innerHTML = shell("squads", t("squads"), `<div id="admin-body"><div class="empty">${ic("users", 40)}<p>${t("loading")}</p></div></div>`);
       return adminSquadDetail(detailId);
     }
-    toast("Control Center only", "error"); renderDashboard(); return;
+    toast(t("control_center_only"), "error"); renderDashboard(); return;
   }
   const active = tab === "nodes" ? "fabric" : tab === "blueprints" ? "blueprints" : tab === "system" ? "observatory" : tab === "squads" ? "squads" : "workspaces";
-  document.getElementById("app").innerHTML = shell(active, "Control Center", `<div class="tabs">
-    <a href="#/admin/servers" class="${tab === "servers" ? "active" : ""}">${ic("server", 14)} Workspaces</a>
-    <a href="#/admin/users" class="${tab === "users" ? "active" : ""}">${ic("users", 14)} Team</a>
+  document.getElementById("app").innerHTML = shell(active, t("control_center"), `<div class="tabs">
+    <a href="#/admin/servers" class="${tab === "servers" ? "active" : ""}">${ic("server", 14)} ${t("servers")}</a>
+    <a href="#/admin/users" class="${tab === "users" ? "active" : ""}">${ic("users", 14)} ${t("users")}</a>
     <a href="#/admin/squads" class="${tab === "squads" ? "active" : ""}">${ic("users", 14)} ${t("squads")}</a>
-    <a href="#/admin/blueprints" class="${tab === "blueprints" ? "active" : ""}">${ic("box", 14)} Blueprint Studio</a>
-    <a href="#/admin/nodes" class="${tab === "nodes" ? "active" : ""}">${ic("globe", 14)} Fabric</a>
-    <a href="#/admin/system" class="${tab === "system" ? "active" : ""}">${ic("gauge", 14)} Observatory</a>
+    <a href="#/admin/blueprints" class="${tab === "blueprints" ? "active" : ""}">${ic("box", 14)} ${t("blueprints")}</a>
+    <a href="#/admin/nodes" class="${tab === "nodes" ? "active" : ""}">${ic("globe", 14)} ${t("node")}</a>
+    <a href="#/admin/system" class="${tab === "system" ? "active" : ""}">${ic("gauge", 14)} ${t("system")}</a>
   </div><div id="admin-body"><div class="empty">${ic("shield", 40)}<p>${t("loading")}</p></div></div>`);
   const render = { servers: adminServers, users: adminUsers, squads: adminSquads, blueprints: adminBlueprints, nodes: adminNodes, system: adminSystem };
   if (tab === "users" && detailId) return adminUserDetail(detailId);
   if (tab === "squads" && detailId) return adminSquadDetail(detailId);
+  if (tab === "nodes" && detailId) return adminNodeDetail(detailId);
   (render[tab] || adminServers)();
 }
 
+/* Fleet workspaces admin table — row selection + floating bulk bar.
+   Bulk verbs reuse the per-server power / suspend endpoints; the run is
+   bounded to 4 concurrent so a large fleet never hammers the panel. Per-row
+   busy/ok/fail marks render live; no bulk delete this iteration. */
+let fleetSort = { key: "name", dir: 1 };
+let fleetRows = [];
+const fleetSel = new Set();
+const fleetBusy = new Set();
+let fleetRunning = false;
+
 async function adminServers() {
-  $("#admin-body").innerHTML = `<div class="card"><div class="card-head"><h3>${t("all_servers")}</h3><button class="btn primary sm" data-act="adminNewServer">${ic("plus", 14)}<span>${t("create_server")}</span></button></div><div id="a-servers"></div></div>`;
+  const bulkBtn = (key, icon, label, danger) => `<button class="btn sm${danger ? " danger" : ""}" data-act="fleetBulk" data-key="${key}"${fleetRunning ? " disabled" : ""}>${ic(icon, 13)}<span>${esc(label)}</span></button>`;
+  $("#admin-body").innerHTML = `<div class="card"><div class="card-head"><h3>${t("all_servers")}</h3><button class="btn primary sm" data-act="adminNewServer">${ic("plus", 14)}<span>${t("create_server")}</span></button></div><div id="a-servers"></div></div>
+    <div class="bulk-bar" id="bulk-bar" hidden>
+      <span class="bulk-count" id="bulk-count"></span>
+      <div class="bulk-actions">
+        ${bulkBtn("start", "play", t("bulk_start"))}
+        ${bulkBtn("stop", "stop", t("bulk_stop"), true)}
+        ${bulkBtn("restart", "refresh", t("bulk_restart"))}
+        ${bulkBtn("suspend", "pause", t("bulk_suspend"))}
+        ${bulkBtn("unsuspend", "play", t("bulk_unsuspend"))}
+      </div>
+      <button class="icon-btn sm" data-act="fleetSelClear" title="${esc(t("sel_clear"))}" aria-label="${esc(t("sel_clear"))}">${ic("x", 15)}</button>
+    </div>`;
   try {
     const res = await api("/servers/all");
-    const servers = res.data || [];
-    $("#a-servers").innerHTML = `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>ID</th><th>${t("name")}</th><th>${t("owner")}</th><th>${t("status")}</th><th>RAM</th><th>Disk</th><th></th></tr></thead><tbody>` +
-      servers.map((s) => `<tr>
-        <td>${s.id}</td><td><a href="#/server/${s.id}" class="link-strong">${esc(s.name)}</a></td>
-        <td>#${esc(s.user_id)}</td><td><span class="pill ${statusCls(s.status)}"><i></i>${esc(s.status)}</span></td>
-        <td>${s.memory_mb} MB</td><td>${s.disk_mb} MB</td>
-        <td><div class="actions"><button class="icon-btn sm" data-act="adminToggleSuspend" data-id="${s.id}" data-on="${s.suspended ? "0" : "1"}">${s.suspended ? ic("play", 15) : ic("pause", 15)}</button><button class="icon-btn sm danger" data-act="adminDelServer" data-id="${s.id}" data-name="${esc(s.name)}">${ic("trash", 15)}</button></div></td>
-      </tr>`).join("") + `</tbody></table></div>`;
+    fleetRenderTable(res.data || []);
   } catch (e) {
     const box = $("#a-servers");
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_servers")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="adminServersRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
   }
+  fleetUpdateBar();
+}
+
+function fleetRenderTable(servers) {
+  const box = $("#a-servers");
+  if (!box) return;
+  fleetRows = servers;
+  fleetSel.forEach((id) => { if (!servers.some((s) => s.id === id)) fleetSel.delete(id); });
+  const dir = fleetSort.dir;
+  const sorted = servers.slice().sort((a, b) => {
+    if (fleetSort.key === "memory_mb" || fleetSort.key === "disk_mb") return dir * ((+a[fleetSort.key] || 0) - (+b[fleetSort.key] || 0));
+    return dir * String(a[fleetSort.key] ?? "").localeCompare(String(b[fleetSort.key] ?? ""));
+  });
+  const arrow = (key) => fleetSort.key === key ? (dir > 0 ? " ↑" : " ↓") : "";
+  const aria = (key) => fleetSort.key === key ? (dir > 0 ? "ascending" : "descending") : "none";
+  const th = (key, label) => `<th data-act="fleetSort" data-key="${key}" tabindex="0" aria-sort="${aria(key)}" title="${esc(t(key === "status" ? "status" : key === "memory_mb" ? "ram" : key === "disk_mb" ? "disk" : "name"))}">${label}${arrow(key)}</th>`;
+  box.innerHTML = `<div class="tbl-wrap"><table class="tbl fleet-tbl"><thead><tr>
+    <th class="col-id">ID</th>
+    <th class="col-check"><label class="f-check"><input type="checkbox" id="fleet-all" data-act="fleetSelAll" data-act-change aria-label="${esc(t("sel_all"))}"><span></span></label></th>
+    ${th("name", t("name"))}${th("status", t("status"))}${th("memory_mb", "RAM")}${th("disk_mb", "Disk")}
+    <th class="col-owner">${t("owner")}</th><th class="col-actions"></th>
+  </tr></thead><tbody>` +
+    sorted.map((s) => `<tr class="${fleetSel.has(s.id) ? "fleet-sel" : ""}${fleetBusy.has(s.id) ? " fleet-busy" : ""}">
+      <td class="col-id">${s.id}</td>
+      <td class="col-check"><label class="f-check"><input type="checkbox" data-act="fleetToggleSel" data-act-change data-id="${s.id}" aria-label="${esc(s.name)}"${fleetSel.has(s.id) ? " checked" : ""}${fleetBusy.has(s.id) ? " disabled" : ""}><span></span></label></td>
+      <td><a href="#/server/${s.id}" class="link-strong">${esc(s.name)}</a></td>
+      <td><span class="pill ${statusCls(s.status)}"><i></i>${esc(s.status)}</span></td>
+      <td>${s.memory_mb} MB</td><td>${s.disk_mb} MB</td>
+      <td class="col-owner">#${esc(s.user_id)}</td>
+      <td class="col-actions" data-row="${s.id}"><span class="fleet-result" hidden></span>
+        <div class="actions"><button class="icon-btn sm" data-act="adminToggleSuspend" data-id="${s.id}" data-on="${s.suspended ? "0" : "1"}"${fleetBusy.has(s.id) ? " disabled" : ""}>${s.suspended ? ic("play", 15) : ic("pause", 15)}</button><button class="icon-btn sm danger" data-act="adminDelServer" data-id="${s.id}" data-name="${esc(s.name)}"${fleetBusy.has(s.id) ? " disabled" : ""}>${ic("trash", 15)}</button></div>
+      </td>
+    </tr>`).join("") + `</tbody></table></div>`;
+  const all = $("#fleet-all");
+  if (all) { all.checked = servers.length > 0 && fleetSel.size === servers.length; all.indeterminate = fleetSel.size > 0 && fleetSel.size < servers.length; }
+  /* Sortable headers are keyboard-activatable: Enter/Space on a focused
+     header toggles the same sort the click applies. */
+  $$(".fleet-tbl th[data-act='fleetSort']", box).forEach((th) => {
+    th.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fleetSortToggle(th.dataset.key); }
+    });
+  });
+  fleetUpdateBar();
+}
+
+function fleetSetRowResult(id, state) {
+  const td = $(`[data-row="${id}"]`);
+  const box = td?.querySelector(".fleet-result");
+  if (!box) return;
+  if (state === "busy") { box.hidden = false; box.className = "fleet-result busy"; box.innerHTML = ic("activity", 14); }
+  else if (state === "ok") { box.hidden = false; box.className = "fleet-result ok"; box.innerHTML = ic("check", 14); }
+  else if (state === "fail") { box.hidden = false; box.className = "fleet-result fail"; box.innerHTML = ic("xcircle", 14); }
+}
+
+function fleetUpdateBar() {
+  const bar = $("#bulk-bar");
+  if (!bar) return;
+  const n = fleetSel.size;
+  $("#bulk-count").textContent = t("sel_n").replace("{n}", n);
+  bar.hidden = n === 0;
+  $$("#bulk-bar [data-act='fleetBulk']").forEach((b) => { b.disabled = fleetRunning || n === 0; });
+}
+
+function fleetToggleSel(cb) {
+  const id = +cb.dataset.id;
+  if (cb.checked) fleetSel.add(id); else fleetSel.delete(id);
+  cb.closest("tr")?.classList.toggle("fleet-sel", cb.checked);
+  const all = $("#fleet-all");
+  if (all) { all.checked = fleetSel.size > 0 && fleetSel.size === fleetRows.length; all.indeterminate = fleetSel.size > 0 && fleetSel.size < fleetRows.length; }
+  fleetUpdateBar();
+}
+
+function fleetSelAll(cb) {
+  if (cb.checked) fleetRows.forEach((s) => fleetSel.add(s.id));
+  else fleetSel.clear();
+  $$(".fleet-tbl tbody input[data-act='fleetToggleSel']").forEach((c) => { c.checked = cb.checked; c.closest("tr")?.classList.toggle("fleet-sel", cb.checked); });
+  fleetUpdateBar();
+}
+
+function fleetSelClear() {
+  fleetSel.clear();
+  $$(".fleet-tbl tbody input[data-act='fleetToggleSel']").forEach((c) => { c.checked = false; c.closest("tr")?.classList.toggle("fleet-sel", false); });
+  const all = $("#fleet-all"); if (all) { all.checked = false; all.indeterminate = false; }
+  fleetUpdateBar();
+}
+
+function fleetSortToggle(key) {
+  if (fleetSort.key === key) fleetSort.dir *= -1;
+  else { fleetSort.key = key; fleetSort.dir = 1; }
+  fleetRenderTable(fleetRows);
+}
+
+/* Bounded-concurrency bulk runner: at most 4 in flight. `stop` is
+   destructive (running processes die) so it asks first; the other verbs are
+   reversible/stateful and run immediately. */
+async function fleetBulk(verb) {
+  if (fleetRunning) return;
+  const ids = [...fleetSel];
+  if (!ids.length) return;
+  if (verb === "stop" && !await vpConfirm(t("bulk_confirm_stop").replace("{n}", ids.length), t("bulk_stop"))) return;
+  fleetRunning = true;
+  fleetUpdateBar();
+  const queue = ids.slice();
+  let ok = 0, fail = 0;
+  const worker = async () => {
+    while (queue.length) {
+      const id = queue.shift();
+      fleetBusy.add(id);
+      fleetSetRowResult(id, "busy");
+      try {
+        if (verb === "suspend" || verb === "unsuspend") await api(`/servers/${id}/${verb}`, { method: "POST" });
+        else await api(`/servers/${id}/power`, { method: "POST", body: JSON.stringify({ action: verb }) });
+        ok++; fleetSetRowResult(id, "ok");
+      } catch (e) { fail++; fleetSetRowResult(id, "fail"); }
+      finally { fleetBusy.delete(id); }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
+  toast(t("bulk_done").replace("{ok}", ok).replace("{fail}", fail), fail ? "warn" : "success");
+  fleetRunning = false;
+  fleetSel.clear();
+  fleetUpdateBar();
+  await new Promise((r) => setTimeout(r, 900)); // let the per-row marks be read
+  if (document.getElementById("admin-body")) adminServers();
 }
 async function adminToggleSuspend(id, on) { try { await api(`/servers/${id}/${on ? "suspend" : "unsuspend"}`, { method: "POST" }); adminServers(); } catch (e) { toast(e.message, "error"); } }
 async function adminDelServer(id, name) {
@@ -2790,9 +4064,9 @@ function prValidateVar(v, value) {
     if (k.max !== undefined && k.max !== null && n > k.max) return `${v.env_var} must be at most ${k.max}`;
   } else if (k.type === "path") {
     if (k.max_len && trimmed.length > k.max_len) return `${v.env_var} is too long`;
-    if (trimmed.startsWith("/")) return `${v.env_var} must be a workspace-relative path`;
+    if (trimmed.startsWith("/")) return `${v.env_var} must be a server-relative path`;
     if (trimmed.startsWith("~")) return `${v.env_var} must not reference a home directory`;
-    if (trimmed.split("/").includes("..")) return `${v.env_var} must not traverse outside the workspace`;
+    if (trimmed.split("/").includes("..")) return `${v.env_var} must not traverse outside the server`;
   } else if (k.type === "url") {
     let u;
     try { u = new URL(trimmed); } catch (e) { return `${v.env_var} must be an http(s) URL`; }
@@ -2835,24 +4109,46 @@ function prRenderLaunch(template, vars, workspace, secrets) {
 }
 async function adminNewServer() {
   try {
-    const [usersRes, blueprintsRes] = await Promise.all([api("/admin/users"), api("/blueprints")]);
+    const [usersRes, blueprintsRes, nodesRes] = await Promise.all([
+      api("/admin/users"),
+      api("/blueprints"),
+      api("/nodes").catch(() => ({ data: [] })),
+    ]);
     const users = usersRes.data || usersRes;
     const blueprints = blueprintsRes.data || blueprintsRes;
+    const nodes = (nodesRes.data || nodesRes || []).filter((n) => n && n.name);
     if (!blueprints.length) { toast(t("runway_need_blueprint"), "warn"); return; }
+    if (!nodes.length) { toast(t("place_need_node"), "warn"); return; }
     prBlueprint = blueprints[0];
+    // Placement options: auto-fit + one per enrolled agent, each showing
+    // live free-capacity so the pick is informed, not a bare name dropdown.
+    const fmtMb = (mb) => (mb >= 1024 ? (mb / 1024).toFixed(mb % 1024 ? 1 : 0) + " GB" : mb + " MB");
+    const nodeOption = (n) => {
+      const free = t("place_free", { mem: fmtMb(Math.max(0, +n.available_memory_mb || 0)), disk: fmtMb(Math.max(0, +n.available_disk_mb || 0)) });
+      const dot = n.online ? "●" : "○";
+      return `<option value="node:${esc(n.name)}"${n.online ? "" : " disabled"}>${dot} ${esc(n.name)}${n.location ? " — " + esc(n.location) : ""} · ${n.online ? esc(free) : esc(t("place_node_offline"))}</option>`;
+    };
+    const placeOptions = `<option value="auto">${t("place_auto")}</option>`
+      + nodes.map(nodeOption).join("");
     const modal = document.createElement("div"); modal.className = "modal";
     modal.innerHTML = `<div class="modal-card big provisioner-modal">
       <div class="modal-head"><b>${ic("server", 15)} ${t("create_server")} <span class="badge">VoltSpec</span></b><button class="icon-btn" data-act="closeModal" aria-label="${t("close")}">${ic("x", 16)}</button></div>
       <div class="provisioner">
         <div class="provisioner-pane">
-          <div class="field"><label for="pr-name">${t("name")}</label><input id="pr-name" placeholder="my-workspace" autocomplete="off"></div>
+          <div class="field"><label for="pr-name">${t("name")}</label><input id="pr-name" placeholder="my-server" autocomplete="off"></div>
           <div class="field"><label for="pr-user">${t("owner")}</label><select id="pr-user">${users.map((u) => `<option value="${u.id}">${esc(u.username)} (#${u.id})</option>`).join("")}</select></div>
           <div class="field"><label for="pr-blueprint">${t("runway_blueprint")}</label><select id="pr-blueprint">${blueprints.map((b) => `<option value="${b.id}">${esc(b.name)} — ${esc(b.category)}</option>`).join("")}</select></div>
+          <div class="field"><label for="pr-place">${ic("globe", 13)} ${t("place_label")}</label><select id="pr-place">${placeOptions}</select><small id="pr-place-hint" class="muted">${t("place_hint_auto")}</small></div>
+          <div class="grid cols-2 pr-auto-hints" id="pr-auto-hints" hidden>
+            <div class="field"><label for="pr-tags">${t("place_tags")}</label><input id="pr-tags" placeholder="${t("place_tags_ph")}" autocomplete="off"></div>
+            <div class="field"><label for="pr-loc">${t("place_location")}</label><input id="pr-loc" placeholder="${t("place_location_ph")}" autocomplete="off"></div>
+          </div>
           <div id="pr-vars"></div>
-          <div class="grid cols-3">
+          <div class="grid cols-4">
             <div class="field"><label for="pr-mem">RAM (MB)</label><input id="pr-mem" type="number" min="64" value="1024"></div>
             <div class="field"><label for="pr-disk">Disk (MB)</label><input id="pr-disk" type="number" min="128" value="8192"></div>
             <div class="field"><label for="pr-cpu">CPU %</label><input id="pr-cpu" type="number" min="1" max="100" value="100"></div>
+            <div class="field"><label for="pr-net">Max network (Mb/s) <small>0 = unlimited</small></label><input id="pr-net" type="number" min="0" value="0" placeholder="0"></div>
           </div>
           <div class="field"><label for="pr-port">Endpoint port <small>${t("runway_port_hint")}</small></label><div class="field-input">${ic("link", 14)}<input id="pr-port" type="number" min="1" max="65535" placeholder="auto"></div></div>
           <label class="check-row"><input type="checkbox" id="pr-start"><span class="check-box">${ic("check", 13, 2.4)}</span><span>${t("runway_start_on_create")}</span></label>
@@ -2906,6 +4202,33 @@ async function adminNewServer() {
       const mem = Math.max(0, +$("#pr-mem").value || 0);
       const disk = Math.max(0, +$("#pr-disk").value || 0);
       const cpu = Math.max(0, +$("#pr-cpu").value || 0);
+      const net = Math.max(0, +$("#pr-net").value || 0);
+      // Placement: resolve the chosen target, reveal auto hints, and warn in
+      // the preview when a named agent can't fit the requested size.
+      const place = $("#pr-place")?.value || "auto";
+      const isAuto = place === "auto";
+      const autoBox = $("#pr-auto-hints");
+      if (autoBox) autoBox.hidden = !isAuto;
+      let placeTargetLabel = t("place_auto");
+      let placeWarn = "";
+      if (isAuto) {
+        const tags = ($("#pr-tags")?.value || "").split(",").map((s) => s.trim()).filter(Boolean);
+        const loc = ($("#pr-loc")?.value || "").trim().toLowerCase();
+        const pool = nodes.filter((n) =>
+          (!loc || (n.location || "").toLowerCase() === loc) &&
+          tags.every((tag) => (n.tags || []).includes(tag)));
+        placeTargetLabel = t("place_auto");
+        placeWarn = pool.length ? t("place_auto_pool", { n: pool.length }) : t("place_auto_none");
+      } else if (place.startsWith("node:")) {
+        const nn = place.slice(5);
+        const node = nodes.find((n) => n.name === nn);
+        placeTargetLabel = nn;
+        if (node && ((+node.available_memory_mb || 0) < mem || (+node.available_disk_mb || 0) < disk)) {
+          placeWarn = t("place_no_room", { node: nn });
+        }
+      }
+      const placeHint = $("#pr-place-hint");
+      if (placeHint) placeHint.textContent = isAuto ? t("place_hint_auto") : "";
       const portRaw = $("#pr-port").value.trim();
       let port = null;
       if (portRaw) {
@@ -2915,15 +4238,18 @@ async function adminNewServer() {
       const startup = b?.startup || "";
       const r = startup ? prRenderLaunch(startup, vars, { name, port: port === null ? "" : String(port), memory_mb: mem, disk_mb: disk, cpu_percent: cpu }, secrets) : null;
       $("#pr-launch").innerHTML = r ? r.html : `<span class="muted">${t("runway_no_launch")}</span>`;
-      const renderProblems = r ? r.problems : [];
+      const renderProblems = (r ? r.problems : []).slice();
+      if (placeWarn) renderProblems.push(placeWarn);
       if (renderProblems.length) {
         $("#pr-problems").hidden = false;
         $("#pr-problems").innerHTML = renderProblems.map((p) => `<div class="pr-problem warn">${ic("alert", 12)}${esc(p)}</div>`).join("");
       } else { $("#pr-problems").hidden = true; $("#pr-problems").innerHTML = ""; }
       $("#pr-summary").innerHTML = `
+        <div class="metric-line"><span>${t("place_target")}</span><b>${esc(placeTargetLabel)}</b></div>
         <div class="metric-line"><span>${t("ram")}</span><b>${mem} MB</b></div>
         <div class="metric-line"><span>${t("disk")}</span><b>${disk} MB</b></div>
         <div class="metric-line"><span>${t("cpu")}</span><b>${cpu}%</b></div>
+        <div class="metric-line"><span>Network</span><b>${net ? net + " Mb/s" : "unlimited"}</b></div>
         <div class="metric-line"><span>Runtime</span><b>${esc(b?.runtime_hint || "native")}</b></div>`;
       $("#pr-ports").innerHTML = port === null
         ? `<span class="allocation-chip muted">${ic("link", 12)}no endpoint yet</span>`
@@ -2941,8 +4267,8 @@ async function adminNewServer() {
       renderVars();
       prRefresh();
     });
-    modal.addEventListener("input", (e) => { if (e.target.closest("#pr-vars, #pr-name, #pr-port, #pr-mem, #pr-disk, #pr-cpu")) prRefresh(); });
-    modal.addEventListener("change", (e) => { if (e.target.closest("#pr-vars, #pr-blueprint, #pr-start")) prRefresh(); });
+    modal.addEventListener("input", (e) => { if (e.target.closest("#pr-vars, #pr-name, #pr-port, #pr-mem, #pr-disk, #pr-cpu, #pr-net, #pr-tags, #pr-loc")) prRefresh(); });
+    modal.addEventListener("change", (e) => { if (e.target.closest("#pr-vars, #pr-blueprint, #pr-start, #pr-place")) prRefresh(); });
     renderVars();
     prRefresh();
   } catch (e) { toast(e.message, "error"); }
@@ -2959,9 +4285,21 @@ async function adminCreateServer(btn) {
       memory_mb: +$("#pr-mem").value,
       disk_mb: +$("#pr-disk").value,
       cpu_percent: +$("#pr-cpu").value,
+      network_mbps: +$("#pr-net").value || 0,
       variables,
       start_on_create: $("#pr-start").checked,
     };
+    // Placement -> backend contract: auto (+tags/location) | node name.
+    const place = $("#pr-place")?.value || "auto";
+    if (place === "auto") {
+      body.node = "auto";
+      const tags = ($("#pr-tags")?.value || "").split(",").map((s) => s.trim()).filter(Boolean);
+      if (tags.length) body.node_tags = tags;
+      const loc = ($("#pr-loc")?.value || "").trim();
+      if (loc) body.location = loc;
+    } else if (place.startsWith("node:")) {
+      body.node = place.slice(5);
+    }
     if (portRaw) body.port = +portRaw;
     await api("/servers", { method: "POST", body: JSON.stringify(body) });
     const m = btn ? btn.closest(".modal") : null;
@@ -3064,7 +4402,7 @@ function adminNewSquad() {
   document.body.appendChild(modal);
 }
 async function adminCreateSquad() {
-  const name = $("#sq-name")?.value.trim(); if (!name) return;
+  const name = $("#sq-name")?.value.trim(); if (!name) { toast(t("e_required_name"), "warn"); return; }
   try { await api("/admin/squads", { method: "POST", body: JSON.stringify({ name }) }); $(".modal")?.remove(); adminSquads(); toast(t("squad_created"), "success"); }
   catch (e) { toast(e.message, "error"); }
 }
@@ -3078,7 +4416,7 @@ function adminEditSquad(el) {
   document.body.appendChild(modal);
 }
 async function adminSaveSquad(el) {
-  const id = +el.dataset.id, name = $("#sq-name")?.value.trim(); if (!name) return;
+  const id = +el.dataset.id, name = $("#sq-name")?.value.trim(); if (!name) { toast(t("e_required_name"), "warn"); return; }
   try {
     await api(`/admin/squads/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
     $(".modal")?.remove(); toast(t("squad_saved"), "success");
@@ -3182,7 +4520,7 @@ async function sqMemberAdd(el) {
   const id = +el.dataset.sid;
   const sel = $("#sq-user"); const user_id = sel ? +sel.value : 0;
   const role = $("#sq-role")?.value || "viewer";
-  if (!user_id) return;
+  if (!user_id) { toast(t("e_pick_user"), "warn"); return; }
   try { await api(`/admin/squads/${id}/members`, { method: "POST", body: JSON.stringify({ user_id, role }) }); toast(t("member_added"), "success"); adminSquadDetail(id); }
   catch (e) { toast(e.message, "error"); }
 }
@@ -3228,19 +4566,34 @@ async function adminUserDetail(id) {
       <div class="card">
         <div class="card-head"><h3>${ic("users", 15)} ${t("squad_memberships")} <span class="badge">${memberships.length}</span></h3></div>
         ${memberships.length ? `<div class="membership-chips">${memberships.map((m) => `<span class="membership-chip">${esc(m.squad)}<span class="pill info plain">${esc(roleLabel(m.role))}</span></span>`).join("")}</div>` : `<div class="muted">${t("squad_no_memberships")}</div>`}
-      </div>`;
+      </div>
+      ${u.twofa_enabled && +u.id !== +state.user?.id ? `
+      <div class="card">
+        <div class="card-head"><h3>${ic("shield", 15)} ${t("twofa")}</h3></div>
+        <p class="muted mb-10">2FA is enabled for this user. Resetting clears their secret and recovery codes and forces re-enrollment.</p>
+        <button class="btn danger-ghost" data-act="adminReset2fa" data-id="${u.id}" data-name="${esc(u.username)}">${ic("shield", 14)}<span>${t("reset_2fa")}</span></button>
+      </div>` : ""}`;
   } catch (e) {
     const box = $("#admin-body");
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_user_detail")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="adminUserDetailRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
   }
 }
 
+async function adminReset2fa(id, name) {
+  if (!await vpConfirm(t("reset_2fa_confirm").replace("{name}", name || `user-${id}`))) return;
+  try {
+    await api(`/admin/users/${id}/2fa/reset`, { method: "POST" });
+    toast(t("reset_2fa") + " ✓", "success");
+    adminUserDetail(id);
+  } catch (e) { toast(e.message, "error"); }
+}
+
 async function adminBlueprints() {
   const inReg = location.hash.includes("/registry");
-  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">VOLT SPECIFICATION</span><h2>Blueprint Studio</h2><p>Compose portable launch plans, then publish and install them through the registry.</p></div>${inReg ? "" : `<button class="btn primary sm" data-act="adminNewBlueprint">${ic("plus",14)}<span>New blueprint</span></button>`}</section><div class="tabs bp-subtabs"><a href="#/admin/blueprints" class="${inReg ? "" : "active"}">${ic("box",14)}<span>${t("reg_library")}</span></a><a href="#/admin/blueprints/registry" class="${inReg ? "active" : ""}">${ic("globe",14)}<span>${t("registry")}</span></a></div><div id="a-blueprints" class="blueprint-grid"></div>`;
+  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">${t("bp_eyebrow")}</span><h2>${t("bp_title")}</h2><p>${t("bp_sub")}</p></div>${inReg ? "" : `<button class="btn primary sm" data-act="adminNewBlueprint">${ic("plus",14)}<span>${t("new_blueprint")}</span></button>`}</section><div class="tabs bp-subtabs"><a href="#/admin/blueprints" class="${inReg ? "" : "active"}">${ic("box",14)}<span>${t("reg_library")}</span></a><a href="#/admin/blueprints/registry" class="${inReg ? "active" : ""}">${ic("globe",14)}<span>${t("registry")}</span></a></div><div id="a-blueprints" class="blueprint-grid"></div>`;
   if (inReg) return adminRegistry();
   try {
-    const [res, regRes] = await Promise.all([api("/blueprints"), api("/blueprints/registry").catch(() => null)]);
+    const [res, regRes] = await Promise.all([api("/blueprints"), api("/blueprints/registry").catch((e) => { console.warn("blueprint registry unavailable", e); return null; })]);
     const blueprints = res.data || res;
     const published = new Set((regRes?.data?.packages || []).map((p) => p.source_uuid).filter(Boolean));
     $("#a-blueprints").innerHTML = blueprints.length ? blueprints.map((definition) => {const count=definition.variables?.length||0;const kind=String(definition.category||"").toLowerCase();const symbol=kind==="database"?"database":kind==="web"?"globe":kind==="game"?"zap":kind==="generic"?"terminal":"blueprint";return `<article class="blueprint-card"><div class="blueprint-card-head"><span class="blueprint-symbol">${ic(symbol,20)}</span><div><h3>${esc(definition.name)}</h3><span>${esc(definition.category)} · VoltSpec</span></div></div><p>${esc(definition.description || "Reusable isolated workload plan")}</p><div class="blueprint-command"><span>Launch</span><code title="${esc(definition.startup || "operator-defined")}">${esc(definition.startup || "operator-defined")}</code></div><div class="blueprint-card-foot"><span>${count} ${count===1?'input':'inputs'}</span><div class="actions"><button class="icon-btn sm" title="Versions & drift" data-act="bpInspect" data-id="${definition.id}">${ic("clock",15)}</button><button class="icon-btn sm" title="Export VoltSpec" data-act="adminBlueprintExport" data-id="${definition.id}">${ic("download",15)}</button><button class="icon-btn sm danger" title="Delete blueprint" data-act="adminDeleteBlueprint" data-id="${definition.id}" data-name="${esc(definition.name)}">${ic("trash",15)}</button></div></div></article>`}).join("") : `<div class="context-empty">${ic("blueprint",28)}<div><b>No blueprints yet</b><span>Create the first portable VoltSpec launch plan.</span></div></div>`;
@@ -3273,7 +4626,7 @@ async function adminBlueprints() {
     if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_blueprints")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="adminBlueprintsRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
   }
 }
-async function adminBlueprintExport(id){try{const r=await api(`/blueprints/${id}/export`);await navigator.clipboard?.writeText(r.json);toast("VoltSpec copied","success")}catch(e){toast(e.message,"error")}}
+async function adminBlueprintExport(id){try{const r=await api(`/blueprints/${id}/export`);await navigator.clipboard?.writeText(r.json);toast(t("bp_copied"),"success")}catch(e){toast(e.message,"error")}}
 async function adminDeleteBlueprint(id, name) {
   if (!await vpDestroy({
     kind: "blueprint", target: name || `blueprint-${id}`,
@@ -3285,18 +4638,18 @@ function adminNewBlueprint(){
   const modal=document.createElement("div");
   modal.className="modal";
   modal.innerHTML=`<div class="modal-card blueprint-create-modal">
-    <div class="modal-head"><div><b>New blueprint</b><span class="modal-subtitle">Define how this server starts.</span></div><button class="icon-btn" aria-label="Close" data-act="closeModal">${ic("x",16)}</button></div>
+    <div class="modal-head"><div><b>${t("new_blueprint")}</b><span class="modal-subtitle">${t("bp_new_sub")}</span></div><button class="icon-btn" aria-label="${t("close")}" data-act="closeModal">${ic("x",16)}</button></div>
     <div class="modal-body modal-form-grid">
-      <div class="field"><label for="nb-name">Name</label><input type="text" id="nb-name" placeholder="Velocity Proxy" autocomplete="off"><small>Shown when creating a server.</small></div>
-      <div class="field"><label for="nb-category">Category</label><input type="text" id="nb-category" value="application" placeholder="application" autocomplete="off"><small>For grouping in the catalog.</small></div>
-      <div class="field field-wide"><label for="nb-runtime">Runtime</label><input type="text" id="nb-runtime" value="native" placeholder="native" autocomplete="off"></div>
-      <div class="field field-wide"><label for="nb-launch">Launch command</label><input type="text" id="nb-launch" placeholder="java -jar app.jar" autocomplete="off"><small>The command executed inside the isolated server directory.</small></div>
+      <div class="field"><label for="nb-name">${t("name")}</label><input type="text" id="nb-name" placeholder="Velocity Proxy" autocomplete="off"><small>${t("bp_name_hint")}</small></div>
+      <div class="field"><label for="nb-category">${t("bp_category")}</label><input type="text" id="nb-category" value="application" placeholder="application" autocomplete="off"><small>${t("bp_category_hint")}</small></div>
+      <div class="field field-wide"><label for="nb-runtime">${t("bp_runtime")}</label><input type="text" id="nb-runtime" value="native" placeholder="native" autocomplete="off"></div>
+      <div class="field field-wide"><label for="nb-launch">${t("bp_launch")}</label><input type="text" id="nb-launch" placeholder="java -jar app.jar" autocomplete="off"><small>${t("bp_launch_hint")}</small></div>
     </div>
-    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">Cancel</button><button class="btn primary" data-act="adminCreateBlueprint">${ic("plus",14)}<span>Create blueprint</span></button></div>
+    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button><button class="btn primary" data-act="adminCreateBlueprint">${ic("plus",14)}<span>${t("bp_create")}</span></button></div>
   </div>`;
   document.body.appendChild(modal);
 }
-async function adminCreateBlueprint(btn){try{await api("/blueprints",{method:"POST",body:JSON.stringify({name:$("#nb-name").value,category:$("#nb-category").value,runtime_hint:$("#nb-runtime").value,startup:$("#nb-launch").value})});const m=btn?btn.closest(".modal"):null;(m||$(".modal"))?.remove();adminBlueprints();toast("Blueprint created","success")}catch(e){toast(e.message,"error")}}
+async function adminCreateBlueprint(btn){try{await api("/blueprints",{method:"POST",body:JSON.stringify({name:$("#nb-name").value,category:$("#nb-category").value,runtime_hint:$("#nb-runtime").value,startup:$("#nb-launch").value})});const m=btn?btn.closest(".modal"):null;(m||$(".modal"))?.remove();adminBlueprints();toast(t("t_bp_created"), "success")}catch(e){toast(e.message,"error")}}
 /* ---------- blueprint studio: versions, drift & pinning ---------- */
 let bpModal = { id: 0, current: 1, revs: [] };
 async function bpInspect(id) {
@@ -3322,7 +4675,7 @@ async function bpInspect(id) {
     <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button></div>
   </div>`;
   document.body.appendChild(modal);
-  const meta = api(`/blueprints/${id}`).catch(() => null);
+  const meta = api(`/blueprints/${id}`).catch((e) => { console.warn("blueprint metadata unavailable", e); return null; });
   await bpLoadRevisions(id);
   await bpLoadDrift(id);
   const bp = await meta;
@@ -3498,15 +4851,15 @@ async function regClearKey() {
   } catch (e) { toast(e.message, "error"); }
 }
 async function adminNodes() {
-  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">EXECUTION FABRIC</span><h2>Agent mesh</h2><p>Capacity, isolation, placement, and health across every execution host.</p></div><button class="btn primary" data-act="adminNewNode">${ic("plus",14)}<span>Attach agent</span></button></section><div id="a-nodes" class="node-grid"></div>`;
+  $("#admin-body").innerHTML = `<section class="nodes-header"><div><span class="eyebrow">${t("fabric_eyebrow")}</span><h2>${t("fabric_title")}</h2><p>${t("fabric_sub")}</p></div><button class="btn primary" data-act="adminNewNode">${ic("plus",14)}<span>${t("qa_attach")}</span></button></section><div id="a-nodes" class="node-grid"></div>`;
   try {
     const res = await api("/nodes"); const values = res.data || [];
     $("#a-nodes").innerHTML = values.length ? values.map(n => { const cpu=Math.min(100,Math.round(n.capacity?.cpu_percent||0)), mem=n.capacity?.memory_total?Math.min(100,Math.round(n.capacity.memory_used/n.capacity.memory_total*100)):0; return `<article class="node-card ${n.online?'online':'offline'}">
       <div class="node-card-head"><div class="node-mark">${ic('server',20)}</div><div><h3>${esc(n.name)}</h3><span>${esc(n.location||'unassigned')}</span></div><span class="pill ${n.online?'running':'offline'}"><i></i>${n.online?'online':'offline'}</span></div>
       <div class="node-endpoint">${ic('link',13)}<code>${esc(n.public_url)}</code></div>
       <div class="node-metrics"><div><span>CPU</span><b>${cpu}%</b><div class="progress"><div data-w="${cpu}"></div></div></div><div><span>Memory</span><b>${mem}%</b><div class="progress"><div class="purple" data-w="${mem}"></div></div></div></div>
-      <div class="node-security">${ic('shield',15)}<span>Namespace + cgroup isolation</span><b>${n.online?'verified':'pending'}</b></div>
-      <div class="node-card-foot"><span>${n.capacity?.servers_running||0} running / ${n.capacity?.servers_total||0} total</span><div class="actions"><button class="icon-btn" title="test" aria-label="Test node" data-act="nodeTest" data-id="${n.id}">${ic('activity',15)}</button><button class="icon-btn" title="re-enroll" aria-label="Re-enroll" data-act="nodeReenroll" data-id="${n.id}">${ic('key',15)}</button><button class="icon-btn danger" title="delete" aria-label="Delete node" data-act="nodeDelete" data-id="${n.id}" data-name="${esc(n.name)}">${ic('trash',15)}</button></div></div></article>`; }).join('') : `<div class="empty">${ic('globe',40)}<p>No agents attached. Local isolated execution remains available.</p></div>`;
+      <div class="node-security">${ic('shield',15)}<span>${t("isolation_ns")}</span><b>${n.online?'verified':'pending'}</b></div>
+      <div class="node-card-foot"><span>${n.capacity?.servers_running||0} running / ${n.capacity?.servers_total||0} total</span><div class="actions"><button class="icon-btn" title="${t("a_test_node")}" aria-label="${t("a_test_node")}" data-act="nodeTest" data-id="${n.id}">${ic('activity',15)}</button><button class="icon-btn" title="${t("a_reenroll")}" aria-label="${t("a_reenroll")}" data-act="nodeReenroll" data-id="${n.id}">${ic('key',15)}</button><button class="icon-btn danger" title="${t("a_delete_node")}" aria-label="${t("a_delete_node")}" data-act="nodeDelete" data-id="${n.id}" data-name="${esc(n.name)}">${ic('trash',15)}</button></div></div></article>`; }).join('') : emptyState("globe", t("es_nodes_t"), t("es_nodes_h"), { act: "adminNewNode", actLabel: t("qa_attach"), actIcon: "plus" });
     $$("#a-nodes .progress > div[data-w]").forEach((el) => { el.style.width = el.dataset.w + "%"; });
   } catch(e) {
     const box = $("#a-nodes");
@@ -3515,11 +4868,66 @@ async function adminNodes() {
 }
 
 function adminNewNode() {
-  const modal=document.createElement('div'); modal.className='modal'; modal.innerHTML=`<div class="modal-card"><div class="modal-head"><b>${ic('globe',15)} Attach agent</b><button class="icon-btn" data-act="closeModal">${ic('x',16)}</button></div>
-    <div class="field"><label>Name</label><input id="nn-name" placeholder="agent-eu-1"></div><div class="field"><label>Agent endpoint</label><input id="nn-url" value="http://127.0.0.1:8081"></div><div class="field"><label>Location</label><input id="nn-location" placeholder="id-jakarta"></div>
-    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">Cancel</button><button class="btn primary" data-act="nodeCreate">${ic('plus',14)}<span>Create</span></button></div></div>`; document.body.appendChild(modal);
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `<div class="modal-card node-create-modal">
+    <div class="modal-head"><div><b>${ic("globe", 15)} ${t("node_new_title")}</b><span class="modal-subtitle">${t("node_new_sub")}</span></div><button class="icon-btn" data-act="closeModal" aria-label="${t("close")}">${ic("x", 16)}</button></div>
+    <div class="modal-body modal-form-grid">
+      <div class="field"><label for="nn-name">${t("name")}</label><input id="nn-name" placeholder="${t("node_name_ph")}" autocomplete="off"></div>
+      <div class="field"><label for="nn-url">${t("node_url")}</label><div class="field-input">${ic("link", 14)}<input id="nn-url" value="http://127.0.0.1:8081" spellcheck="false"></div><small>${t("node_url_hint")}</small></div>
+      <div class="field"><label for="nn-location">${t("node_location")}</label><input id="nn-location" placeholder="${t("node_location_ph")}" autocomplete="off"><small>${t("node_location_hint")}</small></div>
+      <div class="field"><label for="nn-tags">${t("node_tags")}</label><input id="nn-tags" placeholder="${t("node_tags_ph")}" autocomplete="off"></div>
+      <div class="field field-wide"><label for="nn-fp">${t("node_fp")}</label><input id="nn-fp" placeholder="${t("node_fp_create_ph")}" autocomplete="off" spellcheck="false"><small>${t("node_fp_hint")}</small></div>
+      <div id="nn-errors" class="pr-errors" hidden></div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("cancel")}</button><button class="btn primary" data-act="nodeCreate">${ic("plus", 14)}<span>${t("create")}</span></button></div>
+  </div>`;
+  document.body.appendChild(modal);
+  const prevFocus = document.activeElement;
+  new MutationObserver((_m, obs) => {
+    if (!modal.isConnected) { obs.disconnect(); if (prevFocus && document.contains(prevFocus)) prevFocus.focus(); }
+  }).observe(document.body, { childList: true, subtree: true });
+  const validate = () => {
+    const errs = [];
+    if (($("#nn-name").value.trim().length || 0) < 2) errs.push(t("node_name_req"));
+    if (!$("#nn-url").value.trim()) errs.push(t("node_url_req"));
+    const fp = $("#nn-fp").value.trim().replace(/[:\s]/g, "");
+    if (fp && !/^[0-9a-fA-F]{64}$/.test(fp)) errs.push(t("node_fp_bad"));
+    const box = $("#nn-errors");
+    const btn = modal.querySelector('[data-act="nodeCreate"]');
+    if (errs.length) { box.hidden = false; box.innerHTML = errs.map((e) => `<div class="pr-problem">${ic("alert", 12)}${esc(e)}</div>`).join(""); btn.disabled = true; }
+    else { box.hidden = true; box.innerHTML = ""; btn.disabled = false; }
+  };
+  modal.addEventListener("input", (e) => { if (e.target.closest("#nn-name, #nn-url, #nn-fp")) validate(); });
+  $("#nn-name").focus();
+  validate();
 }
-async function nodeCreate(btn){try{const r=await api('/nodes',{method:'POST',body:JSON.stringify({name:$('#nn-name').value,public_url:$('#nn-url').value,location:$('#nn-location').value,tags:[]})}); const old = btn ? btn.closest(".modal") : null; (old || $('.modal'))?.remove(); const cmd = `./voltd join ${location.origin} ${r.enrollment_token} --public-url ${r.node.public_url}${location.protocol === "http:" ? " --allow-http" : ""}`; const m=document.createElement('div');m.className='modal';m.innerHTML=`<div class="modal-card"><div class="modal-head"><b>One-command setup</b><button class="icon-btn" data-act="closeModal">${ic('x',16)}</button></div><div class="modal-pad-lg"><p class="muted">Run this on the node machine:</p><div class="code-block">${esc(cmd)}</div></div><div class="modal-foot"><button class="btn primary" data-act="copyText" data-text="${esc(cmd)}">Copy command</button></div></div>`;document.body.appendChild(m);adminNodes();}catch(e){toast(e.message,'error')}}
+async function nodeCreate(btn) {
+  try {
+    const tags = ($("#nn-tags")?.value || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const fp = ($("#nn-fp")?.value || "").trim().replace(/[:\s]/g, "");
+    const body = {
+      name: $("#nn-name").value.trim(),
+      public_url: $("#nn-url").value.trim(),
+      location: $("#nn-location").value.trim(),
+      tags,
+    };
+    if (fp) body.expected_fingerprint = fp;
+    const r = await api("/nodes", { method: "POST", body: JSON.stringify(body) });
+    const old = btn ? btn.closest(".modal") : null;
+    (old || $(".modal"))?.remove();
+    const cmd = `./voltd join ${location.origin} ${r.enrollment_token} --public-url ${r.node.public_url}${location.protocol === "http:" ? " --allow-http" : ""}`;
+    const m = document.createElement("div");
+    m.className = "modal";
+    m.innerHTML = `<div class="modal-card node-enroll-modal">
+      <div class="modal-head"><div><b>${ic("terminal", 15)} ${t("node_enroll_title")}</b><span class="modal-subtitle">${t("node_enroll_sub")}</span></div><button class="icon-btn" data-act="closeModal" aria-label="${t("close")}">${ic("x", 16)}</button></div>
+      <div class="modal-pad-lg"><div class="code-block enroll-cmd">${esc(cmd)}</div></div>
+      <div class="modal-foot"><button class="btn ghost" data-act="closeModal">${t("close")}</button><button class="btn primary" data-act="copyText" data-text="${esc(cmd)}">${ic("copy", 14)}<span>${t("node_copy_cmd")}</span></button></div>
+    </div>`;
+    document.body.appendChild(m);
+    adminNodes();
+  } catch (e) { toast(e.message, "error"); }
+}
 async function nodeTest(id){try{const r=await api(`/nodes/${id}/test`,{method:'POST'});toast(`Agent online · ${r.latency_ms}ms`,'success')}catch(e){toast(e.message,'error')}}
 async function nodeReenroll(id){try{const r=await api(`/nodes/${id}/enrollment`,{method:'POST'});await vpPrompt('Enrollment token', r.enrollment_token);adminNodes()}catch(e){toast(e.message,'error')}}
 async function nodeDelete(id, name) {
@@ -3529,6 +4937,197 @@ async function nodeDelete(id, name) {
   })) return;
   try { await api(`/nodes/${id}`, { method: 'DELETE' }); adminNodes(); } catch (e) { toast(e.message, 'error'); }
 }
+/* ============================================================
+   Fabric node detail — GET /api/nodes/:id returns
+   { node, online, available_memory_mb, available_disk_mb,
+     drain: {active,mode,reason,deadline,affected_count}, events:[...] }.
+   Edit writes PATCH /api/nodes/:id (full-replace UpdateNodeRequest);
+   drain writes POST/DELETE /api/nodes/:id/drain. `stop` drain failures
+   come back as failed_ids and render in a dedicated box; drain actions
+   update in place so half-typed edits in the form are never lost.
+   ============================================================ */
+async function adminNodeDetail(id) {
+  const token = routeToken;
+  $("#admin-body").innerHTML = `<div class="empty">${ic("globe", 40)}<p>${t("loading")}</p></div>`;
+  let res;
+  try { res = await api(`/nodes/${id}`); }
+  catch (e) {
+    if (token !== routeToken) return;
+    const box = $("#admin-body");
+    if (box) box.innerHTML = `<div class="file-list"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_load_agents")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="adminNodeRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;
+    return;
+  }
+  if (token !== routeToken) return;
+  renderNodeDetail(id, res);
+}
+
+function renderNodeDetail(id, res) {
+  const n = res.node || {};
+  const online = !!res.online;
+  const drain = res.drain || {};
+  const events = res.events || [];
+  const pill = (cls, label) => `<span class="pill ${cls}"><i></i>${esc(label)}</span>`;
+  $("#admin-body").innerHTML = `
+    <div class="squad-detail-head">
+      <a href="#/admin/nodes" class="btn sm ghost">${ic("chevron_left", 13)}<span>${t("back")}</span></a>
+      <h2>${ic("globe", 18)} ${esc(n.name || `node-${id}`)}</h2>
+      ${online ? pill("running", "online") : pill("offline", "offline")}
+      ${drain.active ? `<span class="pill warn"><i></i>${esc(t("node_drain_active").replace("{mode}", drain.mode))}</span>` : ""}
+      <div class="actions">
+        <button class="icon-btn sm" title="${t("a_test_node")}" aria-label="${t("a_test_node")}" data-act="nodeTest" data-id="${id}">${ic("activity", 15)}</button>
+        <button class="icon-btn sm" title="${t("a_reenroll")}" aria-label="${t("a_reenroll")}" data-act="nodeReenroll" data-id="${id}">${ic("key", 15)}</button>
+        <button class="icon-btn sm danger" title="${t("a_delete_node")}" aria-label="${t("a_delete_node")}" data-act="nodeDelete" data-id="${id}" data-name="${esc(n.name || "")}">${ic("trash", 15)}</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>${ic("info", 15)} ${t("node_identity")}</h3></div>
+      <div class="nd-grid">
+        <div><span>${t("node_url")}</span><code>${esc(n.public_url || "—")}</code></div>
+        <div><span>${t("node_location")}</span><b>${esc(n.location || "—")}</b></div>
+        <div><span>${t("node_host")}</span><b>${esc(n.hostname || "—")}</b></div>
+        <div><span>${t("node_os_arch")}</span><b>${esc(n.os || "—")} / ${esc(n.arch || "—")}</b></div>
+        <div><span>${t("node_agent_version")}</span><b>${esc(n.daemon_version || "—")}</b></div>
+        <div><span>${t("node_heartbeat")}</span><b>${esc(n.last_heartbeat ? fmtDate(n.last_heartbeat) : t("node_never_hb"))}</b></div>
+        <div class="nd-wide"><span>${t("node_tls_fp")}</span><code class="fp">${esc(n.tls_fingerprint || "—")}</code></div>
+        ${n.last_error ? `<div class="nd-wide nd-err"><span>${t("node_last_error")}</span><b>${esc(n.last_error)}</b></div>` : ""}
+      </div>
+    </div>
+    <div class="card" id="nd-drain-card">
+      <div class="card-head"><h3>${ic("shield", 15)} ${t("node_drain")}</h3>
+        <span class="pill ${drain.active ? "warn" : "plain"}" id="nd-drain-state">${ic("shield", 11)}<span>${drain.active ? esc(t("node_drain_active").replace("{mode}", drain.mode)) : t("gate_none")}</span></span>
+      </div>
+      ${drain.active ? `<div class="drain-info"><code>${esc(drain.reason || "—")}</code>${drain.deadline ? ` · ${esc(fmtDate(drain.deadline))}` : ""} · ${+drain.affected_count || 0} server(s)</div>` : ""}
+      <div class="field"><label>${t("node_drain_reason")}</label><input id="nd-drain-reason" maxlength="512" placeholder="${esc(t("node_drain_reason_ph"))}"${drain.active ? ` value="${esc(drain.reason || "")}"` : ""}></div>
+      <div class="field"><label>${t("node_drain_deadline")}</label><input id="nd-drain-deadline" type="number" min="0" step="1" placeholder="${esc(t("node_drain_deadline_ph"))}"></div>
+      <div class="drain-modes">
+        <button class="btn sm" data-act="nodeDrain" data-mode="hold" data-id="${id}">${ic("pause", 13)}<span>${t("node_drain_hold")}</span></button>
+        <button class="btn sm danger" data-act="nodeDrain" data-mode="stop" data-id="${id}">${ic("stop", 13)}<span>${t("node_drain_stop")}</span></button>
+        ${drain.active ? `<button class="btn sm ghost" data-act="nodeDrainClear" data-id="${id}">${ic("refresh_ccw", 13)}<span>${t("node_drain_clear")}</span></button>` : ""}
+      </div>
+      <p class="muted nd-drain-hint">${esc(t("node_drain_hold_hint"))} ${esc(t("node_drain_stop_hint"))}</p>
+      <div id="nd-failed" hidden></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>${ic("pencil", 15)} ${t("node_edit")}</h3></div>
+      <p class="muted">${esc(t("node_edit_hint"))}</p>
+      <div class="modal-form-grid">
+        <div class="field"><label>${t("name")}</label><input id="nd-name" maxlength="80" value="${esc(n.name || "")}"></div>
+        <div class="field"><label>${t("node_url")}</label><input id="nd-url" value="${esc(n.public_url || "")}"></div>
+        <div class="field"><label>${t("node_location")}</label><input id="nd-location" maxlength="80" value="${esc(n.location || "")}"></div>
+        <div class="field"><label>${t("node_tags")}</label><input id="nd-tags" placeholder="${esc(t("node_tags_ph"))}" value="${esc((n.tags || []).join(", "))}"></div>
+      </div>
+      <h4 class="nd-sub">${t("node_limits")}</h4>
+      <div class="modal-form-grid">
+        <div class="field"><label>${t("node_mem_limit")}</label><input id="nd-mem" type="number" min="0" value="${+n.memory_limit_mb || 0}"></div>
+        <div class="field"><label>${t("node_disk_limit")}</label><input id="nd-disk" type="number" min="0" value="${+n.disk_limit_mb || 0}"></div>
+        <div class="field"><label>${t("node_mem_over")}</label><input id="nd-memover" type="number" min="0" value="${+n.memory_overallocate || 0}"></div>
+        <div class="field"><label>${t("node_disk_over")}</label><input id="nd-diskover" type="number" min="0" value="${+n.disk_overallocate || 0}"></div>
+      </div>
+      <h4 class="nd-sub">${t("node_sched")}</h4>
+      <label class="check-row"><input type="checkbox" id="nd-enabled"${n.enabled ? " checked" : ""}><span class="check-box">${ic("check", 13, 2.4)}</span><span>${t("node_enabled")}</span></label>
+      <label class="check-row"><input type="checkbox" id="nd-sched"${n.schedulable ? " checked" : ""}><span class="check-box">${ic("check", 13, 2.4)}</span><span>${t("node_schedulable")}</span></label>
+      <label class="check-row"><input type="checkbox" id="nd-maint"${n.maintenance ? " checked" : ""}><span class="check-box">${ic("check", 13, 2.4)}</span><span>${t("node_maintenance")}</span></label>
+      <div class="field"><label>${t("node_expected_fp")}</label><input id="nd-fp" class="fp-input" placeholder="${esc(t("node_fp_ph"))}" value="${esc(n.expected_fingerprint || "")}" spellcheck="false"></div>
+      <div class="modal-foot nd-save"><button class="btn primary" data-act="adminNodeSave" data-id="${id}">${ic("save", 14)}<span>${t("save")}</span></button></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>${ic("activity", 15)} ${t("node_events")} <span class="badge">${events.length}</span></h3></div>
+      <div id="nd-events-list">${renderNodeEvents(events)}</div>
+    </div>`;
+}
+
+function renderNodeEvents(events) {
+  const evLevel = (l) => (l === "error" ? "error" : l === "warn" ? "warn" : "info");
+  return (events || []).length
+    ? `<div class="node-timeline">${(events || []).map((ev) => `<div class="node-event">
+        <span class="pill ${evLevel(ev.level)} plain">${esc(ev.kind || ev.level)}</span>
+        <span class="node-event-msg">${esc(ev.message || "")}</span>
+        <time>${fmtDate(ev.created_at)}</time>
+      </div>`).join("")}</div>`
+    : `<div class="empty">${ic("activity", 32)}<p>${t("node_no_events")}</p></div>`;
+}
+
+async function nodeRefreshEvents(id) {
+  try {
+    const r = await api(`/nodes/${id}`);
+    const box = $("#nd-events-list");
+    if (box) box.innerHTML = renderNodeEvents(r.events || []);
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function adminNodeSave(id, btn) {
+  const body = {
+    name: ($("#nd-name")?.value || "").trim(),
+    public_url: ($("#nd-url")?.value || "").trim(),
+    enabled: !!$("#nd-enabled")?.checked,
+    schedulable: !!$("#nd-sched")?.checked,
+    maintenance: !!$("#nd-maint")?.checked,
+    location: ($("#nd-location")?.value || "").trim(),
+    tags: ($("#nd-tags")?.value || "").split(",").map((s) => s.trim()).filter(Boolean),
+    memory_limit_mb: +($("#nd-mem")?.value || 0) || 0,
+    disk_limit_mb: +($("#nd-disk")?.value || 0) || 0,
+    memory_overallocate: +($("#nd-memover")?.value || 0) || 0,
+    disk_overallocate: +($("#nd-diskover")?.value || 0) || 0,
+    expected_fingerprint: ($("#nd-fp")?.value || "").trim() || null,
+  };
+  if (body.name.length < 2) { toast(t("e_node_short"), "error"); return; }
+  btn.disabled = true;
+  try {
+    await api(`/nodes/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+    toast(t("node_saved"), "success");
+    adminNodeDetail(id);
+  } catch (e) { toast(e.message, "error"); }
+  btn.disabled = false;
+}
+
+async function nodeDrain(id, mode, btn) {
+  const reason = ($("#nd-drain-reason")?.value || "").trim();
+  const hours = +($("#nd-drain-deadline")?.value || "");
+  const body = { mode, reason, deadline_secs: Number.isFinite(hours) && hours > 0 ? Math.round(hours * 3600) : null };
+  btn.disabled = true;
+  try {
+    const r = await api(`/nodes/${id}/drain`, { method: "POST", body: JSON.stringify(body) });
+    toast(t("node_drain_started"), "success");
+    const st = $("#nd-drain-state");
+    if (st && r.drain?.active) { st.className = "pill warn"; st.innerHTML = `${ic("pause", 11)}<span>${esc(t("node_drain_active").replace("{mode}", r.drain.mode))}</span>`; }
+    const failed = $("#nd-failed");
+    if (failed) {
+      const ids = r.failed_ids || [];
+      failed.hidden = !ids.length;
+      failed.innerHTML = ids.length ? `<div class="drain-failed">${ic("alert", 16)}<div><b>${esc(t("node_drain_failed"))} (${ids.length})</b><code>${esc(ids.join(", "))}</code></div></div>` : "";
+    }
+    /* A drain set from this view needs its Lift button even when the page
+       was loaded with no drain: render it once, next to the hold/stop pair. */
+    if (r.drain?.active && !$("#nd-drain-card [data-act='nodeDrainClear']")) {
+      const modes = $("#nd-drain-card .drain-modes");
+      if (modes) {
+        const b = document.createElement("button");
+        b.className = "btn sm ghost";
+        b.dataset.act = "nodeDrainClear";
+        b.dataset.id = String(id);
+        b.innerHTML = `${ic("refresh_ccw", 13)}<span>${esc(t("node_drain_clear"))}</span>`;
+        modes.appendChild(b);
+      }
+    }
+    nodeRefreshEvents(id);
+  } catch (e) { toast(e.message, "error"); }
+  btn.disabled = false;
+}
+
+async function nodeDrainClear(id) {
+  if (!await vpConfirm(t("node_drain_clear_confirm"), t("node_drain"))) return;
+  try {
+    await api(`/nodes/${id}/drain`, { method: "DELETE" });
+    toast(t("node_drain_cleared"), "success");
+    const st = $("#nd-drain-state");
+    if (st) { st.className = "pill plain"; st.innerHTML = `${ic("shield", 11)}<span>${esc(t("gate_none"))}</span>`; }
+    const reason = $("#nd-drain-reason"); if (reason) reason.value = "";
+    const dl = $("#nd-drain-deadline"); if (dl) dl.value = "";
+    const failed = $("#nd-failed"); if (failed) { failed.hidden = true; failed.innerHTML = ""; }
+    $("#nd-drain-card [data-act='nodeDrainClear']")?.remove();
+    nodeRefreshEvents(id);
+  } catch (e) { toast(e.message, "error"); }
+}
 
 let obsTimer = null;
 async function adminSystem() {
@@ -3537,8 +5136,8 @@ async function adminSystem() {
     <div class="card" id="a-self"><div class="card-head"><h3>${ic("activity", 15)} ${t("obs_title")}</h3><span class="muted" id="obs-since"></span></div><div id="obs-body"><div class="empty">${ic("activity", 40)}<p>${t("loading")}</p></div></div></div>
     <div class="grid cols-4" id="a-node-grid"></div>
     <div class="grid cols-2">
-      <div class="card"><h3>${ic("link", 15)} Endpoints</h3><div id="a-alloc"><div class="empty">${ic("link", 40)}<p>${t("loading")}</p></div></div></div>
-      <div class="card"><h3>${ic("gauge", 15)} Host resources</h3><div id="a-res"></div></div>
+      <div class="card"><h3>${ic("link", 15)} ${t("obs_endpoints")}</h3><div id="a-alloc"><div class="empty">${ic("link", 40)}<p>${t("loading")}</p></div></div></div>
+      <div class="card"><h3>${ic("gauge", 15)} ${t("obs_host_resources")}</h3><div id="a-res"></div></div>
     </div>`;
   // Panel self-metrics: its own 5s poller like the other views' pollers,
   // scoped to its card so a self-metrics failure never clobbers the
@@ -3575,9 +5174,14 @@ async function adminSystem() {
       <div class="metric-line"><span>RAM</span><b>${Math.round(s.memory.percent)}%</b></div><div class="progress"><div class="purple" data-w="${Math.min(100, s.memory.percent)}"></div></div>
       <div class="metric-line"><span>Disk</span><b>${Math.round(s.disk.percent)}%</b></div><div class="progress"><div class="yellow" data-w="${Math.min(100, s.disk.percent)}"></div></div>`;
     $$("#a-res .progress > div[data-w]").forEach((el) => { el.style.width = el.dataset.w + "%"; });
-    const alloc = await api("/system/allocations");
-    const allocs = alloc.data || [];
-    $("#a-alloc").innerHTML = allocs.length ? `<div class="file-list">${allocs.map((a) => `<div class="file-row"><span class="f-icon">${ic("link", 16)}</span><b>${esc(a.port)}</b><span class="f-meta">→ ${esc(a.server || "free")}</span></div>`).join("")}</div>` : `<div class="empty">${ic("link", 40)}<p>${t("none")}</p></div>`;
+    api("/system/allocations").then((alloc) => {
+      const allocs = alloc.data || [];
+      const box = $("#a-alloc");
+      if (box) box.innerHTML = allocs.length ? `<div class="file-list">${allocs.map((a) => `<div class="file-row"><span class="f-icon">${ic("link", 16)}</span><b>${esc(a.port)}</b><span class="f-meta">→ ${esc(a.server || "free")}</span></div>`).join("")}</div>` : `<div class="empty">${ic("link", 40)}<p>${t("none")}</p></div>`;
+    }).catch(() => {
+      const box = $("#a-alloc");
+      if (box) box.innerHTML = `<div class="empty">${ic("alert", 40)}<p>${esc(t("err_observatory"))}</p></div>`;
+    });
   } catch (e) {
     const body = $("#admin-body");
     if (body) body.innerHTML = `<div class="card"><div class="file-error">${ic("alert", 26)}<div><b>${t("err_observatory")}</b><span>${esc(e.message)}</span></div><button class="btn sm" data-act="adminSystemRetry">${ic("refresh_ccw", 13)}<span>${t("retry")}</span></button></div></div>`;

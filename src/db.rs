@@ -1048,6 +1048,119 @@ fn migrate(conn: &Connection) -> Result<()> {
             "#,
         )?;
     }
+    if version < 19 {
+        // Iteration 10 (node drain + DataLab vault coverage): `nodes`
+        // gains the automated cordon/drain state — drain_mode is
+        // '' (idle), 'hold' (cordoned), or 'stop' (cordoned with running
+        // workloads being stopped); drain_reason is the operator-supplied
+        // free-text reason (<=512 chars); drain_deadline is the optional
+        // RFC3339 instant by which the drain must complete. `backups`
+        // gains the DataLab vault metadata the backup agent composes:
+        // data_lab_included marks a backup whose snapshot fed a vault
+        // artifact, db_count records how many databases were captured.
+        // Guarded ADD COLUMN so a resumed ladder never trips "duplicate
+        // column name".
+        add_column_if_missing(
+            conn,
+            "nodes",
+            "drain_mode",
+            "ALTER TABLE nodes ADD COLUMN drain_mode TEXT NOT NULL DEFAULT '';",
+        )?;
+        add_column_if_missing(
+            conn,
+            "nodes",
+            "drain_reason",
+            "ALTER TABLE nodes ADD COLUMN drain_reason TEXT NOT NULL DEFAULT '';",
+        )?;
+        add_column_if_missing(
+            conn,
+            "nodes",
+            "drain_deadline",
+            "ALTER TABLE nodes ADD COLUMN drain_deadline TEXT;",
+        )?;
+        add_column_if_missing(
+            conn,
+            "backups",
+            "data_lab_included",
+            "ALTER TABLE backups ADD COLUMN data_lab_included INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        add_column_if_missing(
+            conn,
+            "backups",
+            "db_count",
+            "ALTER TABLE backups ADD COLUMN db_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        conn.execute_batch("PRAGMA user_version = 19;")?;
+    }
+    if version < 20 {
+        // Iteration 11 (2FA recovery codes): a user with 2FA enabled holds a
+        // set of one-time recovery codes for losing the authenticator app.
+        // Only the SHA-256 digest of each code is stored (`code_hash`), so a
+        // leaked database yields no usable codes; the plaintext is shown
+        // exactly once at generation/regeneration time. `used_at` flips from
+        // NULL the moment a code is consumed, which is what makes replay
+        // detection atomic: a single conditional UPDATE either claims the row
+        // or not, and SQLite serializes the writers. FK cascade drops the
+        // codes with their user. Guarded so a resumed ladder never trips
+        // "table already exists".
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS user_recovery_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                code_hash TEXT NOT NULL,
+                used_at TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_recovery_codes_user ON user_recovery_codes(user_id);
+            PRAGMA user_version = 20;
+            "#,
+        )?;
+    }
+    if version < 21 {
+        // Iteration 12 (Console Watchers): per-workspace rules that match a
+        // live console line against a literal substring or a regex and fire an
+        // action — notify, restart, stop, or send a command — the moment the
+        // pattern appears. Event-driven off the console append path, so an
+        // operator can auto-react to a crash string, an error spike, or a
+        // "ready" banner without polling. `cooldown_secs` debounces a chatty
+        // match so one log flood cannot storm the action. `last_fired_at` is
+        // the debounce clock. FK cascade drops watchers with their server.
+        // Guarded so a resumed ladder never trips "table already exists".
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS console_watchers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                is_regex INTEGER NOT NULL DEFAULT 0,
+                action TEXT NOT NULL,
+                action_payload TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                cooldown_secs INTEGER NOT NULL DEFAULT 30,
+                last_fired_at TEXT,
+                trigger_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_console_watchers_server ON console_watchers(server_id);
+            PRAGMA user_version = 21;
+            "#,
+        )?;
+    }
+    if version < 22 {
+        // Network bandwidth throttle: a symmetric cap in megabits/second,
+        // applied to the workspace's veth via `tc`. 0 = unlimited (the monitor's
+        // 3-strike auto-kill remains the backstop). Guarded so a resumed ladder
+        // never trips "duplicate column".
+        add_column_if_missing(
+            conn,
+            "servers",
+            "network_mbps",
+            "ALTER TABLE servers ADD COLUMN network_mbps INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        conn.execute_batch("PRAGMA user_version = 22;")?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -1306,7 +1419,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18, "fresh DB must land on the latest version");
+        assert_eq!(version, 22, "fresh DB must land on the latest version");
 
         let table_count = |name: &str| -> i64 {
             conn.query_row(
@@ -1633,7 +1746,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18, "pre-v5 DB must land on the latest version");
+        assert_eq!(version, 22, "pre-v5 DB must land on the latest version");
 
         let egss_left: i64 = conn
             .query_row(
@@ -1707,7 +1820,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18, "fresh DB must land on the latest version");
+        assert_eq!(version, 22, "fresh DB must land on the latest version");
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .unwrap();
@@ -1718,7 +1831,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 22);
         let capabilities_columns: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name='capabilities'",
@@ -1754,7 +1867,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 22);
 
         let caps = |token: &str| -> String {
             conn.query_row(
@@ -1790,7 +1903,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18, "fresh file must migrate to the latest version");
+        assert_eq!(version, 22, "fresh file must migrate to the latest version");
         let journal: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
@@ -1885,7 +1998,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 22);
         let tables: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -1895,9 +2008,10 @@ mod tests {
             .unwrap();
         // v1 tables (17) + v2 (3) + v7 (4) = 24, plus the four lazy tables
         // folded in at v18 (squads, squad_members, squad_servers,
-        // node_reservations) = 28; a duplicate-column failure or a partial
+        // node_reservations) = 28, plus v20's user_recovery_codes = 29, plus
+        // v21's console_watchers = 30; a duplicate-column failure or a partial
         // apply would change this count or fail outright.
-        assert_eq!(tables, 28);
+        assert_eq!(tables, 30);
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .unwrap();
@@ -1915,7 +2029,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18, "fresh DB must land on the latest version");
+        assert_eq!(version, 22, "fresh DB must land on the latest version");
 
         // `partial` lives on `pragma_index_list`, not `sqlite_master`.
         let (name, partial): (String, i64) = conn
@@ -1997,7 +2111,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 22);
     }
     // v14 adds indexes for the three FK columns the v12 pass missed
     // (webhook server scoping, transfer source, blueprint-versioned server
@@ -2034,7 +2148,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 22);
     }
     // v15 adds the scheduler-correctness columns (per-schedule timezone,
     // in-flight run tag, retry resume point) plus the terminal-run prune
@@ -2096,7 +2210,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 22);
     }
     // v16 adds the operator-seeded expected_fingerprint column to `nodes`
     // (the plaintext/proxy-fronted enrollment path): it must exist on a
@@ -2125,7 +2239,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 22);
     }
     // v17 adds the Flow Gate columns: `schedule_tasks.condition` (nullable
     // gate JSON) and `schedule_runs.task_exits` (per-task exit-code map,
@@ -2172,14 +2286,14 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, 22);
     }
     // v18 folds the lazily-created tables into the ladder: squads,
     // squad_members, squad_servers (models::ensure_squads_tables) and
     // node_reservations (nodes::ensure_reservations_table) previously
     // appeared in sqlite_master only on first use, so fresh vs upgraded
-    // databases diverged. A fresh install must land at v18 with all four
-    // tables present, a downgrade-to-17 re-run must re-apply cleanly, and
+    // databases diverged. A fresh install must land at the latest version
+    // with all four tables present, a downgrade-to-17 re-run must re-apply cleanly, and
     // an upgrade from a v17 DB whose tables were already created lazily
     // must no-op (guarded CREATE TABLE IF NOT EXISTS).
     #[test]
@@ -2190,7 +2304,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18, "fresh DB must land on the latest version");
+        assert_eq!(version, 22, "fresh DB must land on the latest version");
 
         let table_count = |name: &str| -> i64 {
             conn.query_row(
@@ -2214,13 +2328,13 @@ mod tests {
         }
 
         // Downgrade to v17 and re-run: guarded CREATE TABLE IF NOT EXISTS
-        // must not trip "table already exists" and must land back at v18.
+        // must not trip "table already exists" and must land back at v19.
         conn.execute_batch("PRAGMA user_version = 17;").unwrap();
         migrate(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18, "downgrade-to-17 re-run must land at v18");
+        assert_eq!(version, 22, "downgrade-to-17 re-run must land at the latest version");
 
         // Upgrade from a real iteration-4/5 v17 DB, where the tables were
         // created lazily outside the ladder. Drop the ladder-created copies
@@ -2266,7 +2380,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 18, "v17 DB with lazy tables must land at v18");
+        assert_eq!(version, 22, "v17 DB with lazy tables must land at the latest version");
         for want in [
             "squads",
             "squad_members",
@@ -2279,6 +2393,239 @@ mod tests {
                 "lazy-created {want} must survive the v18 no-op"
             );
         }
+    }
+    // v19 adds the node drain state (`drain_mode` cordon/drain, non-empty
+    // reason, nullable deadline) and the DataLab vault metadata on backups
+    // (`data_lab_included`, `db_count`). All five must exist on a fresh DB
+    // with the right nullability, and the guarded ladder must re-apply
+    // cleanly from a v18 stamp.
+    #[test]
+    fn v19_adds_drain_and_datalab_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        let node_cols: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name, \"notnull\" FROM pragma_table_info('nodes') \
+                     WHERE name IN ('drain_mode','drain_reason','drain_deadline') \
+                     ORDER BY name",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(node_cols.len(), 3, "all three drain columns must exist");
+        for (name, notnull) in &node_cols {
+            match name.as_str() {
+                "drain_deadline" => {
+                    assert_eq!(*notnull, 0, "drain_deadline must stay nullable")
+                }
+                _ => assert_eq!(*notnull, 1, "{name} must be NOT NULL"),
+            }
+        }
+        let (has_inc, inc_notnull, has_cnt, cnt_notnull): (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT \
+                    (SELECT COUNT(*) FROM pragma_table_info('backups') WHERE name='data_lab_included'), \
+                    (SELECT COALESCE(SUM(\"notnull\"),0) FROM pragma_table_info('backups') WHERE name='data_lab_included'), \
+                    (SELECT COUNT(*) FROM pragma_table_info('backups') WHERE name='db_count'), \
+                    (SELECT COALESCE(SUM(\"notnull\"),0) FROM pragma_table_info('backups') WHERE name='db_count')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(has_inc, 1, "backups must carry data_lab_included");
+        assert_eq!(inc_notnull, 1, "data_lab_included must be NOT NULL");
+        assert_eq!(has_cnt, 1, "backups must carry db_count");
+        assert_eq!(cnt_notnull, 1, "db_count must be NOT NULL");
+
+        // Downgrade to v18 and re-run: guarded ADD COLUMN must not trip
+        // "duplicate column name".
+        conn.execute_batch("PRAGMA user_version = 18;").unwrap();
+        migrate(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 22);
+    }
+
+    // v20 adds the 2FA recovery-code table: `user_recovery_codes` with the
+    // SHA-256 `code_hash`, nullable `used_at` (NULL until consumed), and an
+    // FK cascade to `users`. The table must exist on a fresh DB with the
+    // right nullability, the index must exist, and the guarded ladder must
+    // re-apply cleanly from a v19 stamp.
+    #[test]
+    fn v20_adds_recovery_codes_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        let cols: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name, \"notnull\" FROM pragma_table_info('user_recovery_codes') \
+                     ORDER BY cid",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let names: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["id", "user_id", "code_hash", "used_at", "created_at"],
+            "recovery-codes table must carry the full v20 column set"
+        );
+        let used_at_notnull = cols
+            .iter()
+            .find(|(n, _)| n == "used_at")
+            .map(|(_, notnull)| *notnull)
+            .expect("used_at column must exist");
+        assert_eq!(used_at_notnull, 0, "used_at must stay nullable");
+        let code_hash_notnull = cols
+            .iter()
+            .find(|(n, _)| n == "code_hash")
+            .map(|(_, notnull)| *notnull)
+            .expect("code_hash column must exist");
+        assert_eq!(code_hash_notnull, 1, "code_hash must be NOT NULL");
+
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('user_recovery_codes') \
+                 WHERE origin='c' AND name='idx_recovery_codes_user'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1, "user lookup on recovery codes must be indexed");
+
+        // Cascade: deleting the owning user removes the codes with it.
+        conn.execute_batch(
+            "INSERT INTO users(username,email,password_hash,created_at,updated_at) \
+             VALUES('rc-user','rc@x.io','h','2026-01-01','2026-01-01'); \
+             INSERT INTO user_recovery_codes(user_id,code_hash,created_at) \
+             VALUES(1,'abc', '2026-01-01'),(1,'def','2026-01-01');",
+        )
+        .unwrap();
+        conn.execute("DELETE FROM users WHERE id=1", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_recovery_codes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "recovery codes must cascade-delete with the user");
+
+        // Downgrade to v19 and re-run: guarded CREATE TABLE must not trip
+        // "table already exists" and must land back at the latest version.
+        conn.execute_batch("PRAGMA user_version = 19;").unwrap();
+        migrate(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 22, "downgrade-to-19 re-run must land at the latest version");
+    }
+
+    // v21 adds the Console Watchers table: `console_watchers` scoped to a
+    // server via an FK cascade, with the pattern/action columns and the
+    // debounce clock. The table + index must exist on a fresh DB, `enabled`
+    // and `cooldown_secs` must default, deleting the server must cascade the
+    // watchers away, and the guarded ladder must re-apply cleanly from a v20
+    // stamp.
+    #[test]
+    fn v21_adds_console_watchers_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        let cols: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name, \"notnull\" FROM pragma_table_info('console_watchers') \
+                     ORDER BY cid",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let names: Vec<String> = cols.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "id", "server_id", "name", "pattern", "is_regex", "action",
+                "action_payload", "enabled", "cooldown_secs", "last_fired_at",
+                "trigger_count", "created_at"
+            ],
+            "console_watchers must carry the full v21 column set"
+        );
+        let last_fired_notnull = cols
+            .iter()
+            .find(|(n, _)| n == "last_fired_at")
+            .map(|(_, notnull)| *notnull)
+            .expect("last_fired_at column must exist");
+        assert_eq!(last_fired_notnull, 0, "last_fired_at must stay nullable");
+
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_index_list('console_watchers') \
+                 WHERE origin='c' AND name='idx_console_watchers_server'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1, "watcher lookup by server must be indexed");
+
+        // Defaults: a minimal insert lands enabled with the 30s cooldown.
+        conn.execute(
+            "INSERT INTO users(username,email,password_hash,created_at,updated_at) \
+             VALUES('w-user','w@x.io','h','2026-01-01','2026-01-01')",
+            [],
+        )
+        .expect("users insert");
+        conn.execute(
+            "INSERT INTO blueprints(uuid,name,created_at,updated_at) \
+             VALUES('w-bp','w-blueprint','2026-01-01','2026-01-01')",
+            [],
+        )
+        .expect("blueprints insert");
+        conn.execute(
+            "INSERT INTO servers(uuid,name,user_id,blueprint_id,created_at,updated_at) \
+             VALUES('w-uuid','w-srv',1,1,'2026-01-01','2026-01-01')",
+            [],
+        )
+        .expect("servers insert");
+        conn.execute(
+            "INSERT INTO console_watchers(server_id,name,pattern,action,created_at) \
+             VALUES(1,'crash','FATAL','notify','2026-01-01')",
+            [],
+        )
+        .expect("console_watchers insert");
+        let (enabled, cooldown): (i64, i64) = conn
+            .query_row(
+                "SELECT enabled, cooldown_secs FROM console_watchers WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(enabled, 1, "a new watcher defaults to enabled");
+        assert_eq!(cooldown, 30, "cooldown defaults to 30s");
+
+        // Cascade: deleting the owning server removes its watchers.
+        conn.execute("DELETE FROM servers WHERE id=1", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM console_watchers", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "watchers must cascade-delete with the server");
+
+        // Downgrade to v20 and re-run: guarded CREATE TABLE must not trip.
+        conn.execute_batch("PRAGMA user_version = 20;").unwrap();
+        migrate(&conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 22, "downgrade-to-20 re-run must land at the latest version");
     }
     fn test_pool() -> Db {
         Db(r2d2::Pool::builder()

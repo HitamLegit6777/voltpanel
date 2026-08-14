@@ -29,6 +29,8 @@ pub struct Notification {
     pub message: String,
     pub server_id: Option<i64>,
     pub created_at: String,
+    pub read_at: Option<String>,
+    pub link: Option<String>,
 }
 
 #[derive(Default)]
@@ -42,8 +44,20 @@ impl Notifier {
     pub fn new() -> Self {
         Self::default()
     }
-
     pub fn notify(&self, level: &str, title: &str, message: &str, server_id: Option<i64>) {
+        self.notify_link(level, title, message, server_id, None);
+    }
+
+    /// Like [`notify`](Self::notify), with a panel deep link (e.g.
+    /// `#/server/7`) that the notification center opens on click.
+    pub fn notify_link(
+        &self,
+        level: &str,
+        title: &str,
+        message: &str,
+        server_id: Option<i64>,
+        link: Option<String>,
+    ) {
         let n = Notification {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             level: level.to_string(),
@@ -51,6 +65,8 @@ impl Notifier {
             message: message.to_string(),
             server_id,
             created_at: Utc::now().to_rfc3339(),
+            read_at: None,
+            link,
         };
         {
             let mut hist = self.history.lock();
@@ -73,6 +89,28 @@ impl Notifier {
 
     pub fn history(&self) -> Vec<Notification> {
         self.history.lock().clone()
+    }
+
+    /// Mark one entry read. Returns false when the id is unknown (never
+    /// issued, or already evicted from the ring); marking twice is a no-op.
+    pub fn mark_read(&self, id: u64) -> bool {
+        let mut hist = self.history.lock();
+        if let Some(n) = hist.iter_mut().find(|n| n.id == id) {
+            if n.read_at.is_none() {
+                n.read_at = Some(Utc::now().to_rfc3339());
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn unread_count(&self) -> usize {
+        self.history
+            .lock()
+            .iter()
+            .filter(|n| n.read_at.is_none())
+            .count()
     }
 
     pub fn clear(&self) {
@@ -126,6 +164,11 @@ pub struct ProcManager {
     fs_cache: Mutex<HashMap<i64, (u64, std::time::Instant)>>,
     stop_evt: Arc<Notify>,
     stopped: AtomicBool,
+    /// Panel-owned Data Lab root (`cfg.paths.datalab_dir`). The runtime
+    /// launch binds `datalab_root/<uuid>` into the sandbox at
+    /// [`crate::isolation::DATALAB_MOUNT_DIR`] so workloads reach their
+    /// databases; the env var is set by the sandbox command itself.
+    pub datalab_root: PathBuf,
 }
 
 // ---------------- Crash classification (G8) ----------------
@@ -167,7 +210,11 @@ pub fn crash_backoff(burst_restarts: i64) -> std::time::Duration {
 }
 
 impl ProcManager {
-    pub fn new(db: Db, hub: Arc<crate::services::console::ConsoleHub>) -> Self {
+    pub fn new(
+        db: Db,
+        hub: Arc<crate::services::console::ConsoleHub>,
+        datalab_root: PathBuf,
+    ) -> Self {
         Self {
             db,
             hub,
@@ -175,6 +222,7 @@ impl ProcManager {
             fs_cache: Mutex::new(HashMap::new()),
             stop_evt: Arc::new(Notify::new()),
             stopped: AtomicBool::new(false),
+            datalab_root,
         }
     }
 
@@ -229,6 +277,11 @@ impl ProcManager {
     }
 
     pub fn info(&self, server: &Server) -> ProcessInfo {
+        // Real traffic counters from the host veth, not console I/O: the
+        // console read/write totals are byte counts of the pty pipes, which
+        // are unrelated to network bandwidth.
+        let (bandwidth_rx_bytes, bandwidth_tx_bytes) =
+            crate::isolation::network_usage(&server.uuid);
         let disk = {
             let now = std::time::Instant::now();
             let cached = self.fs_cache.lock().get(&server.id).copied();
@@ -250,8 +303,8 @@ impl ProcManager {
                 cpu_percent: 0.0,
                 memory_bytes: 0,
                 memory_percent: 0.0,
-                bandwidth_rx_bytes: 0,
-                bandwidth_tx_bytes: 0,
+                bandwidth_rx_bytes,
+                bandwidth_tx_bytes,
                 disk_usage_bytes: disk,
                 uptime_secs: 0,
             };
@@ -261,8 +314,6 @@ impl ProcManager {
         let (cpu, mem) = self.sample(server);
         let started_at = ps.started_at.lock().clone();
         let exit_code = *ps.exit_code.lock();
-        let rx = ps.read_total.load(Ordering::Relaxed);
-        let tx = ps.write_total.load(Ordering::Relaxed);
         let uptime_secs = started_at
             .as_deref()
             .and_then(|t| {
@@ -280,8 +331,8 @@ impl ProcManager {
             cpu_percent: cpu,
             memory_bytes: mem,
             memory_percent: mem_percent(mem, server.memory_mb as u64),
-            bandwidth_rx_bytes: rx,
-            bandwidth_tx_bytes: tx,
+            bandwidth_rx_bytes,
+            bandwidth_tx_bytes,
             disk_usage_bytes: disk,
             uptime_secs,
         }
@@ -324,6 +375,29 @@ impl ProcManager {
         notifier: Arc<Notifier>,
     ) -> Result<()> {
         self.start_impl(server, startup_cmd, env, notifier, false)
+    }
+
+    /// Build the sandboxed launch command for `server`, binding its Data Lab
+    /// store (`datalab_root/<uuid>`) into the sandbox at
+    /// [`crate::isolation::DATALAB_MOUNT_DIR`] with workload-UID ownership.
+    /// Extracted from `start_impl` so the runtime launch path is
+    /// unit-testable by pure command inspection without spawning a workload.
+    fn build_sandbox_command(
+        &self,
+        isolation: &crate::isolation::IsolationConfig,
+        dir: &Path,
+        server: &Server,
+        startup_cmd: &str,
+        limits: &crate::isolation::Limits,
+    ) -> Result<std::process::Command> {
+        crate::isolation::sandbox_command_with_datalab(
+            isolation,
+            dir,
+            &server.uuid,
+            startup_cmd,
+            limits,
+            &self.datalab_root,
+        )
     }
 
     /// Decide whether a (re)start may proceed, waiting out any in-flight stop
@@ -389,13 +463,7 @@ impl ProcManager {
             pids_max: crate::isolation::DEFAULT_PIDS_MAX,
         };
         let cgroup = crate::isolation::Cgroup::create(&isolation, &server.uuid, &limits)?;
-        let mut cmd = crate::isolation::sandbox_command(
-            &isolation,
-            &dir,
-            &server.uuid,
-            startup_cmd,
-            &limits,
-        )?;
+        let mut cmd = self.build_sandbox_command(&isolation, &dir, server, startup_cmd, &limits)?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -456,7 +524,7 @@ impl ProcManager {
                 return Err(error);
             }
         };
-        let network = match crate::isolation::NetworkLease::configure(pid, &server.uuid, &ports) {
+        let network = match crate::isolation::NetworkLease::configure(pid, &server.uuid, &ports, server.network_mbps as u64) {
             Ok(v) => v,
             Err(error) => {
                 reap_failed_spawn(child);
@@ -536,6 +604,7 @@ impl ProcManager {
             fs_cache: Mutex::new(self.fs_cache.lock().clone()),
             stop_evt: self.stop_evt.clone(),
             stopped: AtomicBool::new(self.stopped.load(Ordering::Relaxed)),
+            datalab_root: self.datalab_root.clone(),
         })
     }
 
@@ -560,11 +629,12 @@ impl ProcManager {
         if !srv.auto_restart {
             // Terminal crash: record the reason, notify, do not restart.
             let _ = models::mark_crashed(&self.db, srv.id, &reason);
-            notifier.notify(
+            notifier.notify_link(
                 "error",
                 &format!("Server '{}' crashed", srv.name),
                 &reason,
                 Some(srv.id),
+                Some(format!("#/server/{}", srv.id)),
             );
             return;
         }
@@ -585,11 +655,12 @@ impl ProcManager {
                     srv.crash_restart_budget
                 );
                 let _ = models::mark_crashed(&self.db, srv.id, &reason);
-                notifier.notify(
+                notifier.notify_link(
                     "error",
                     &format!("Server '{}' crashed", srv.name),
                     &reason,
                     Some(srv.id),
+                    Some(format!("#/server/{}", srv.id)),
                 );
                 return;
             }
@@ -624,11 +695,12 @@ impl ProcManager {
         let env = crate::services::blueprint::env_for_server(&self.db, &srv);
         match cmd {
             Ok(cmd) => {
-                notifier.notify(
+                notifier.notify_link(
                     "info",
                     &format!("Restarting '{}'", srv.name),
                     &format!("{reason}; backoff {}", crash_backoff(used).as_secs()),
                     Some(srv.id),
+                    Some(format!("#/server/{}", srv.id)),
                 );
                 // start_impl does blocking work (reaper drain join, cgroup
                 // setup, veth/nft network config); keep it off the Tokio
@@ -643,12 +715,30 @@ impl ProcManager {
                 {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {
-                        notifier.notify("error", "Restart failed", &e.to_string(), Some(srv.id))
+                        notifier.notify_link(
+                            "error",
+                            "Restart failed",
+                            &e.to_string(),
+                            Some(srv.id),
+                            Some(format!("#/server/{}", srv.id)),
+                        )
                     }
-                    Err(e) => notifier.notify("error", "Restart failed", &e.to_string(), Some(srv.id)),
+                    Err(e) => notifier.notify_link(
+                        "error",
+                        "Restart failed",
+                        &e.to_string(),
+                        Some(srv.id),
+                        Some(format!("#/server/{}", srv.id)),
+                    ),
                 }
             }
-            Err(e) => notifier.notify("error", "Restart failed", &e.to_string(), Some(srv.id)),
+            Err(e) => notifier.notify_link(
+                "error",
+                "Restart failed",
+                &e.to_string(),
+                Some(srv.id),
+                Some(format!("#/server/{}", srv.id)),
+            ),
         }
     }
 
@@ -1039,8 +1129,9 @@ mod tests {
         let db = crate::db::open(&tmp.path().join("t.db").to_string_lossy()).unwrap();
         let mut cfg = crate::config::Config::default();
         cfg.paths.logs_dir = tmp.path().join("logs");
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         let hub = crate::services::console::ConsoleHub::new(cfg);
-        ProcManager::new(db, Arc::new(hub))
+        ProcManager::new(db, Arc::new(hub), tmp.path().join("datalab"))
     }
 
     /// Spawn a long-lived child in its own process group, as start() does.
@@ -1099,10 +1190,35 @@ mod tests {
     fn subscriber_receives_notification() {
         let n = Notifier::new();
         let mut rx = n.subscribe();
-        n.notify("error", "boom", "details", Some(7));
+        n.notify_link("error", "boom", "details", Some(7), Some("#/server/7".into()));
         let got = rx.try_recv().unwrap();
         assert_eq!(got.title, "boom");
         assert_eq!(got.server_id, Some(7));
+        assert_eq!(got.link.as_deref(), Some("#/server/7"));
+        assert!(got.read_at.is_none(), "fresh entries start unread");
+        assert_eq!(n.unread_count(), 1);
+    }
+
+    #[test]
+    fn notifier_unread_and_mark_read_transition() {
+        let n = Notifier::new();
+        n.notify("error", "boom", "details", Some(7));
+        n.notify_link("info", "done", "finished", None, None);
+        assert_eq!(n.unread_count(), 2);
+        // Plain notify carries no link; notify_link carries what it was given.
+        assert!(n.history()[0].link.is_none());
+        assert!(n.history()[1].link.is_none());
+        // Mark one: unread drops, read_at stamps, the other entry stays unread.
+        assert!(n.mark_read(0));
+        assert_eq!(n.unread_count(), 1);
+        assert!(n.history()[0].read_at.is_some());
+        assert!(n.history()[1].read_at.is_none());
+        // Re-marking the same id is idempotent.
+        assert!(n.mark_read(0));
+        assert_eq!(n.unread_count(), 1);
+        // Unknown / evicted ids are a no-op, never an error.
+        assert!(!n.mark_read(9999));
+        assert_eq!(n.unread_count(), 1);
     }
 
     #[test]
@@ -1655,5 +1771,55 @@ mod tests {
             s.crash_reason
         );
         assert_eq!(rx_done.try_recv(), Ok(Some(0)));
+    }
+
+    #[test]
+    fn runtime_command_binds_server_datalab_dir() {
+        let m = test_manager();
+        let sid = insert_server(&m, false, false);
+        let server = models::get_server(&m.db, sid).unwrap();
+        let isolation = crate::isolation::IsolationConfig::default();
+        // Pure command inspection: building the sandbox command requires a
+        // host that passes the isolation probe (bwrap + delegated cgroup);
+        // elsewhere there is nothing to inspect, so skip.
+        if !crate::isolation::probe(&isolation).secure {
+            return;
+        }
+        let tmp_root = tempfile::tempdir().unwrap();
+        let dir = tmp_root.path().join(&server.uuid);
+        crate::isolation::prepare_root(&dir, &server.uuid).unwrap();
+        let limits = crate::isolation::Limits {
+            memory_bytes: 64 * 1_048_576,
+            cpu_percent: 25,
+            pids_max: 32,
+        };
+        let cmd = m
+            .build_sandbox_command(&isolation, &dir, &server, "echo hi", &limits)
+            .unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        // The runtime launch must bind the panel-owned datalab/<uuid> tree at
+        // the private mount dir, exactly like the blueprint install sandbox.
+        let src = m
+            .datalab_root
+            .join(&server.uuid)
+            .to_string_lossy()
+            .to_string();
+        let triples: Vec<(String, String, String)> = args
+            .windows(3)
+            .map(|w| (w[0].clone(), w[1].clone(), w[2].clone()))
+            .collect();
+        assert!(
+            triples.contains(&(
+                "--bind".into(),
+                src,
+                crate::isolation::DATALAB_MOUNT_DIR.into(),
+            )),
+            "runtime bwrap command must bind datalab/<uuid> at the mount dir: {args:?}"
+        );
+        // The bind source exists and is created by the builder.
+        assert!(m.datalab_root.join(&server.uuid).is_dir());
     }
 }

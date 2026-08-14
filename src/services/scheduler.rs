@@ -2154,10 +2154,13 @@ mod tests {
     /// Minimal scheduler for bookkeeping tests: nothing runs, only DB state
     /// transitions matter.
     fn test_scheduler(db: Db) -> Scheduler {
-        let hub = Arc::new(crate::services::console::ConsoleHub::new(
-            crate::config::Config::default(),
+        let cfg = crate::config::Config::default();
+        let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
+        let procs = Arc::new(crate::services::proc::ProcManager::new(
+            db.clone(),
+            hub.clone(),
+            cfg.paths.datalab_dir,
         ));
-        let procs = Arc::new(crate::services::proc::ProcManager::new(db.clone(), hub.clone()));
         Scheduler {
             db,
             procs,

@@ -301,6 +301,7 @@ Each workload runs with:
 ## Documentation
 
 - [Installation](docs/INSTALLATION.md)
+- [REST API](docs/API.md)
 - [Execution Fabric operations](docs/MULTI_NODE.md)
 - [Security and isolation](docs/SECURITY.md)
 - [Operations and backups](docs/OPERATIONS.md)

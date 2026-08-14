@@ -284,6 +284,12 @@ pub async fn reset_rate_limits(
 }
 
 /// Per-server limit override (admin).
+///
+/// `memory_mb` is MiB, `cpu_percent` is percent. Bandwidth limits are
+/// **bytes per 5s interval**: the monitor sweep samples every 5s and compares
+/// the cumulative network-counter delta against the cap, so a `bandwidth_rx`
+/// of 1_000_000 allows ~1 MB of ingress per 5s (~200 KB/s). `0` disables the
+/// cap for that direction; the field type stays `u64`.
 #[derive(Deserialize)]
 pub struct LimitOverride {
     pub memory_mb: Option<u64>,
@@ -308,6 +314,29 @@ pub async fn set_server_limits(
     }
     if req.cpu_percent == Some(0) {
         return Err(ApiError::bad_request("cpu limit must be positive"));
+    }
+    // Bandwidth caps are bytes per 5s sweep interval; 0 disables the cap.
+    // Upper bound: 1 TiB per 5s (~200 GiB/s) — no real link approaches this,
+    // so a larger value is a typo, not a config.
+    const MAX_BANDWIDTH_PER_5S: u64 = 1 << 40;
+    for (name, v) in [
+        ("bandwidth_rx", req.bandwidth_rx),
+        ("bandwidth_tx", req.bandwidth_tx),
+    ] {
+        if let Some(v) = v {
+            if v > MAX_BANDWIDTH_PER_5S {
+                return Err(ApiError::bad_request(format!(
+                    "{name} must be at most {MAX_BANDWIDTH_PER_5S} bytes per 5s (0 disables the cap)"
+                )));
+            }
+        }
+    }
+    // Guard the sweep's `memory_mb * 1024 * 1024` against overflow; the cap
+    // itself is enforced against a live sample, so this is just a sane bound.
+    if let Some(m) = req.memory_mb {
+        if m > u64::MAX / (1024 * 1024) {
+            return Err(ApiError::bad_request("memory limit too large"));
+        }
     }
     let mut memory_mb = req.memory_mb.unwrap_or(s.memory_mb as u64);
     // Floor the memory cap at what the workload is live-using right now: a cap
@@ -339,7 +368,14 @@ pub async fn set_server_limits(
         bandwidth_rx: req.bandwidth_rx.unwrap_or(0),
         bandwidth_tx: req.bandwidth_tx.unwrap_or(0),
     });
-    Ok(ok(json!({ "ok": true, "memory_mb": memory_mb })))
+    Ok(ok(json!({
+        "ok": true,
+        "memory_mb": memory_mb,
+        "cpu_percent": req.cpu_percent.unwrap_or(s.cpu_percent as u64),
+        "bandwidth_rx": req.bandwidth_rx.unwrap_or(0),
+        "bandwidth_tx": req.bandwidth_tx.unwrap_or(0),
+        "bandwidth_unit": "bytes_per_5s",
+    })))
 }
 
 /// Websocket-less live stats polling helper endpoint.

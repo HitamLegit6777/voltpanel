@@ -12,9 +12,13 @@ journalctl -u voltd -f
 Management wrappers:
 
 ```bash
-voltpanel-manage status|logs|doctor|backup|upgrade
+voltpanel-manage status|logs|doctor|backup|restore|upgrade
 voltd-manage status|logs|doctor|upgrade
 ```
+
+`voltpanel-manage restore ARCHIVE [--force]` restores a panel backup archive
+created by `backup`; `doctor --bundle PATH` writes a redacted diagnostics
+archive (see below).
 
 ## Health checks
 
@@ -38,20 +42,119 @@ Use:
 sudo voltpanel-manage backup
 ```
 
-This uses SQLite's online backup command and archives server-related panel files.
+This writes `panel-<timestamp>.tar.gz` (plus `panel-<timestamp>.sha256`) into
+`/var/backups/voltpanel` (override with `$VOLTPANEL_BACKUP_DIR`). Each archive
+contains:
 
-Store backups outside the panel host when possible.
+- `voltpanel.db` — SQLite **online backup** artifact, a consistent snapshot
+  even while the service is running
+- `servers/`, `backups/`, `blueprints/`, `websites/`, `datalab/` — panel data
+  directories present on the host
+- `config/` — the full config directory (`config.toml`, `tls/`, `first-run.env`)
+- `manifest.json` — `format_version`, the SQLite `user_version`, and a per-file
+  SHA-256 checksum map used to verify the archive before any restore
+
+The `.sha256` file holds the archive's own checksum. The 10 newest backups are
+retained; older ones are pruned automatically. Store backups outside the panel
+host when possible.
+
+## Restore the panel
+
+```bash
+sudo voltpanel-manage restore /var/backups/voltpanel/panel-2026-08-10-161500.tar.gz
+sudo voltpanel-manage restore /var/backups/voltpanel/panel-2026-08-10-161500.tar.gz --force
+```
+
+Restore validates the archive structure first (no absolute paths, `..`
+traversal, symlink/hardlink members, or unknown top-level entries), checks the
+archive checksum against its `.sha256` companion when present, and refuses
+archives whose schema is newer than the installed binary supports. It then
+stops the service (after a confirmation prompt; `--force` skips the prompt),
+snapshots the current state, re-verifies every extracted file against the
+manifest checksums, restores the database and directories, runs `check-config`
+and `PRAGMA integrity_check`, and starts the service. Any failure before the
+service is confirmed healthy rolls the previous state back automatically.
+
+Restoring overwrites the current database, data directories, and config, and
+removes files added since the backup. Create a fresh backup first, and stop
+local workloads beforehand (or pass `--force`). Archives created by older
+`backup` versions (`panel-*.db` / `files-*.tar.gz`) cannot be restored with
+this command; keep them until the panel has produced new-format backups.
+
+## Site gateway (host-routed vhosts)
+
+VoltPanel can publish website records (per-workspace domains, static roots or
+reverse proxies) through an embedded gateway on its own listener, configured
+under `[sites]`:
+
+```toml
+[sites]
+listen = "0.0.0.0:8081"   # unset/absent = gateway disabled
+trusted_proxies = []      # CIDRs allowed to set X-Forwarded-Proto
+```
+
+The gateway resolves each request's `Host` header against enabled website
+records and either serves the site's static root or reverse-proxies its
+upstream. Point your DNS/Caddy/Traefik at this listener, not at the admin
+panel's `web.listen`.
+
+Security model:
+
+
+- **Static roots** are pinned under `paths.website_dir/server_<id>`; the URL
+  path is joined with a zip-slip-safe joiner that rejects `..` escapes and
+  symlinks, so a site can never read outside its own root. Symlinked files
+  inside a root are not served.
+- **Reverse-proxy upstreams** are SSRF-gated at request time: the target
+  must resolve to a loopback or private (RFC 1918 / IPv6 ULA) address.
+  Public-IP upstreams are refused with 502 — the gateway is not an open
+  proxy to the internet or to cloud metadata endpoints. Redirects are never
+  followed. Keep local workloads on loopback/private addresses.
+- **`force_https`** sites are redirected with 308 unless the request is
+  HTTPS. The gateway terminates plain HTTP, so "HTTPS" means the socket peer
+  is inside `sites.trusted_proxies` and the request carries
+  `X-Forwarded-Proto: https`. With no trusted proxies configured the header
+  is never trusted and every plain request redirects.
+- `GET /__volt/health` is answered before host dispatch and works for any
+  `Host` header — use it for load-balancer health checks.
+
+Startup behavior: a bind error on a *configured* `sites.listen` aborts panel
+startup (fail fast — fix the config). Once bound, a runtime serve failure is
+logged and the panel keeps running. On shutdown the gateway drains
+concurrently with the panel's HTTP connections.
+
+Site records are managed per workspace through the panel UI/API
+(`/api/servers/{id}/sites`); the gateway picks up create/update/enable
+changes immediately, and only `enabled` sites are routed.
+
 
 ## Server backups
 
 Server backups are SHA-256 verified. Remote backups use a node snapshot and store the resulting archive in the panel backup directory.
 
 Before restore:
-
 - Stop the workload
 - Verify available disk
 - Confirm the backup checksum
 - Keep a second known-good backup
+
+## Diagnostics bundle
+
+```bash
+sudo voltpanel-manage doctor --bundle ./voltpanel-diag.tar.gz
+sudo voltd-manage doctor --bundle ./voltd-diag.tar.gz
+```
+
+The bundle is a `tar.gz` written with mode `0600` containing one
+`diagnostics.txt` with: redacted config, service status, binary version,
+database integrity and schema version (panel), workload count and isolation
+checks (node), disk/memory usage, and the last 200 log lines. Secret-bearing
+values (`secret`, `password`, `token`, `key`, `signature`) are masked in both
+config and logs before the bundle is packed.
+
+The node refuses to create a bundle while workloads are running, since live
+workload output can leak into the logs; pass `--force` after stopping or
+draining workloads to override.
 
 ## Logs
 

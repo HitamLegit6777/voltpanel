@@ -242,6 +242,12 @@ pub struct UpdateScheduleReq {
     pub retry_backoff_s: Option<i64>,
     pub only_when_online: Option<bool>,
     pub timezone: Option<String>,
+    /// Flow Gate: optional full replacement of the task chain. When present,
+    /// the ENTIRE chain is validated up front and then swapped atomically in
+    /// one transaction — the old tasks are only deleted once every submitted
+    /// action, sequence and condition has been checked, so an invalid batch
+    /// (e.g. an unknown gate kind) leaves the existing chain untouched.
+    pub tasks: Option<Vec<ScheduleTaskReq>>,
 }
 
 pub async fn update(
@@ -273,12 +279,58 @@ pub async fn update(
             "max_retries and retry_backoff_s must be >= 0",
         ));
     }
+    // Full task-chain replacement: validate EVERYTHING (actions, strictly
+    // increasing sequences, and each condition gate) before any write — an
+    // unknown gate kind must fail here, with the existing chain still intact
+    // and untouched. The canonical conditions are computed once, up front.
+    let task_batch: Option<Vec<models::ScheduleTaskReplace>> = match &req.tasks {
+        None => None,
+        Some(tasks) => {
+            let mut batch = Vec::with_capacity(tasks.len());
+            for (idx, task) in tasks.iter().enumerate() {
+                if idx > 0 && task.sequence <= tasks[idx - 1].sequence {
+                    return Err(ApiError::bad_request(
+                        "tasks must be in strictly increasing sequence order",
+                    ));
+                }
+                if !matches!(
+                    task.action.as_str(),
+                    "start" | "stop" | "restart" | "kill" | "command" | "backup" | "notify"
+                ) {
+                    return Err(ApiError::bad_request(format!(
+                        "unsupported schedule action: {}",
+                        task.action
+                    )));
+                }
+                let cond =
+                    crate::services::scheduler::validate_condition(task.condition.as_ref(), idx)
+                        .map_err(|e| ApiError::bad_request(format!("task {idx}: {e}")))?;
+                batch.push(models::ScheduleTaskReplace {
+                    action: task.action.clone(),
+                    payload: task.payload.clone().unwrap_or_default(),
+                    sequence: task.sequence,
+                    condition: cond,
+                });
+            }
+            Some(batch)
+        }
+    };
     let sch_id = sch.id;
     let sch_for_update = sch.clone();
     blocking(state.db.clone(), move |db| {
         models::update_schedule(&db, &sch_for_update)
     })
     .await?;
+    if let Some(batch) = task_batch {
+        // Atomic swap: DELETE of the old chain and the INSERTs of the new one
+        // (conditions included) share a single BEGIN IMMEDIATE transaction, so
+        // a mid-insert failure rolls the old chain back untouched.
+        let b = batch.clone();
+        blocking(state.db.clone(), move |db| {
+            models::replace_schedule_tasks(&db, sch_id, &b)
+        })
+        .await?;
+    }
     let (max_retries, retry_backoff_s, only_when_online) =
         (req.max_retries, req.retry_backoff_s, req.only_when_online);
     blocking(state.db.clone(), move |db| {
@@ -572,7 +624,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::routing::get;
+    use axum::routing::{get, patch};
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -583,8 +635,21 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.paths.logs_dir = tmp.path().join("logs");
         cfg.paths.servers_dir = tmp.path().join("servers");
+        cfg.paths.datalab_dir = tmp.path().join("datalab");
         let hub = Arc::new(crate::services::console::ConsoleHub::new(cfg.clone()));
-        let procs = Arc::new(crate::services::proc::ProcManager::new(db.clone(), hub.clone()));
+        let procs = Arc::new(crate::services::proc::ProcManager::new(
+            db.clone(),
+            hub.clone(),
+            cfg.paths.datalab_dir.clone(),
+        ));
+        let watcher_engine = Arc::new(crate::services::watcher::WatcherEngine::new(
+            db.clone(),
+            Arc::new(crate::services::proc::Notifier::new()),
+            Arc::downgrade(&hub),
+            procs.clone(),
+            Arc::new(crate::services::node::NodeClient::new().unwrap()),
+            tokio::runtime::Handle::current(),
+        ));
         let state = AppState {
             db,
             cfg,
@@ -595,6 +660,7 @@ mod tests {
             node_client: Arc::new(crate::services::node::NodeClient::new().unwrap()),
             node_nonces: Arc::new(crate::services::node::NonceCache::default()),
             running: Arc::new(AtomicBool::new(true)),
+            watcher_engine,
         };
         (tmp, state)
     }
@@ -627,7 +693,7 @@ mod tests {
         )
         .unwrap();
         let server_id = models::create_server(
-            &state.db, uuid, "srv", user_id, blueprint_id, "generic", "echo", 512, 1024, 100,
+            &state.db, uuid, "srv", user_id, blueprint_id, "generic", "echo", 512, 1024, 100, 0,
         )
         .unwrap();
         let (raw, _) = crate::auth::create_session(
@@ -640,6 +706,7 @@ mod tests {
     fn router(state: AppState) -> axum::Router {
         axum::Router::new()
             .route("/api/servers/:id/schedules", get(list).post(create))
+            .route("/api/schedules/:id", patch(update))
             .with_state(state)
     }
 
@@ -733,5 +800,131 @@ mod tests {
         assert_eq!(tasks[0]["condition"], serde_json::Value::Null);
         assert_eq!(tasks[1]["condition"]["kind"], "exit");
         assert_eq!(tasks[1]["condition"]["task_index"], 0);
+    }
+
+    /// Flow Gate: an unknown gate kind in a PATCH `tasks` batch is rejected
+    /// during validation — BEFORE the transaction — so the old task chain
+    /// (actions, sequences and stored conditions) survives untouched.
+    #[tokio::test]
+    async fn update_rejects_unknown_gate_leaving_old_tasks_intact() {
+        let (_tmp, state) = test_state();
+        let (server_id, cookie) = seed(&state, "uuid-unk");
+        let (status, body) = request(
+            state.clone(),
+            "POST",
+            &format!("/api/servers/{server_id}/schedules"),
+            &cookie,
+            Some(serde_json::json!({
+                "name": "flow",
+                "cron_expr": "*/5 * * * *",
+                "enabled": false,
+                "tasks": [
+                    { "action": "notify", "payload": "a", "sequence": 1 },
+                    { "action": "restart", "payload": "", "sequence": 2,
+                      "condition": { "kind": "exit", "task_index": 0, "code": 0 } },
+                ],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_i64().expect("created schedule id");
+        let (status, _) = request(
+            state.clone(),
+            "PATCH",
+            &format!("/api/schedules/{id}"),
+            &cookie,
+            Some(serde_json::json!({
+                "tasks": [
+                    { "action": "kill", "payload": "", "sequence": 1,
+                      "condition": { "kind": "bogus" } },
+                ],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // The rejected batch must leave the old chain exactly as it was.
+        let conn = state.db.get().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT action,payload,sequence,condition FROM schedule_tasks WHERE schedule_id=?1 ORDER BY sequence, id",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        drop(stmt);
+        drop(conn);
+        assert_eq!(
+            rows,
+            vec![
+                ("notify".to_string(), "a".to_string(), 1, None),
+                (
+                    "restart".to_string(),
+                    "".to_string(),
+                    2,
+                    Some(r#"{"kind":"exit","task_index":0,"code":0}"#.to_string())
+                ),
+            ]
+        );
+    }
+
+    /// Flow Gate: a valid PATCH `tasks` batch swaps the whole chain in one
+    /// request — old tasks gone, new actions/sequences in request order, and
+    /// each condition normalized to its canonical stored form.
+    #[tokio::test]
+    async fn update_replaces_tasks_atomically_preserving_order_and_conditions() {
+        let (_tmp, state) = test_state();
+        let (server_id, cookie) = seed(&state, "uuid-rep");
+        let (status, body) = request(
+            state.clone(),
+            "POST",
+            &format!("/api/servers/{server_id}/schedules"),
+            &cookie,
+            Some(serde_json::json!({
+                "name": "flow",
+                "cron_expr": "*/5 * * * *",
+                "enabled": false,
+                "tasks": [
+                    { "action": "start", "payload": "", "sequence": 1 },
+                    { "action": "notify", "payload": "old", "sequence": 2 },
+                ],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["id"].as_i64().expect("created schedule id");
+        let (status, body) = request(
+            state.clone(),
+            "PATCH",
+            &format!("/api/schedules/{id}"),
+            &cookie,
+            Some(serde_json::json!({
+                "name": "renamed",
+                "tasks": [
+                    { "action": "notify", "payload": "x", "sequence": 0,
+                      "condition": { "kind": "none" } },
+                    { "action": "command", "payload": "echo hi", "sequence": 1,
+                      "condition": { "kind": "exit", "task_index": 0, "code": 3 } },
+                ],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "renamed", "fields update alongside tasks");
+        let tasks = body["tasks"].as_array().expect("schedule serializes tasks");
+        assert_eq!(tasks.len(), 2, "old chain fully replaced, not appended");
+        assert_eq!(tasks[0]["action"], "notify");
+        assert_eq!(tasks[0]["payload"], "x");
+        assert_eq!(tasks[0]["sequence"], 0);
+        // {"kind":"none"} normalizes to no gate.
+        assert_eq!(tasks[0]["condition"], serde_json::Value::Null);
+        assert_eq!(tasks[1]["action"], "command");
+        assert_eq!(tasks[1]["condition"]["kind"], "exit");
+        assert_eq!(tasks[1]["condition"]["task_index"], 0);
+        assert_eq!(tasks[1]["condition"]["code"], 3);
     }
 }

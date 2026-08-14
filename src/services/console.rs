@@ -4,7 +4,7 @@ use crate::services::proc::ProcManager;
 use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use tokio::sync::broadcast;
 
 /// What produced a console line: runtime output from the server process, or
@@ -113,6 +113,11 @@ pub struct ConsoleHub {
     /// the bounded queue makes new commands fail fast instead of pinning a
     /// blocking-pool thread and the stdin mutex forever.
     stdin_writers: DashMap<i64, StdinWriter>,
+    /// Console watcher engine, wired in after construction (the engine holds a
+    /// `Weak` back-edge to this hub, so the cell is shared across clones and
+    /// set exactly once). `None` until `set_engine`; `append` skips evaluation
+    /// while unset.
+    engine: Arc<OnceLock<Arc<super::watcher::WatcherEngine>>>,
 }
 
 pub const BUFFER_CAP: usize = 500;
@@ -166,7 +171,15 @@ impl ConsoleHub {
             log_tx,
             log_warned: DashSet::new(),
             stdin_writers: DashMap::new(),
+            engine: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Wire the console watcher engine in after both it and the hub exist (the
+    /// engine holds a `Weak` back-edge to this hub). Idempotent: a second call
+    /// is ignored, matching the set-once cell.
+    pub fn set_engine(&self, engine: Arc<super::watcher::WatcherEngine>) {
+        let _ = self.engine.set(engine);
     }
 
     /// Append raw output from a server process or install script. Splits into
@@ -219,6 +232,12 @@ impl ConsoleHub {
                 start = 0;
             }
         }
+        // Console watchers evaluate only completed Runtime lines: install-script
+        // output must never trigger restart/stop/notify actions. Collect the
+        // just-completed line texts (borrowed from `parts`, valid past `drop`)
+        // only when a watcher engine is wired and this chunk is runtime output.
+        let watch = matches!(kind, LineKind::Runtime) && self.engine.get().is_some();
+        let mut completed: Vec<&str> = Vec::new();
         for part in parts.iter().take(complete_count).skip(start) {
             if part.is_empty() {
                 continue;
@@ -227,6 +246,9 @@ impl ConsoleHub {
             buf.next_seq += 1;
             buf.lines.push((seq, ConsoleEntry { text: part.to_string(), kind }));
             buf.last_ok = seq;
+            if watch {
+                completed.push(part);
+            }
         }
         if !text.ends_with('\n') {
             // The trailing part is still partial; stash it as the pending line.
@@ -256,6 +278,14 @@ impl ConsoleHub {
             .unwrap_or_default();
         let partial_end = buf.partial;
         drop(buf);
+        // Evaluate console watchers off the ring lock (the buffer is dropped).
+        // Cheap and allocation-free when nothing matches; dispatch is spawned
+        // onto the Tokio handle inside the engine, so this never blocks append.
+        if watch && !completed.is_empty() {
+            if let Some(engine) = self.engine.get() {
+                engine.evaluate(server_id, &completed);
+            }
+        }
         // Persist to the log file on the dedicated writer thread (blocking
         // I/O never runs on a caller of append). The queue is bounded; when
         // the disk stalls chunks are dropped (warn once per server) rather

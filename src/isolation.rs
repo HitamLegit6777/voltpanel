@@ -36,6 +36,13 @@ impl Drop for AtomicFlagGuard<'_> {
 pub const MIN_SERVER_UID: u32 = 200_000;
 pub const UID_RANGE: u32 = 400_000;
 pub const DEFAULT_PIDS_MAX: u64 = 512;
+
+/// Where the server's Data Lab directory appears inside a sandbox, and the
+/// environment variable that advertises it to the workload. The path lives on
+/// bwrap's private root (not inside the workload-owned server tree), so a
+/// workload can never pre-plant a symlink at the mount point.
+pub const DATALAB_MOUNT_DIR: &str = "/data/.voltp/databases";
+pub const DATALAB_ENV_VAR: &str = "VOLTP_DATALAB_DIR";
 static IDENTITY_LOCK: std::sync::LazyLock<parking_lot::Mutex<()>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(()));
 
@@ -760,12 +767,82 @@ static SECCOMP_MEMFDS: std::sync::LazyLock<parking_lot::Mutex<std::collections::
         ))
     });
 
+/// Append the Data Lab bind to a bwrap command and hand the directory to the
+/// workload UID. The source is the panel-owned `datalab_root/<uuid>` tree —
+/// never a path under the workload-owned server root. Inside the sandbox the
+/// mount lives at [`DATALAB_MOUNT_DIR`] on bwrap's private root, so a
+/// workload cannot plant a symlink at the mount point, and the host
+/// filesystem is otherwise invisible, so links inside the mount cannot
+/// escape either. Extracted from the builder so the arg shape is
+/// unit-testable without root privileges or bubblewrap.
+fn append_datalab_bind(
+    command: &mut Command,
+    datalab_root: &Path,
+    uuid: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<()> {
+    let src = datalab_root.join(uuid);
+    fs::create_dir_all(&src).with_context(|| format!("cannot create {}", src.display()))?;
+    fs::set_permissions(&src, fs::Permissions::from_mode(0o700))?;
+    if unsafe { libc::geteuid() } == 0 {
+        let cpath = std::ffi::CString::new(src.as_os_str().as_encoded_bytes())?;
+        if unsafe { libc::chown(cpath.as_ptr(), uid, gid) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("chown datalab directory");
+        }
+    }
+    command
+        .arg("--dir")
+        .arg("/data")
+        .arg("--dir")
+        .arg(DATALAB_MOUNT_DIR)
+        .arg("--bind")
+        .arg(&src)
+        .arg(DATALAB_MOUNT_DIR)
+        .arg("--setenv")
+        .arg(DATALAB_ENV_VAR)
+        .arg(DATALAB_MOUNT_DIR);
+    Ok(())
+}
+
+/// Build the sandboxed launch command without a Data Lab bind.
 pub fn sandbox_command(
     config: &IsolationConfig,
     root: &Path,
     uuid: &str,
     startup: &str,
     limits: &Limits,
+) -> Result<Command> {
+    build_sandbox_command(config, root, uuid, startup, limits, None)
+}
+
+/// Like [`sandbox_command`], additionally binding the server's Data Lab
+/// directory into the sandbox at [`DATALAB_MOUNT_DIR`] with workload-UID
+/// ownership and setting [`DATALAB_ENV_VAR`] to the mount path.
+///
+/// `datalab_root` is the panel's Data Lab root (`cfg.paths.datalab_dir`); the
+/// bound source is `datalab_root/<uuid>`, the directory
+/// [`crate::services::databases::db_dir`] manages. The runtime launch path
+/// (`services::proc`) adopts this once it can reach the panel config; the
+/// blueprint install sandbox already passes it.
+pub fn sandbox_command_with_datalab(
+    config: &IsolationConfig,
+    root: &Path,
+    uuid: &str,
+    startup: &str,
+    limits: &Limits,
+    datalab_root: &Path,
+) -> Result<Command> {
+    build_sandbox_command(config, root, uuid, startup, limits, Some(datalab_root))
+}
+
+fn build_sandbox_command(
+    config: &IsolationConfig,
+    root: &Path,
+    uuid: &str,
+    startup: &str,
+    limits: &Limits,
+    datalab: Option<&Path>,
 ) -> Result<Command> {
     if !config.enabled {
         let mut command = Command::new("sh");
@@ -844,7 +921,11 @@ pub fn sandbox_command(
         .arg("/tmp")
         .arg("--setenv")
         .arg("USER")
-        .arg("container")
+        .arg("container");
+    if let Some(datalab) = datalab {
+        append_datalab_bind(&mut command, datalab, uuid, uid, gid)?;
+    }
+    command
         .arg("--hostname")
         .arg(format!("vp-{}", &sanitize(uuid)[..12.min(uuid.len())]));
     for runtime in ["/usr", "/bin", "/sbin", "/lib", "/lib64"] {
@@ -967,7 +1048,7 @@ fn has_live_vp_veth() -> bool {
 }
 
 impl NetworkLease {
-    pub fn configure(pid: u32, uuid: &str, ports: &[u16]) -> Result<Self> {
+    pub fn configure(pid: u32, uuid: &str, ports: &[u16], network_mbps: u64) -> Result<Self> {
         if unsafe { libc::geteuid() } != 0 {
             bail!("network isolation requires root privileges");
         }
@@ -1082,8 +1163,35 @@ impl NetworkLease {
             .map(|value| value.trim().to_string());
         fs::write("/proc/sys/net/ipv4/ip_forward", "1").context("enable ip_forward")?;
         run(Command::new("nsenter").args(["-t",&ns_pid.to_string(),"-m","--","/bin/sh","-c","printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' > /run/resolv.conf; mount --bind /run/resolv.conf /etc/resolv.conf; touch /run/voltp-network-ready"]))?;
+        apply_bandwidth_limit(&host_if, network_mbps);
         scrub.disarm();
         Ok(Self { host_if, table, ip_forward_prev })
+    }
+}
+
+/// Apply a symmetric bandwidth cap (Mbps) to the host-side veth via `tc`.
+/// 0 = unlimited (no-op). Best-effort: a missing `tc` binary or an unsupported
+/// kernel logs a warning and leaves the workload unthrottled — the monitor's
+/// 3-strike auto-kill remains the backstop.
+fn apply_bandwidth_limit(host_if: &str, mbps: u64) {
+    if mbps == 0 {
+        return;
+    }
+    let rate = format!("{mbps}mbit");
+    // ~10ms of line rate, floored at 64 kbit so `tc` accepts the burst.
+    let burst = format!("{}kbit", (mbps * 100).max(64));
+    let egress = Command::new("tc")
+        .args(["qdisc", "replace", "dev", host_if, "root", "tbf", "rate", &rate, "burst", &burst, "latency", "50ms"])
+        .status();
+    let ingress = Command::new("tc")
+        .args(["qdisc", "replace", "dev", host_if, "handle", "ffff:", "ingress"])
+        .status();
+    let police = Command::new("tc")
+        .args(["filter", "replace", "dev", host_if, "parent", "ffff:", "protocol", "all", "prio", "1", "u32", "match", "u32", "0", "0", "police", "rate", &rate, "burst", &burst, "drop", "flowid", ":1"])
+        .status();
+    match (egress, ingress, police) {
+        (Ok(a), Ok(b), Ok(c)) if a.success() && b.success() && c.success() => {}
+        _ => eprintln!("network bandwidth throttle not applied on {host_if} ({mbps} Mbps): tc unavailable or unsupported"),
     }
 }
 
@@ -1108,6 +1216,92 @@ impl Drop for NetworkLease {
 fn resource_names(digest: &[u8]) -> (String, String) {
     let hex = hex::encode(&digest[..6]);
     (format!("vp{hex}"), format!("vp{hex}"))
+}
+/// Last observed per-interface network usage, kept so a server whose veth
+/// lease has been torn down (stopped server) keeps reporting the final
+/// cumulative reading instead of dropping to 0 — the counters are monotonic
+/// and every consumer (metrics deltas, bandwidth limits) relies on that.
+/// Bounded to [`LAST_NET_USAGE_CAP`] entries, least-recently-written first,
+/// so a fleet churning through server UUIDs cannot grow the map unbounded;
+/// the `Instant` is refreshed on every live read, so running servers are
+/// never evicted. Deleted servers are dropped from it once the entry ages
+/// out (there is no safe explicit-cleanup hook: the lease teardown is also
+/// the restart path that must keep last-known readings).
+/// Per-interface last-known usage cache: host veth name -> (rx, tx, last
+/// write time). Factored into an alias so the bounded [`LAST_NET_USAGE`]
+/// static and its insert helper share one shape.
+type NetUsageCache = std::collections::HashMap<String, (u64, u64, std::time::Instant)>;
+const LAST_NET_USAGE_CAP: usize = 10_000;
+static LAST_NET_USAGE: std::sync::LazyLock<parking_lot::Mutex<NetUsageCache>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(NetUsageCache::new()));
+
+/// Insert `iface`'s cumulative `(rx, tx)` into `cache`, evicting the
+/// least-recently-written entry once the cache would exceed `cap`. Pure so
+/// the bound is unit-testable with a tiny cap; `network_usage_at` passes the
+/// production [`LAST_NET_USAGE_CAP`]. The write time of a live read refreshes
+/// the entry, so a server that keeps polling is never the eviction target —
+/// the oldest entry is the longest-gone stopped server.
+fn cache_net_usage(
+    cache: &mut NetUsageCache,
+    iface: String,
+    usage: (u64, u64),
+    cap: usize,
+) {
+    cache.insert(iface, (usage.0, usage.1, std::time::Instant::now()));
+    if cache.len() <= cap {
+        return;
+    }
+    let oldest = cache
+        .iter()
+        .min_by_key(|(_, (_, _, seen))| *seen)
+        .map(|(key, _)| key.clone());
+    if let Some(key) = oldest {
+        cache.remove(&key);
+    }
+}
+
+/// Raw cumulative byte counters of one host-side veth interface, read from
+/// sysfs (`<root>/class/net/<iface>/statistics/{rx,tx}_bytes`). Returns `None`
+/// when the interface is missing (lease gone) or unreadable. The `root`
+/// parameter makes the reader pure and unit-testable with a temp dir; the
+/// real callers pass `/sys`.
+pub(crate) fn read_iface_stats(root: &Path, iface: &str) -> Option<(u64, u64)> {
+    let stats = root.join("class/net").join(iface).join("statistics");
+    let rx = fs::read_to_string(stats.join("rx_bytes")).ok()?.trim().parse().ok()?;
+    let tx = fs::read_to_string(stats.join("tx_bytes")).ok()?.trim().parse().ok()?;
+    Some((rx, tx))
+}
+
+/// Real per-server network traffic as cumulative counters, in server
+/// perspective: `rx` is bytes the server received (ingress) and `tx` is bytes
+/// the server sent (egress).
+///
+/// Direction mapping: the lease pairs `vp<hex>` (host netns) with `eth0`
+/// (guest netns), so bytes the host interface *transmits* are bytes the guest
+/// *receives* (server rx) and bytes the host interface *receives* are bytes
+/// the guest *sent* (server tx) — the two are swapped on purpose. While the
+/// lease exists the counters are read live from
+/// `/sys/class/net/<host_if>/statistics`; on a missing interface the last
+/// known reading is returned (see `LAST_NET_USAGE`), and a server never seen
+/// reports 0.
+pub fn network_usage(uuid: &str) -> (u64, u64) {
+    network_usage_at(Path::new("/sys"), uuid)
+}
+
+fn network_usage_at(root: &Path, uuid: &str) -> (u64, u64) {
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(uuid.as_bytes());
+    let (host_if, _table) = resource_names(&digest);
+    let fresh = read_iface_stats(root, &host_if);
+    let mut cache = LAST_NET_USAGE.lock();
+    match fresh {
+        Some((host_rx, host_tx)) => {
+            // Host perspective -> server perspective (see doc comment above).
+            let mapped = (host_tx, host_rx);
+            cache_net_usage(&mut cache, host_if, mapped, LAST_NET_USAGE_CAP);
+            mapped
+        }
+        None => cache.get(&host_if).map(|&(rx, tx, _)| (rx, tx)).unwrap_or((0, 0)),
+    }
 }
 /// Serializes subnet allocation: the scan of live host interfaces and the
 /// host-address add must be atomic with respect to other configures, or two
@@ -1447,7 +1641,7 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let child = command.spawn().unwrap();
-        let lease = NetworkLease::configure(child.id(), "sandbox-test-a", &[]).unwrap();
+        let lease = NetworkLease::configure(child.id(), "sandbox-test-a", &[], 0).unwrap();
         let output = child.wait_with_output().unwrap();
         drop(lease);
         assert!(
@@ -1481,6 +1675,65 @@ mod tests {
         assert_eq!(ifa.len(), 14, "vp + 12 hex must fit IFNAMSIZ");
         assert!(ifa.starts_with("vp"));
         assert!(ifa[2..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+    #[test]
+    fn read_iface_stats_parses_sysfs_counters() {
+        let temp = tempfile::tempdir().unwrap();
+        let stats = temp.path().join("class/net/vpabcd/statistics");
+        fs::create_dir_all(&stats).unwrap();
+        fs::write(stats.join("rx_bytes"), "4096\n").unwrap();
+        fs::write(stats.join("tx_bytes"), "8192\n").unwrap();
+        assert_eq!(read_iface_stats(temp.path(), "vpabcd"), Some((4096, 8192)));
+        // Missing interface (no lease) -> None.
+        assert_eq!(read_iface_stats(temp.path(), "vpdead"), None);
+    }
+    #[test]
+    fn network_usage_swaps_directions_and_caches_last_known() {
+        let temp = tempfile::tempdir().unwrap();
+        let uuid = "net-test-uuid-0001";
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(uuid.as_bytes());
+        let (host_if, _) = resource_names(&digest);
+        // A server never seen reports 0.
+        assert_eq!(network_usage_at(temp.path(), uuid), (0, 0));
+        let stats = temp.path().join("class/net").join(&host_if).join("statistics");
+        fs::create_dir_all(&stats).unwrap();
+        fs::write(stats.join("rx_bytes"), "500\n").unwrap();
+        fs::write(stats.join("tx_bytes"), "1000\n").unwrap();
+        // Direction mapping: host tx = what the guest receives (server rx,
+        // ingress); host rx = what the guest sent (server tx, egress).
+        assert_eq!(network_usage_at(temp.path(), uuid), (1000, 500));
+        // Lease torn down (interface gone): last known reading is kept so the
+        // cumulative counters stay monotonic across a restart.
+        fs::remove_dir_all(temp.path().join("class/net").join(&host_if)).unwrap();
+        assert_eq!(network_usage_at(temp.path(), uuid), (1000, 500));
+        // Cache hygiene: keep this test idempotent for re-runs.
+        LAST_NET_USAGE.lock().remove(&host_if);
+    }
+    #[test]
+    fn net_usage_cache_is_bounded_oldest_first() {
+        let mut cache = std::collections::HashMap::new();
+        let cap = 1_000;
+        // Churn 1100 distinct veth names (unique interfaces) through the
+        // cache: the bound must hold and eviction must hit the oldest entries.
+        for i in 0..1_100u64 {
+            cache_net_usage(&mut cache, format!("vp{i:012x}"), (i, i * 2), cap);
+        }
+        assert_eq!(cache.len(), cap);
+        // The 1000 most-recently-written entries survive with their readings.
+        assert_eq!(cache.get("vp0000000003e8").map(|&(rx, tx, _)| (rx, tx)), Some((1_000, 2_000)));
+        assert!(cache.contains_key("vp00000000044b")); // i = 1099
+        // The oldest 100 were evicted.
+        assert!(!cache.contains_key("vp000000000000")); // i = 0
+        assert!(!cache.contains_key("vp000000000063")); // i = 99
+        // Re-writing an entry refreshes it, so a live polled server survives
+        // and pushes the current oldest (i = 100) out instead.
+        cache_net_usage(&mut cache, "vp000000000000".to_string(), (7, 8), cap);
+        assert_eq!(cache.len(), cap);
+        assert!(cache.contains_key("vp000000000000"));
+        assert!(!cache.contains_key("vp000000000064")); // i = 100, now oldest
+        // Evicted entries fall back to 0 on a later miss (server never seen
+        // again), surviving ones keep their last-known reading.
+        assert_eq!(cache.get("vp0000000003e8").map(|&(rx, tx, _)| (rx, tx)), Some((1_000, 2_000)));
     }
     #[test]
     fn sanitize_keeps_ascii_identifiers() {
@@ -1787,5 +2040,86 @@ mod tests {
         let path = cgroup.path().to_path_buf();
         cgroup.remove();
         assert!(!path.exists(), "removed cgroup must be gone");
+    }
+
+    /// The Data Lab bind must mount the panel-owned `datalab_root/<uuid>`
+    /// tree read-write at `/data/.voltp/databases` and advertise it through
+    /// `VOLTP_DATALAB_DIR` — never a path under the workload-owned root.
+    #[test]
+    fn datalab_bind_uses_panel_root_and_private_mount_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let datalab_root = temp.path().join("datalab");
+        let mut command = Command::new("bwrap");
+        append_datalab_bind(&mut command, &datalab_root, "srv-uuid", 1234, 1234).unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        // bwrap spells the bind as `--bind <src> <dest>`; check the whole
+        // triple so the source (panel-owned datalab root + uuid) and the
+        // destination (the private mount path) are both verified.
+        let src = datalab_root.join("srv-uuid").to_string_lossy().to_string();
+        let triples: Vec<(String, String, String)> = args
+            .windows(3)
+            .map(|w| (w[0].clone(), w[1].clone(), w[2].clone()))
+            .collect();
+        assert!(triples.contains(&("--bind".into(), src.clone(), DATALAB_MOUNT_DIR.into())));
+        // The mount is advertised to the workload through the env var.
+        let pairs: Vec<(String, String)> = args
+            .windows(2)
+            .map(|w| (w[0].clone(), w[1].clone()))
+            .collect();
+        assert!(pairs.contains(&("--setenv".into(), DATALAB_ENV_VAR.into())));
+        // The source directory is created (chowned to the workload UID only
+        // as root, which this test usually is not).
+        assert!(datalab_root.join("srv-uuid").is_dir());
+    }
+
+    /// End-to-end: inside a real sandbox the Data Lab bind must be writable
+    /// by the workload and land files in the panel-owned `datalab_root/<uuid>`
+    /// directory, while the host filesystem stays invisible.
+    #[test]
+    fn datalab_bind_mounts_panel_directory_into_sandbox() {
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("server-a");
+        let datalab_root = temp.path().join("datalab");
+        prepare_root(&root, "datalab-mount-test").unwrap();
+        own_tree(&root, "datalab-mount-test").unwrap();
+        let limits = Limits {
+            memory_bytes: 64 * 1_048_576,
+            cpu_percent: 25,
+            pids_max: 32,
+        };
+        let startup = format!(
+            "touch {DATALAB_MOUNT_DIR}/probe && test -w {DATALAB_MOUNT_DIR} && echo MOUNT_OK"
+        );
+        let mut command = sandbox_command_with_datalab(
+            &IsolationConfig::default(),
+            &root,
+            "datalab-mount-test",
+            &startup,
+            &limits,
+            &datalab_root,
+        )
+        .unwrap();
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = command.spawn().unwrap();
+        let lease = NetworkLease::configure(child.id(), "datalab-mount-test", &[], 0).unwrap();
+        let output = child.wait_with_output().unwrap();
+        drop(lease);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "sandboxed payload failed: {out} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(out.contains("MOUNT_OK"), "payload output: {out}");
+        // The file created through the mount landed in the panel-owned dir.
+        assert!(datalab_root.join("datalab-mount-test").join("probe").exists());
     }
 }
