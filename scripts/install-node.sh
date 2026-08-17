@@ -13,7 +13,7 @@ else
   source "$TMP_COMMON"
 fi
 
-PANEL_URL=""; TOKEN=""; PUBLIC_URL=""; DOMAIN=""; IP_ADDRESS=""; EMAIL=""; TLS_MODE=""; CF_CERT=""; CF_KEY=""; PORT=8081; PORT_SET=0; LISTEN=""; DATA_DIR=/var/lib/voltd; CONFIG_DIR=/etc/voltpanel-node; ALLOW_HTTP=0; INTERACTIVE=auto
+PANEL_URL=""; TOKEN=${VOLTD_TOKEN:-}; PUBLIC_URL=""; DOMAIN=""; IP_ADDRESS=""; EMAIL=""; TLS_MODE=""; CF_CERT=""; CF_KEY=""; PORT=8081; PORT_SET=0; LISTEN=""; DATA_DIR=/var/lib/voltd; CONFIG_DIR=/etc/voltpanel-node; ALLOW_HTTP=0; OUTBOUND_ONLY=0; ENABLE_ADMIN_TERMINAL=0; INTERACTIVE=auto
 ARG_COUNT=$#
 while (($#)); do
   case "$1" in
@@ -30,6 +30,8 @@ while (($#)); do
     --listen) LISTEN=${2:?}; shift 2;;
     --data-dir) DATA_DIR=${2:?}; shift 2;;
     --allow-http) ALLOW_HTTP=1; shift;;
+    --outbound-only) OUTBOUND_ONLY=1; shift;;
+    --enable-admin-terminal) ENABLE_ADMIN_TERMINAL=1; shift;;
     --no-caddy) TLS_MODE=none; shift;;
     --non-interactive) INTERACTIVE=0; shift;;
     --version) VOLTPANEL_VERSION=${2:?}; shift 2;;
@@ -40,6 +42,8 @@ VoltPanel execution agent installer
 Usage: sudo ./install-node.sh [options]
   --panel URL                 Panel URL
   --token TOKEN               One-time enrollment token
+  --outbound-only              Outbound command channel only; no public node endpoint
+  --enable-admin-terminal      Allow audited root troubleshooting commands from panel admins
   --domain agent.example.com  Public node domain
   --tls MODE                  caddy, certbot, certbot-ip, cloudflare, or none
   --ip-address IP             Public IPv4 or IPv6 for certbot-ip
@@ -67,6 +71,23 @@ EOF
     *) die "Unknown argument: $1";;
   esac
 done
+if [[ -n "$PANEL_URL" && "$DRY_RUN" != 1 ]]; then
+  PANEL_META=$(curl -fsSL --connect-timeout 15 "${PANEL_URL%/}/api/meta") \
+    || die "Cannot read panel capability manifest"
+  PANEL_VERSION=$(printf '%s' "$PANEL_META" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+  [[ -n "$PANEL_VERSION" ]] || die "Panel returned invalid metadata JSON"
+  if [[ "$OUTBOUND_ONLY" == 1 ]]; then
+    printf '%s' "$PANEL_META" | grep -Eq '"outbound_channel"[[:space:]]*:[[:space:]]*true' \
+      || die "Panel does not advertise outbound node channels"
+    if [[ "$ENABLE_ADMIN_TERMINAL" == 1 ]]; then
+      printf '%s' "$PANEL_META" | grep -Eq '"admin_terminal"[[:space:]]*:[[:space:]]*true' \
+        || die "Panel does not support the admin terminal protocol"
+    fi
+  fi
+  if [[ "${VOLTPANEL_VERSION:-latest}" == latest ]]; then
+    VOLTPANEL_VERSION="v${PANEL_VERSION#v}"
+  fi
+fi
 export VOLTPANEL_VERSION
 resolve_release_tag
 refresh_raw_base
@@ -104,6 +125,11 @@ if [[ "$INTERACTIVE" == 1 ]]; then
   tui_pause
 fi
 
+if [[ "$OUTBOUND_ONLY" == 1 ]]; then
+  TLS_MODE=none
+  LISTEN=127.0.0.1:8081
+  PUBLIC_URL=""
+fi
 TLS_MODE=${TLS_MODE:-$([[ -n "$DOMAIN" ]] && printf caddy || printf none)}
 case "$TLS_MODE" in caddy|certbot|certbot-ip|cloudflare|none) ;; *) die "Invalid --tls mode: $TLS_MODE";; esac
 [[ "$TLS_MODE" == none || "$TLS_MODE" == certbot-ip || -n "$DOMAIN" ]] || die "--domain is required for TLS mode $TLS_MODE"
@@ -121,6 +147,10 @@ validate_url "$PANEL_URL"
 [[ "$TLS_MODE" != cloudflare || -r "$CF_CERT" ]] || die "Cloudflare Origin Certificate not readable: $CF_CERT"
 [[ "$TLS_MODE" != cloudflare || -r "$CF_KEY" ]] || die "Cloudflare Origin private key not readable: $CF_KEY"
 
+if [[ "$OUTBOUND_ONLY" == 1 ]]; then
+  [[ "$PANEL_URL" == https://* || "$PANEL_URL" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost)([:/]|$) ]] \
+    || die "Outbound-only agent enrollment requires an HTTPS panel URL"
+fi
 # Plaintext enrollment is refused by the panel: the enrollment endpoint
 # requires positively-TLS transport (403 otherwise) and a presented
 # certificate fingerprint (400 without one), so a plaintext agent cannot
@@ -129,11 +159,10 @@ validate_url "$PANEL_URL"
 # --help), but a plaintext agent still presents no fingerprint of its own, so
 # --tls none remains meaningful only for loopback-local development, and only
 # with --allow-http plus an explicit warning.
-if [[ "$TLS_MODE" == none ]]; then
+if [[ "$TLS_MODE" == none && "$OUTBOUND_ONLY" != 1 ]]; then
   if [[ "$ALLOW_HTTP" != 1 || ! "$PANEL_URL" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost)([:/]|$) ]]; then
-    die "Plaintext enrollment is refused by the panel (403 on plaintext transport, 400 without a presented fingerprint), so --tls none cannot enroll a node. Use a TLS mode (--tls caddy, certbot, certbot-ip, or cloudflare), or run the panel on loopback for local development."
+    die "Plaintext inbound enrollment is only supported for loopback development; use --outbound-only for production agents."
   fi
-  warn "Plaintext enrollment is for loopback-local development only: a real panel refuses plaintext enrollments (403) and enrollments without a presented fingerprint (400). Production nodes must enroll over TLS (--tls caddy, certbot, certbot-ip, or cloudflare); proxy-fronted deployments can additionally seed expected_fingerprint (see --help)."
 fi
 
 if [[ "$TLS_MODE" != none ]]; then
@@ -146,16 +175,8 @@ else
   if [[ -z "$LISTEN" ]]; then
     if [[ "$ALLOW_HTTP" == 1 ]]; then LISTEN="0.0.0.0:$PORT"; else LISTEN="127.0.0.1:$PORT"; fi
   fi
-  if [[ -z "$PUBLIC_URL" ]]; then
-    if [[ "$LISTEN" == 127.0.0.1:* || "$LISTEN" == \[::1\]:* ]]; then
-      PUBLIC_URL="http://127.0.0.1:${LISTEN##*:}"
-    elif [[ "$LISTEN" == \[* ]]; then
-      IP6=$(ip -6 route get 2001:4860:4860::8888 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}') || IP6=""
-      PUBLIC_URL="http://$(host_for_url "${IP6:-::1}"):${LISTEN##*:}"
-    else
-      IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}') || IP=""
-      PUBLIC_URL="http://${IP:-127.0.0.1}:${LISTEN##*:}"
-    fi
+  if [[ -z "$PUBLIC_URL" && "$OUTBOUND_ONLY" != 1 ]]; then
+    PUBLIC_URL="http://127.0.0.1:${LISTEN##*:}"
   fi
 fi
 if [[ "$TLS_MODE" == none && "$LISTEN" != 127.0.0.1:* && "$LISTEN" != \[::1\]:* ]]; then
@@ -167,7 +188,8 @@ fi
 if [[ "$TLS_MODE" != none && "$LISTEN" != 127.0.0.1:* && "$LISTEN" != \[::1\]:* ]]; then
   die "TLS proxy origin must listen on loopback (127.0.0.1 or [::1])"
 fi
-validate_url "$PUBLIC_URL"
+[[ "$OUTBOUND_ONLY" == 1 || -n "$PUBLIC_URL" ]] || die "node public URL is required outside outbound-only mode"
+[[ "$OUTBOUND_ONLY" == 1 ]] || validate_url "$PUBLIC_URL"
 
 if [[ "$PANEL_URL" != https://* && "$ALLOW_HTTP" != 1 ]]; then
   if [[ "$PANEL_URL" =~ ^http://(127\.0\.0\.1|\[::1\]|localhost)([:/]|$) ]]; then :; else
@@ -176,7 +198,26 @@ if [[ "$PANEL_URL" != https://* && "$ALLOW_HTTP" != 1 ]]; then
 fi
 
 install_packages
-install_binary voltd
+if [[ "$OUTBOUND_ONLY" == 1 && "$DRY_RUN" != 1 ]]; then
+  PANEL_AGENT=$(mktemp)
+  PANEL_HEADERS=$(mktemp)
+  ARCH_HEADER=$(arch_asset)
+  curl -fsSL --connect-timeout 15 -D "$PANEL_HEADERS" \
+    -H "x-volt-enrollment-token: $TOKEN" -H "x-volt-arch: $ARCH_HEADER" \
+    "${PANEL_URL%/}/api/system/agent-binary" -o "$PANEL_AGENT" \
+    || { rm -f "$PANEL_AGENT" "$PANEL_HEADERS"; die "Compatible agent download from panel failed"; }
+  EXPECTED=$(sed -n 's/^x-volt-sha256:[[:space:]]*//Ip' "$PANEL_HEADERS" | tr -d '\r' | head -n1)
+  ACTUAL=$(sha256sum "$PANEL_AGENT" | awk '{print $1}')
+  [[ -n "$EXPECTED" && "$ACTUAL" == "$EXPECTED" ]] \
+    || { rm -f "$PANEL_AGENT" "$PANEL_HEADERS"; die "Panel agent checksum mismatch"; }
+  chmod 0755 "$PANEL_AGENT"
+  OUTPUT=$(timeout 5 "$PANEL_AGENT" --version) || die "Panel agent binary failed its identity check"
+  [[ "$OUTPUT" == voltd\ * ]] || die "Panel returned an incompatible agent binary"
+  run install -m0755 "$PANEL_AGENT" /usr/local/bin/voltd
+  rm -f "$PANEL_AGENT" "$PANEL_HEADERS"
+else
+  install_binary voltd
+fi
 run install -d -m 0700 "$DATA_DIR" "$DATA_DIR/servers" "$DATA_DIR/logs" "$DATA_DIR/meta" "$CONFIG_DIR"
 
 ROLLBACK_ENABLED=0
@@ -197,7 +238,8 @@ rollback_node() {
 # so it never appears in argv (process listings, audit logs), only in the
 # child's environment. `voltd join` accepts the env fallback when argv has no
 # token (src/bin/voltd.rs).
-JOIN_ARGS=(join "$PANEL_URL" --public-url "$PUBLIC_URL" --listen "$LISTEN" --data "$DATA_DIR" --config "$CONFIG_DIR/voltd.toml" --no-start)
+JOIN_ARGS=(join "$PANEL_URL" --public-url "$PUBLIC_URL" --listen "$LISTEN" --data "$DATA_DIR" --config "$CONFIG_DIR/voltd.toml" --no-start --plaintext)
+[[ "$ENABLE_ADMIN_TERMINAL" == 1 ]] && JOIN_ARGS+=(--enable-admin-terminal)
 # --plaintext is passed only when the agent itself will serve plaintext. The
 # agent serves plaintext whenever it terminates no TLS of its own — which is
 # every mode this installer supports: --tls none binds raw http, and the
@@ -205,14 +247,13 @@ JOIN_ARGS=(join "$PANEL_URL" --public-url "$PUBLIC_URL" --listen "$LISTEN" --dat
 # loopback http origin behind the TLS-terminating proxy (the proxy templates
 # dial http://). A future direct-TLS mode (the agent terminates TLS itself)
 # must NOT pass --plaintext.
-case "$TLS_MODE" in
-  none|caddy|certbot|certbot-ip|cloudflare) JOIN_ARGS+=(--plaintext) ;;
-esac
+if [[ "$OUTBOUND_ONLY" != 1 ]]; then
+  case "$TLS_MODE" in none|caddy|certbot|certbot-ip|cloudflare) JOIN_ARGS+=(--plaintext) ;; esac
+fi
 [[ "$ALLOW_HTTP" == 1 ]] && JOIN_ARGS+=(--allow-http)
 trap 'rollback_node' EXIT
 if [[ "$DRY_RUN" == 1 ]]; then
-  http_opt=""; [[ "$ALLOW_HTTP" == 1 ]] && http_opt=" --allow-http"
-  log "[dry-run] enroll: VOLTD_TOKEN=<redacted> /usr/local/bin/voltd join $PANEL_URL --public-url $PUBLIC_URL --listen $LISTEN --data $DATA_DIR --config $CONFIG_DIR/voltd.toml --no-start --plaintext$http_opt"
+  log "[dry-run] enroll: VOLTD_TOKEN=<redacted> /usr/local/bin/voltd ${JOIN_ARGS[*]}"
   log "[dry-run] validate $CONFIG_DIR/voltd.toml with voltd"
 else
   VOLTD_TOKEN="$TOKEN" /usr/local/bin/voltd "${JOIN_ARGS[@]}"
@@ -272,6 +313,14 @@ elif [[ "$DRY_RUN" == 1 ]]; then log "[dry-run] install common.sh -> /usr/share/
 else run install -d -m 0755 /usr/share/voltpanel-node; curl -fsSL "$VOLTPANEL_RAW/scripts/lib/common.sh" -o /usr/share/voltpanel-node/common.sh; chmod 0644 /usr/share/voltpanel-node/common.sh
 fi
 
+if [[ "$OUTBOUND_ONLY" == 1 ]]; then
+  cleanup_proxy_artifacts node
+  systemctl_reload_start voltd true
+  ROLLBACK_ENABLED=0
+  ok "VoltPanel outbound-only node installed and enrolled"
+  printf '\n  Panel: %s\n  Identity: outbound command channel\n  Config: %s/voltd.toml\n  Data: %s\n\n' "$PANEL_URL" "$CONFIG_DIR" "$DATA_DIR"
+  exit 0
+fi
 UPSTREAM=$(proxy_upstream "$LISTEN")
 cleanup_proxy_artifacts node
 case "$TLS_MODE" in
