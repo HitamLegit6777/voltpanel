@@ -315,7 +315,7 @@ fi
 
 if [[ "$OUTBOUND_ONLY" == 1 ]]; then
   cleanup_proxy_artifacts node
-  systemctl_reload_start voltd true
+  systemctl_reload_start voltd
   ROLLBACK_ENABLED=0
   ok "VoltPanel outbound-only node installed and enrolled"
   printf '\n  Panel: %s\n  Identity: outbound command channel\n  Config: %s/voltd.toml\n  Data: %s\n\n' "$PANEL_URL" "$CONFIG_DIR" "$DATA_DIR"
