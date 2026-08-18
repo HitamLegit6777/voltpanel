@@ -11,16 +11,21 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use base64::Engine;
+use futures::{SinkExt, StreamExt};
+use http_body_util::BodyExt;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as WsMessage};
+use tower::ServiceExt;
 use tracing_subscriber::EnvFilter;
 use voltpanel::node_daemon::{DaemonConfig, DaemonRuntime};
 use voltpanel::node_protocol::{
-    self, ConsoleCommand, ConsoleSnapshot, FileOperation, FileWriteRequest, NodeApiResponse,
-    NodeHeartbeat, PowerAction, PowerRequest, SignedHeaders,
+    self, AgentUpdateManifest, ChannelRequest, ChannelResponse, ConsoleCommand, ConsoleSnapshot,
+    FileOperation, FileWriteRequest, NodeApiResponse, NodeHeartbeat, NodeTerminalRequest,
+    NodeTerminalResponse, PowerAction, PowerRequest, SignedHeaders,
 };
 
 /// Panel-side correlation header (mirrors `services/node.rs`); not part of
@@ -111,10 +116,7 @@ impl NonceStore {
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => tracing::warn!(
-                    "cannot read replay watermark {}: {e}",
-                    path.display()
-                ),
+                Err(e) => tracing::warn!("cannot read replay watermark {}: {e}", path.display()),
             }
         }
         Self {
@@ -218,11 +220,8 @@ impl NonceStore {
                 .map(|e| (e.key().clone(), *e.value()))
                 .collect();
             entries.sort_unstable_by_key(|(_, ts)| *ts);
-            let keep: std::collections::HashSet<_> = entries
-                .into_iter()
-                .skip(retire)
-                .map(|(k, _)| k)
-                .collect();
+            let keep: std::collections::HashSet<_> =
+                entries.into_iter().skip(retire).map(|(k, _)| k).collect();
             self.seen.retain(|k, _| keep.contains(k));
         }
         self.compacting.store(false, Ordering::Release);
@@ -371,11 +370,14 @@ fn panel_client(panel_fingerprint: &str, timeout_secs: u64) -> Result<reqwest::C
     Ok(builder.use_preconfigured_tls((*cfg).clone()).build()?)
 }
 
-/// Resolve the enrollment token: the explicit argv argument wins; the
-/// VOLTD_TOKEN environment variable is the fallback so the token never
-/// shows up in process listings when enrollment is scripted.
+/// Resolve the enrollment token without mistaking the first option for a
+/// positional token. The explicit positional form is only valid immediately
+/// after the panel URL; otherwise the environment fallback is used.
 fn enrollment_token(args: &[String], env: Option<String>) -> Option<String> {
-    args.get(1).cloned().or(env)
+    args.get(1)
+        .filter(|value| !value.starts_with('-'))
+        .cloned()
+        .or(env)
 }
 
 async fn join(args: &[String]) -> Result<()> {
@@ -404,39 +406,18 @@ async fn join(args: &[String]) -> Result<()> {
     }
     let token = enrollment_token(args, std::env::var("VOLTD_TOKEN").ok())
         .context("missing enrollment token")?;
-    let plaintext = args.iter().any(|v| v == "--plaintext");
-    // A plaintext agent API defaults to loopback-only; exposing it on every
-    // interface is a deliberate choice that needs the same explicit
-    // `--allow-http` opt-in as plaintext enrollment.
-    let listen = option(args, "--listen").unwrap_or_else(|| {
-        if plaintext {
-            "127.0.0.1:8081".into()
-        } else {
-            "0.0.0.0:8081".into()
-        }
-    });
-    let listen_addr: SocketAddr = listen.parse().context("invalid listen address")?;
-    let allow_http_bind = plaintext
-        && !voltpanel::node_daemon::listen_is_loopback(&listen)
-        && args.iter().any(|v| v == "--allow-http");
-    if plaintext
-        && !voltpanel::node_daemon::listen_is_loopback(&listen)
-        && !args.iter().any(|v| v == "--allow-http")
-    {
-        bail!(
-            "refusing to expose the plaintext agent API on non-loopback {listen}; pass --allow-http to opt in explicitly, or use a loopback --listen (e.g. 127.0.0.1:8081)"
-        );
-    }
+    // The agent is outbound-only: it never binds a public API or presents an
+    // endpoint certificate. Legacy flags remain parseable in stored configs,
+    // but enrollment always advertises the empty outbound endpoint identity.
+    let plaintext = true;
+    let listen = "127.0.0.1:8081".to_string();
+    let allow_http_bind = false;
     let data_dir = option(args, "--data")
         .map(PathBuf::from)
         .or_else(|| dirs_home().map(|p| p.join(".local/share/voltd")))
         .context("cannot determine data directory")?;
     let config_path = config_arg(args)?;
-    let public_url = option(args, "--public-url").unwrap_or_else(|| {
-        let host = local_ip().unwrap_or_else(|| "127.0.0.1".into());
-        format!("http://{host}:{}", listen_addr.port())
-    });
-
+    let public_url = String::new();
     let panel_fingerprint = option(args, "--panel-fingerprint")
         .map(|f| voltpanel::tls::normalize_fingerprint(&f))
         .unwrap_or_default();
@@ -444,23 +425,16 @@ async fn join(args: &[String]) -> Result<()> {
         listen: listen.clone(),
         data_dir: data_dir.clone(),
         panel_url: panel_url.clone(),
-        public_url: public_url.clone(),
+        public_url: String::new(),
         node_id: String::new(),
         secret: String::new(),
         heartbeat_interval_secs: 15,
         max_upload_mb: 256,
         plaintext,
         allow_http_bind,
+        admin_terminal: args.iter().any(|value| value == "--enable-admin-terminal"),
         panel_fingerprint: panel_fingerprint.clone(),
     })?);
-    // The enrollment heartbeat already carries the certificate fingerprint
-    // (`heartbeat_value` mints the material on the agent's tls dir, the same
-    // material `serve` reuses), so the panel pins it in one round trip without
-    // a second, duplicative envelope field. Fail fast if a TLS agent could not
-    // mint its certificate: enrolling unpinned would only fail at `serve`.
-    if !plaintext && heartbeat.tls_fingerprint.is_empty() {
-        bail!("failed to mint node certificate; cannot enroll without a TLS fingerprint");
-    }
     let client = panel_client(&panel_fingerprint, 20)?;
     let response = client
         .post(format!("{panel_url}/api/node/enroll"))
@@ -500,13 +474,13 @@ async fn join(args: &[String]) -> Result<()> {
         max_upload_mb: 256,
         plaintext,
         allow_http_bind,
+        admin_terminal: args.iter().any(|value| value == "--enable-admin-terminal"),
         panel_fingerprint,
     };
     config.save(&config_path)?;
     println!(
-        "Node enrolled successfully.\n  config: {}\n  public URL: {}\n  node id: {}",
+        "Node enrolled successfully.\n  config: {}\n  mode: outbound-only\n  node id: {}",
         config_path.display(),
-        public_url,
         config.node_id
     );
     if args.iter().any(|v| v == "--no-start") {
@@ -522,7 +496,6 @@ async fn serve(config_path: PathBuf) -> Result<()> {
     if config.node_id.is_empty() || config.secret.is_empty() {
         bail!("execution agent is not enrolled; run `voltd join`");
     }
-    let address: SocketAddr = config.listen.parse().context("invalid listen address")?;
     if config.plaintext
         && !voltpanel::node_daemon::listen_is_loopback(&config.listen)
         && !config.allow_http_bind
@@ -538,6 +511,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         .saturating_mul(2)
         .min(usize::MAX as u64) as usize;
     let runtime = DaemonRuntime::new(config)?;
+    recover_agent_update(&runtime.config.data_dir)?;
     let nonces = Arc::new(NonceStore::new(Some(
         runtime.config.data_dir.join("replay-watermark.json"),
     )));
@@ -569,6 +543,7 @@ async fn serve(config_path: PathBuf) -> Result<()> {
         .route("/v1/servers/:uuid/power", post(power))
         .route("/v1/servers/:uuid/stats", get(stats))
         .route("/v1/servers/:uuid/command", post(command))
+        .route("/v1/servers/:uuid/install", post(install))
         .route("/v1/servers/:uuid/files/operation", post(file_operation))
         .route("/v1/servers/:uuid/console", get(console))
         .route("/v1/servers/:uuid/files", get(files))
@@ -581,42 +556,18 @@ async fn serve(config_path: PathBuf) -> Result<()> {
             get(snapshot).post(restore_snapshot),
         )
         .layer(axum::extract::DefaultBodyLimit::max(max_body))
-        .layer(middleware::from_fn_with_state(state.clone(), sign_responses))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            sign_responses,
+        ))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    if runtime.config.plaintext {
-        tracing::warn!(
-            "voltd {} listening on http://{} (plaintext; only sane behind a trusted reverse proxy)",
-            runtime.config.node_id,
-            address
-        );
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown(runtime))
-            .await?;
-        nonces.persist()?;
-        return Ok(());
-    }
-    let sans = voltpanel::tls::agent_sans(&host_sans(&runtime.config.public_url));
-    let material = voltpanel::tls::ensure_material(&runtime.config.tls_dir(), &sans)?;
-    let server_config = voltpanel::tls::server_config(&material)?;
-    tracing::info!(
-        "voltd {} listening on https://{} (cert fingerprint {})",
-        runtime.config.node_id,
-        address,
-        material.fingerprint
-    );
-    voltpanel::tls::serve_tls(listener, app, server_config, shutdown(runtime)).await?;
+    tokio::spawn(command_channel_loop(runtime.clone(), app.clone()));
+    // No inbound listener: every panel command enters through the authenticated
+    // outbound WebSocket and dispatches into the same Axum router in-process.
+    tracing::info!("voltd {} running outbound-only", runtime.config.node_id);
+    shutdown(runtime).await;
     nonces.persist()?;
     Ok(())
-}
-
-/// Extra SAN entries so a node reached by its public hostname still validates
-/// under the pinned certificate.
-fn host_sans(public_url: &str) -> Vec<String> {
-    url::Url::parse(public_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| vec![h.to_string()]))
-        .unwrap_or_default()
 }
 
 async fn shutdown(runtime: DaemonRuntime) {
@@ -641,7 +592,379 @@ async fn shutdown(runtime: DaemonRuntime) {
     // (stop_command first when configured), wait up to the grace window for
     // them to exit, then force-kill stragglers. PDEATHSIG remains the crash
     // backstop only — a graceful daemon stop must not SIGKILL every tenant.
-    runtime.shutdown_servers(std::time::Duration::from_secs(10)).await;
+    runtime
+        .shutdown_servers(std::time::Duration::from_secs(10))
+        .await;
+}
+fn update_paths(data_dir: &std::path::Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let current = std::env::current_exe()?;
+    let parent = current
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("agent binary has no parent"))?;
+    Ok((
+        parent.join(".voltd.candidate"),
+        parent.join("voltd.stable"),
+        data_dir.join("updates/pending"),
+    ))
+}
+
+fn recover_agent_update(data_dir: &std::path::Path) -> Result<()> {
+    let (_, stable, pending) = update_paths(data_dir)?;
+    if !pending.exists() || !stable.exists() {
+        return Ok(());
+    }
+    let attempts = std::fs::read_to_string(&pending)
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(0);
+    if attempts == 0 {
+        std::fs::write(&pending, b"1")?;
+        return Ok(());
+    }
+    let current = std::env::current_exe()?;
+    let failed = current.with_file_name("voltd.failed");
+    let _ = std::fs::remove_file(&failed);
+    std::fs::rename(&current, &failed)?;
+    std::fs::rename(&stable, &current)?;
+    std::fs::remove_file(&pending)?;
+    tracing::error!("updated agent failed before health confirmation; restored stable binary");
+    std::process::exit(75)
+}
+
+fn rollback_agent(data_dir: &std::path::Path) -> Result<()> {
+    let (_, stable, pending) = update_paths(data_dir)?;
+    if !stable.exists() {
+        bail!("no stable agent binary is available")
+    }
+    let current = std::env::current_exe()?;
+    let failed = current.with_file_name("voltd.rolled-back");
+    let _ = std::fs::remove_file(&failed);
+    std::fs::rename(&current, &failed)?;
+    std::fs::rename(&stable, &current)?;
+    let _ = std::fs::remove_file(pending);
+    std::process::exit(75)
+}
+
+async fn apply_agent_update(runtime: &DaemonRuntime, manifest: AgentUpdateManifest) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    node_protocol::verify_update_manifest(&runtime.config.secret, &manifest)?;
+    if manifest.version == env!("CARGO_PKG_VERSION") {
+        return Ok(());
+    }
+    let url = url::Url::parse(&manifest.url)?;
+    if url.scheme() != "https" {
+        bail!("agent update URL must use HTTPS")
+    }
+    let client = panel_client(&runtime.config.panel_fingerprint, 120)?;
+    let response = client.get(url).send().await?.error_for_status()?;
+    let bytes = response.bytes().await?;
+    if bytes.len() > 128 * 1024 * 1024 {
+        bail!("agent update binary exceeds 128 MiB")
+    }
+    let actual = hex::encode(Sha256::digest(&bytes));
+    if actual != manifest.sha256.to_ascii_lowercase() {
+        bail!("agent update checksum mismatch")
+    }
+    let (candidate, stable, pending) = update_paths(&runtime.config.data_dir)?;
+    std::fs::create_dir_all(candidate.parent().expect("update parent"))?;
+    std::fs::write(&candidate, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let output = tokio::process::Command::new(&candidate)
+        .arg("--version")
+        .output()
+        .await?;
+    let identity = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || identity.trim() != format!("voltd {}", manifest.version) {
+        bail!("agent update identity check failed")
+    }
+    let current = std::env::current_exe()?;
+    std::fs::copy(&current, &stable)?;
+    if let Some(parent) = pending.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&pending, b"0")?;
+    std::fs::rename(&candidate, &current)?;
+    // systemd restarts the process; pending is cleared only after the new
+    // binary reconnects and completes its first health cycle.
+    std::process::exit(75)
+}
+
+async fn command_channel_loop(runtime: DaemonRuntime, app: Router) {
+    let mut delay = std::time::Duration::from_secs(1);
+    loop {
+        let connected_at = std::time::Instant::now();
+        if let Err(error) = command_channel_session(&runtime, app.clone()).await {
+            tracing::warn!("command channel disconnected: {error}");
+        }
+        if connected_at.elapsed() >= std::time::Duration::from_secs(30) {
+            delay = std::time::Duration::from_secs(1);
+        } else {
+            delay = (delay * 2).min(std::time::Duration::from_secs(30));
+        }
+        tokio::time::sleep(delay).await;
+    }
+}
+
+async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+) -> Result<(Vec<u8>, bool)> {
+    use tokio::io::AsyncReadExt;
+    let mut output = Vec::with_capacity(limit.min(8192));
+    let mut buffer = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..read.min(remaining)]);
+        truncated |= read > remaining;
+    }
+    Ok((output, truncated))
+}
+
+async fn execute_terminal_command(body: &[u8]) -> Result<NodeTerminalResponse> {
+    const MAX_OUTPUT: usize = 256 * 1024;
+    let request: NodeTerminalRequest = serde_json::from_slice(body)?;
+    let correlation_id = request.correlation_id.clone();
+    if request.correlation_id.len() != 32
+        || !request
+            .correlation_id
+            .bytes()
+            .all(|value| value.is_ascii_hexdigit())
+    {
+        bail!("terminal correlation_id must be 32 hex characters")
+    }
+    if request.command.trim().is_empty() || request.command.len() > 8192 {
+        bail!("terminal command must contain 1..8192 bytes")
+    }
+    let timeout = std::time::Duration::from_secs(request.timeout_secs.clamp(1, 120));
+    let mut command = tokio::process::Command::new("/bin/bash");
+    command
+        .arg("--noprofile")
+        .arg("--norc")
+        .arg("-c")
+        .arg(&request.command)
+        .env_clear()
+        .env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+        .current_dir("/")
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(command.as_std_mut(), 0);
+    let mut child = command.spawn()?;
+    let child_pid = child.id();
+    let stdout = child.stdout.take().context("terminal stdout unavailable")?;
+    let stderr = child.stderr.take().context("terminal stderr unavailable")?;
+    let stdout_task = tokio::spawn(read_bounded(stdout, MAX_OUTPUT));
+    let stderr_task = tokio::spawn(read_bounded(stderr, MAX_OUTPUT));
+    let timed_out = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => {
+            result?;
+            false
+        }
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                if let Ok(pid) = i32::try_from(pid) {
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                }
+            }
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+            true
+        }
+    };
+    let (stdout, stdout_truncated) = stdout_task.await??;
+    let (stderr, stderr_truncated) = stderr_task.await??;
+    let status = child.try_wait()?;
+    Ok(NodeTerminalResponse {
+        exit_code: status.and_then(|value| value.code()),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: if timed_out && stderr.is_empty() {
+            "command timed out; process group killed".into()
+        } else {
+            String::from_utf8_lossy(&stderr).into_owned()
+        },
+        correlation_id,
+        timed_out,
+        truncated: stdout_truncated || stderr_truncated,
+    })
+}
+
+fn terminal_slots(enabled: bool) -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(if enabled { 2 } else { 0 }))
+}
+
+async fn command_channel_session(runtime: &DaemonRuntime, app: Router) -> Result<()> {
+    let panel = runtime.config.panel_url.trim_end_matches('/');
+    let ws_url = if let Some(rest) = panel.strip_prefix("https://") {
+        format!("wss://{rest}/api/node/channel")
+    } else if let Some(rest) = panel.strip_prefix("http://") {
+        format!("ws://{rest}/api/node/channel")
+    } else {
+        bail!("panel URL must use http or https")
+    };
+    let signed = node_protocol::sign(
+        &runtime.config.secret,
+        "GET",
+        "/api/node/channel",
+        &[],
+        &runtime.config.node_id,
+    )?;
+    let mut request = ws_url.into_client_request()?;
+    for (name, value) in [
+        (node_protocol::NODE_ID_HEADER, signed.node_id.as_str()),
+        (
+            node_protocol::TIMESTAMP_HEADER,
+            &signed.timestamp.to_string(),
+        ),
+        (node_protocol::NONCE_HEADER, signed.nonce.as_str()),
+        (node_protocol::SIGNATURE_HEADER, signed.signature.as_str()),
+    ] {
+        request.headers_mut().insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes())?,
+            axum::http::HeaderValue::from_str(value)?,
+        );
+    }
+    let fingerprint = voltpanel::tls::normalize_fingerprint(&runtime.config.panel_fingerprint);
+    let connector = if fingerprint.is_empty() {
+        None
+    } else {
+        Some(tokio_tungstenite::Connector::Rustls(
+            voltpanel::tls::pinned_client_config(&fingerprint)?,
+        ))
+    };
+    let (socket, _) =
+        tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector).await?;
+    tracing::info!("outbound command channel connected");
+    let (mut sink, mut source) = socket.split();
+    let (_, _, pending) = update_paths(&runtime.config.data_dir)?;
+    if pending.exists() {
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            if let Err(error) = std::fs::remove_file(&pending) {
+                tracing::warn!("failed to confirm healthy agent update: {error}");
+            } else {
+                tracing::info!("agent update confirmed healthy; rollback marker cleared");
+            }
+        });
+    }
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<ChannelResponse>(64);
+    let terminal_slots = terminal_slots(runtime.config.admin_terminal);
+    loop {
+        tokio::select! {
+            response = response_rx.recv() => {
+                let Some(response) = response else { break };
+                sink.send(WsMessage::Text(serde_json::to_string(&response)?)).await?;
+            }
+            message = source.next() => {
+                let Some(message) = message else { break };
+                match message? {
+                    WsMessage::Text(text) => {
+                        let request: ChannelRequest = serde_json::from_str(&text)?;
+                        if request.method == "ROLLBACK" && request.path == "/v1/agent/update" {
+                            rollback_agent(&runtime.config.data_dir)?;
+                        }
+                        if request.method == "UPDATE" && request.path == "/v1/agent/update" {
+                            let body = base64::engine::general_purpose::STANDARD.decode(&request.body_b64)?;
+                            let manifest: AgentUpdateManifest = serde_json::from_slice(&body)?;
+                            apply_agent_update(runtime, manifest).await?;
+                            continue;
+                        }
+                        let tx = response_tx.clone();
+                        if request.method == "TERMINAL" && request.path == "/v1/agent/terminal" {
+                            let permit = terminal_slots.clone().try_acquire_owned();
+                            let Ok(permit) = permit else {
+                                let _ = tx.send(ChannelResponse { id: request.id, status: 429, body_b64: String::new(), error: "too many concurrent terminal commands".into() }).await;
+                                continue;
+                            };
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                let id = request.id;
+                                let response = match base64::engine::general_purpose::STANDARD.decode(&request.body_b64) {
+                                    Ok(body) => match execute_terminal_command(&body).await {
+                                        Ok(value) => ChannelResponse { id, status: 200, body_b64: base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&value).unwrap_or_default()), error: String::new() },
+                                        Err(error) => ChannelResponse { id, status: 400, body_b64: String::new(), error: error.to_string() },
+                                    },
+                                    Err(error) => ChannelResponse { id, status: 400, body_b64: String::new(), error: error.to_string() },
+                                };
+                                let _ = tx.send(response).await;
+                            });
+                            continue;
+                        }
+                        let app = app.clone();
+                        let secret = runtime.config.secret.clone();
+                        let node_id = runtime.config.node_id.clone();
+                        tokio::spawn(async move {
+                            let response = execute_channel_request(app, request, &secret, &node_id).await;
+                            let _ = tx.send(response).await;
+                        });
+                    }
+                    WsMessage::Ping(payload) => sink.send(WsMessage::Pong(payload)).await?,
+                    WsMessage::Close(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    bail!("panel closed command channel")
+}
+async fn execute_channel_request(
+    app: Router,
+    request: ChannelRequest,
+    secret: &str,
+    node_id: &str,
+) -> ChannelResponse {
+    let id = request.id.clone();
+    let result = async {
+        let method = axum::http::Method::from_bytes(request.method.as_bytes())?;
+        let body = base64::engine::general_purpose::STANDARD.decode(&request.body_b64)?;
+        let path = request.path.parse::<axum::http::Uri>()?;
+        let signed =
+            node_protocol::sign(secret, method.as_str(), &path.to_string(), &body, node_id)?;
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(node_protocol::NODE_ID_HEADER, node_id)
+            .header(
+                node_protocol::TIMESTAMP_HEADER,
+                signed.timestamp.to_string(),
+            )
+            .header(node_protocol::NONCE_HEADER, signed.nonce)
+            .header(node_protocol::SIGNATURE_HEADER, signed.signature)
+            .body(Body::from(body))?;
+        let response = app.oneshot(req).await?;
+        let status = response.status().as_u16();
+        let bytes = response.into_body().collect().await?.to_bytes();
+        Ok::<_, anyhow::Error>((status, bytes))
+    }
+    .await;
+    match result {
+        Ok((status, bytes)) => ChannelResponse {
+            id,
+            status,
+            body_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            error: String::new(),
+        },
+        Err(error) => ChannelResponse {
+            id,
+            status: 500,
+            body_b64: String::new(),
+            error: error.to_string(),
+        },
+    }
 }
 
 async fn heartbeat_loop(runtime: DaemonRuntime) {
@@ -703,23 +1026,6 @@ async fn heartbeat_loop(runtime: DaemonRuntime) {
 }
 
 fn heartbeat_value(runtime: &DaemonRuntime) -> NodeHeartbeat {
-    // Re-report the agent's certificate fingerprint on every authenticated
-    // heartbeat so the panel can re-pin it when the material rotates.
-    // `ensure_material` is idempotent: it reuses stored material unless the
-    // pair is stale or mismatched, so the fingerprint is stable between
-    // regenerations. Plaintext agents report nothing.
-    let tls_fingerprint = if runtime.config.plaintext {
-        String::new()
-    } else {
-        let sans = voltpanel::tls::agent_sans(&host_sans(&runtime.config.public_url));
-        match voltpanel::tls::ensure_material(&runtime.config.tls_dir(), &sans) {
-            Ok(m) => m.fingerprint,
-            Err(e) => {
-                tracing::warn!("heartbeat fingerprint unavailable: {e}");
-                String::new()
-            }
-        }
-    };
     NodeHeartbeat {
         daemon_version: env!("CARGO_PKG_VERSION").into(),
         hostname: hostname::get()
@@ -730,7 +1036,8 @@ fn heartbeat_value(runtime: &DaemonRuntime) -> NodeHeartbeat {
         arch: std::env::consts::ARCH.into(),
         started_at: runtime.started_at.to_rfc3339(),
         capacity: runtime.capacity(),
-        tls_fingerprint,
+        tls_fingerprint: String::new(),
+        admin_terminal: runtime.config.admin_terminal,
     }
 }
 
@@ -769,8 +1076,6 @@ async fn authenticated(
     {
         return Err(DaemonError::auth("replayed request"));
     }
-    // One line per authenticated request, joinable to the panel's logs via
-    // the sanitized correlation id. Cosmetic: never reject on it.
     let rid = headers
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -811,11 +1116,7 @@ fn h(headers: &HeaderMap, key: &str) -> DResult<String> {
 /// request the panel makes (`sign()` always mints one) and exactly the set the
 /// panel will verify. Requests without a nonce (unauthenticated probes) get
 /// plain unsigned error envelopes, which the panel never parses as its own.
-async fn sign_responses(
-    State(state): State<DaemonState>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn sign_responses(State(state): State<DaemonState>, req: Request, next: Next) -> Response {
     // The raw request URI (path + query, exactly as the panel signed it) and
     // the request method must be echoed into the response canonical string.
     let path = req.uri().to_string();
@@ -953,6 +1254,20 @@ async fn power(
     };
     Ok(Json(NodeApiResponse::success(value)))
 }
+async fn install(
+    State(state): State<DaemonState>,
+    Path(uuid): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> DResult<Json<NodeApiResponse<bool>>> {
+    let path = format!("/v1/servers/{uuid}/install");
+    authenticated(&state, &headers, "POST", &path, &body).await?;
+    let req: voltpanel::node_protocol::InstallRequest = serde_json::from_slice(&body)?;
+    Ok(Json(NodeApiResponse::success(
+        state.runtime.install(&uuid, &req.script)?,
+    )))
+}
+
 async fn stats(
     State(state): State<DaemonState>,
     Path(uuid): Path<String>,
@@ -1057,12 +1372,7 @@ async fn snapshot(
 /// The per-server snapshot lock is held inside the producer thread for the
 /// whole production run, exactly as the buffered path holds it; a concurrent
 /// snapshot/restore on the same node can never interleave with the walk.
-fn stream_snapshot(
-    state: &DaemonState,
-    uuid: &str,
-    path: &str,
-    headers: &HeaderMap,
-) -> Response {
+fn stream_snapshot(state: &DaemonState, uuid: &str, path: &str, headers: &HeaderMap) -> Response {
     let Some(nonce) = headers
         .get(node_protocol::NONCE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -1111,11 +1421,11 @@ fn stream_snapshot(
                         // The hash and signature are complete exactly when the
                         // archive ends; the footer rides as the final body
                         // chunk (see node_protocol::STREAM_FOOTER_LEN).
-                        let _ = sink
-                            .tx
-                            .blocking_send(Ok(Bytes::from(node_protocol::stream_footer(
-                                &signature,
-                            ))));
+                        let _ =
+                            sink.tx
+                                .blocking_send(Ok(Bytes::from(node_protocol::stream_footer(
+                                    &signature,
+                                ))));
                     }
                     Err(error) => {
                         let _ = sink.tx.blocking_send(Err(error));
@@ -1247,7 +1557,6 @@ async fn restore_snapshot_streaming(
     }
 }
 
-
 /// `Write` adapter that forwards the gzip archive to the response-body channel
 /// in bounded chunks (64 KiB). The producer thread writes through this; the
 /// async side wraps the channel receiver in a `Body`.
@@ -1357,19 +1666,16 @@ async fn write_file(
     )))
 }
 
-fn local_ip() -> Option<String> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("1.1.1.1:80").ok()?;
-    Some(socket.local_addr().ok()?.ip().to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn enrollment_token_prefers_argv_over_env() {
-        let with_argv = vec!["https://panel.example".to_string(), "argv-token".to_string()];
+        let with_argv = vec![
+            "https://panel.example".to_string(),
+            "argv-token".to_string(),
+        ];
         assert_eq!(
             enrollment_token(&with_argv, Some("env-token".to_string())).as_deref(),
             Some("argv-token"),
@@ -1382,6 +1688,16 @@ mod tests {
             "the environment fallback must kick in when argv has no token"
         );
         assert_eq!(enrollment_token(&bare, None), None);
+        let options_only = vec![
+            "https://panel.example".to_string(),
+            "--public-url".to_string(),
+            String::new(),
+        ];
+        assert_eq!(
+            enrollment_token(&options_only, Some("env-token".to_string())).as_deref(),
+            Some("env-token"),
+            "join options must not be mistaken for a positional token"
+        );
     }
 
     #[test]
@@ -1483,14 +1799,144 @@ mod tests {
         let s = NonceStore::new(None);
         let now = 1_000_000;
         assert!(!s.check_and_insert("node", "n1", now, now));
-        // Same-second concurrent request: ts == watermark, inside the grace.
         assert!(!s.check_and_insert("node", "n2", now, now + 1));
-        // Older than the grace window: treated as a pre-restart replay.
-        assert!(s.check_and_insert(
-            "node",
-            "n3",
-            now - REPLAY_WATERMARK_GRACE_SECS - 1,
-            now + 2
-        ));
+        assert!(s.check_and_insert("node", "n3", now - REPLAY_WATERMARK_GRACE_SECS - 1, now + 2));
+    }
+
+    fn terminal_request(command: &str, timeout_secs: u64) -> Vec<u8> {
+        serde_json::to_vec(&NodeTerminalRequest {
+            correlation_id: "0123456789abcdef0123456789abcdef".into(),
+            command: command.into(),
+            timeout_secs,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn troubleshooting_terminal_captures_output_and_exit() {
+        let response = execute_terminal_command(&terminal_request(
+            "printf stdout; printf stderr >&2; exit 7",
+            5,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.exit_code, Some(7));
+        assert_eq!(response.stdout, "stdout");
+        assert_eq!(response.stderr, "stderr");
+        assert_eq!(response.correlation_id, "0123456789abcdef0123456789abcdef");
+        assert!(!response.timed_out);
+        assert!(!response.truncated);
+    }
+
+    #[tokio::test]
+    async fn troubleshooting_terminal_rejects_empty_command() {
+        assert!(execute_terminal_command(&terminal_request("  ", 5))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn troubleshooting_terminal_rejects_bad_correlation() {
+        let body = serde_json::to_vec(&NodeTerminalRequest {
+            correlation_id: "bad".into(),
+            command: "true".into(),
+            timeout_secs: 5,
+        })
+        .unwrap();
+        assert!(execute_terminal_command(&body).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn troubleshooting_terminal_times_out() {
+        let started = std::time::Instant::now();
+        let response = execute_terminal_command(&terminal_request("sleep 5", 1))
+            .await
+            .unwrap();
+        assert!(response.timed_out);
+        assert_eq!(response.exit_code, None);
+        assert!(response.stderr.contains("process group killed"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn troubleshooting_terminal_has_two_concurrent_slots() {
+        let slots = terminal_slots(true);
+        let first = slots.clone().try_acquire_owned().unwrap();
+        let second = slots.clone().try_acquire_owned().unwrap();
+        assert!(slots.clone().try_acquire_owned().is_err());
+        drop(first);
+        assert!(slots.try_acquire_owned().is_ok());
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn troubleshooting_terminal_caps_large_output() {
+        let response = execute_terminal_command(&terminal_request(
+            "head -c 300000 /dev/zero | tr '\\0' x",
+            5,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.stdout.len(), 256 * 1024);
+        assert!(response.truncated);
+        assert!(!response.timed_out);
+    }
+
+    #[tokio::test]
+    async fn troubleshooting_terminal_disabled_has_no_slots() {
+        assert!(terminal_slots(false).try_acquire_owned().is_err());
+    }
+    #[tokio::test]
+    async fn outbound_channel_dispatches_without_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = DaemonRuntime::new(DaemonConfig {
+            data_dir: dir.path().to_path_buf(),
+            node_id: "11111111-1111-4111-8111-111111111111".into(),
+            secret: "secret-a".into(),
+            ..DaemonConfig::default()
+        })
+        .unwrap();
+        let state = DaemonState {
+            runtime: runtime.clone(),
+            nonces: Arc::new(NonceStore::new(None)),
+        };
+        let app = Router::new()
+            .route("/v1/health", get(health))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                sign_responses,
+            ))
+            .with_state(state);
+        let response = execute_channel_request(
+            app,
+            ChannelRequest {
+                id: "command-1".into(),
+                method: "GET".into(),
+                path: "/v1/health".into(),
+                body_b64: String::new(),
+            },
+            &runtime.config.secret,
+            &runtime.config.node_id,
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(&response.body_b64)
+                    .unwrap()
+            )
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(response.body_b64)
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(
+            body["data"]["node_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
     }
 }
